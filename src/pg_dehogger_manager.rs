@@ -1,67 +1,37 @@
-use std::{cmp::max, collections::HashMap, sync::Mutex};
+use std::{collections::HashMap};
 
 use chrono::{DateTime, Utc};
-use postgres::{Client, NoTls};
-use uuid::Uuid;
-use crate::dehogger::{Dehogger, Pressure, Resources};
+use postgres::{Client};
+use crate::dehogger::{DehoggerManager, Pressure, Resources};
 
-// ========================================
-// === PostgreSQL Dehogger Implementation ===
-// ========================================
 
-// We need to be able to periodically write our presssure to the database.
-// This should also include TTL of the peer. Maybe this is all peer state.
-
-// Then we need to keep track of allocations probably in another table.
-
-// ========================================
-// === Data Structures ===
-// ========================================
-
-pub struct PgDehogger {
+pub struct PgDehoggerManager {
     db: Client,
-    local_state: PgDehoggerPeerState,
     ttl: u64,
 }
 
-#[derive(Debug)]
-struct PgDehoggerPeerState {
-    peer_id: String,
-    pressure: Pressure,
-    target_allocation: Resources,
-    actual_allocation: Resources,
-    usage: Resources,
-}
 
-// ========================================
-// === Peer State Implementation ===
-// ========================================
-
-impl Default for PgDehoggerPeerState {
-    fn default() -> Self {
-        Self {
-            peer_id: Uuid::new_v4().to_string(),
-            pressure: Pressure::default(),
-            target_allocation: Resources::default(),
-            actual_allocation: Resources::default(),
-            usage: Resources::default(),
-        }
+impl DehoggerManager for PgDehoggerManager {
+    fn set_total_resources(&mut self, total_resources: &Resources) -> Result<(),()> {
+        self.set_total_resources(total_resources)
     }
+
+    fn sync(&mut self) -> Result<(),()> {
+        self.renegotiate()?;
+        self.reallocation()?;
+        Ok(())
+    }
+    
+    
 }
 
-// ========================================
-// === Dehogger Implementation ===
-// ========================================
-
-impl PgDehogger {
+impl PgDehoggerManager {
     pub fn new(db: Client, ttl: u64) -> Self {
         let mut s = Self { 
             db, 
-            local_state: PgDehoggerPeerState::default(),
             ttl,
         };
         s.create_tables().unwrap();
-        s.heartbeat().unwrap();
         s
     }
 
@@ -118,26 +88,6 @@ impl PgDehogger {
             ()
         })?;
         Ok(())
-    }
-
-    /// Sync is designed to be called periodically from a thread. It will check if any renogitation is needed and try to
-    /// claim or free resources from the central pool.
-    fn sync(&mut self) -> Result<(),()> {
-
-        // Create this peer in the peers table, and update the last_heartbeat.
-        self.heartbeat()?;
-
-        // Check if remote pressures have changed, and if so trigger a renogiation.
-        self.renegotiate()?;
-
-        // Push our current usage state to the database.
-        self.push_usage_state()?;
-
-        // Check if our target has changed, and if we can transfer resources to/from the central pool.
-        self.reallocation()?;
-
-        Ok(())
-
     }
 
 
@@ -277,47 +227,6 @@ impl PgDehogger {
     }
 
 
-    fn push_usage_state(&mut self) -> Result<(),()> {
-        // set our current local state target allocations (get by peer_id)
-        // any of these self-queries can fail if we got disconnected from the database and wiped out because of TTL.
-        let row = self.db.query_one("SELECT target_allocation, actual_allocation FROM allocations WHERE peer_id = $1", &[&self.local_state.peer_id]).unwrap();
-        self.local_state.target_allocation = serde_json::from_value(row.get(0)).unwrap();
-        self.local_state.actual_allocation = serde_json::from_value(row.get(1)).unwrap();
-
-        // from this moment, our usage cannot increase beyond the new target allocation
-
-        // push our current usage, which is guaranteed to be <= the new target allocation OR <= old usage
-        // the usage table is sometimes locked by the reallocation process, so this can block momentarily.
-        // but we don't prevent the peer from allocating resources in this time.
-        self.push_usage().unwrap();
-
-        // Each peer is responsible for reducing their own allocation
-        for (resource, usage) in self.local_state.usage.iter() {
-            let target_allocation = self.local_state.target_allocation.get(resource).unwrap();
-            if usage > target_allocation {
-                // note this isn't a race condition because usage cannot increase if we are above the target allocation.
-                // the usage can only have decreased since the comparison in the line above this comment.
-                let new_allocation = max(*usage, *target_allocation);
-                self.local_state.actual_allocation.insert(resource.clone(), new_allocation);
-            }
-        }
-
-        // here we are pushing an empty dict
-        
-        self.db.execute(
-            "UPDATE allocations SET actual_allocation = $1 WHERE peer_id = $2",
-            &[&serde_json::to_value(&self.local_state.actual_allocation).unwrap(), &self.local_state.peer_id]
-        ).unwrap();
-
-        // Update the global timestamp only if the new time is newer than current
-        self.db.execute(
-            "UPDATE global_state SET last_usage_update_time = NOW() WHERE last_usage_update_time < NOW()",
-            &[]
-        ).unwrap();
-
-        Ok(())
-    }
-
     fn reallocation(&mut self) -> Result<(),()> {
 
         println!("=== Reallocating ===");
@@ -454,104 +363,13 @@ impl PgDehogger {
 
         Ok(())
     }
-
-    fn push_usage(&mut self) -> Result<(),()> {
-        let usage_json = serde_json::to_value(&self.local_state.usage).unwrap();
-        self.db.execute(
-            "INSERT INTO allocations (peer_id, usage, actual_allocation, target_allocation) VALUES ($1, $2::jsonb, '{}', '{}')
-            ON CONFLICT (peer_id) DO UPDATE SET usage = EXCLUDED.usage",
-            &[&self.local_state.peer_id, &usage_json]
-        ).map_err(|e| {
-            eprintln!("Error pushing usage: {}", e);
-            ()
-        })?;
-
-        // Update global timestamp only if the new time is newer than current
-        let new_time = chrono::Utc::now();
-        let rows_updated = self.db.execute(
-            "UPDATE global_state SET last_usage_update_time = $1 WHERE last_usage_update_time < $1",
-            &[&new_time]
-        ).map_err(|e| {
-            eprintln!("Error updating usage timestamp: {}", e);
-            ()
-        })?;
-
-        if rows_updated > 0 {
-            println!("Updated global usage timestamp to: {:?}", new_time);
-        }
-        Ok(())
-    }
-
-    fn heartbeat(&mut self) -> Result<(),()> {
-        self.db.execute(
-            "INSERT INTO peers (peer_id, last_heartbeat) VALUES ($1, NOW())
-            ON CONFLICT (peer_id) DO UPDATE SET last_heartbeat = NOW()",
-            &[&self.local_state.peer_id]
-        ).map_err(|e| {
-            eprintln!("Error creating peer: {}", e);
-            ()
-        })?;
-        println!("Created/updated peer: {}", self.local_state.peer_id);
-        Ok(())
-    }
-
-
-    fn push_pressure(&mut self) -> Result<(),()> {
-        let pressure_json = serde_json::to_value(&self.local_state.pressure).unwrap();
-        
-        // Always update the pressure
-        self.db.execute(
-            "INSERT INTO pressures (peer_id, pressure) VALUES ($1, $2::jsonb)
-             ON CONFLICT (peer_id) DO UPDATE SET pressure = EXCLUDED.pressure",
-            &[&self.local_state.peer_id, &pressure_json]
-        ).map_err(|e| {
-            eprintln!("Error pushing pressure: {}", e);
-            ()
-        })?;
-        
-        // Use atomic UPDATE for compare-and-store of global timestamp
-        let new_time = chrono::Utc::now();
-        
-        // Update global timestamp only if the new time is newer than current
-        let rows_updated = self.db.execute(
-            "UPDATE global_state SET last_pressure_update_time = $1 WHERE last_pressure_update_time < $1",
-            &[&new_time]
-        ).map_err(|e| {
-            eprintln!("Error updating pressure timestamp: {}", e);
-            ()
-        })?;
-        
-        if rows_updated > 0 {
-            println!("Updated global pressure timestamp to: {:?}", new_time);
-        }
-        
-        Ok(())
-    }
 }
 
-impl Dehogger for PgDehogger {
-    fn set_pressure(&mut self, pressure: &Pressure) -> Result<(),()> {
-        if self.local_state.pressure != *pressure {
-            self.local_state.pressure = pressure.clone();
-            self.push_pressure().unwrap();
-        }
-        Ok(())
-    }
 
-    fn allocate(&mut self, resources: &Resources) -> Result<(),()> {
 
-        todo!()
-    }
 
-    fn free(&mut self, resources: &Resources) {
-        todo!()
-    }
 
-    fn sync(&mut self) -> Result<(),()> {
-        self.sync()?;
-        Ok(())
-    }
-}
+
 
 // ========================================
 // === Tests ===
@@ -561,8 +379,11 @@ impl Dehogger for PgDehogger {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::{dehogger::DehoggerPeer, pg_dehogger_peer::PgDehoggerPeer};
+
     use super::*;
     use testcontainers_modules::{postgres, testcontainers::runners::SyncRunner};
+    use ::postgres::{Client, NoTls};
 
     #[test]
     fn test_pg_dehogger() {
@@ -580,7 +401,7 @@ mod tests {
         let db = Client::connect(&connection_string, NoTls).unwrap();
         println!("Successfully connected to PostgreSQL container");
         
-        let mut dehogger = PgDehogger::new(db, 1);
+        let mut dehogger = PgDehoggerManager::new(db, 1);
 
         let mut total_resources = Resources::new();
         total_resources.insert("cpu".to_string(), 100);
@@ -591,7 +412,9 @@ mod tests {
 
         let pressure = HashMap::from([("cpu".to_string(), 0.5), ("memory".to_string(), 0.5)]);
 
-        dehogger.set_pressure(&pressure).unwrap();
+        let peer1 = PgDehoggerPeer::new(db, "peer1");
+
+        peer1.set_total_resources(&total_resources).unwrap();
 
         // renogiate should show that no renegotiation is needed
         dehogger.renegotiate().unwrap();

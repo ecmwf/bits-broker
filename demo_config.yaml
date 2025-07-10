@@ -1,0 +1,145 @@
+# bits_config.yaml
+
+# Define the job routing rules
+routing:
+  - *match_fast
+  - *match_slow
+  - *match_urgent
+  - *match_admin
+
+# Define reusable actions with anchors (at the bottom)
+actions:
+  &match_fast
+  match:
+    type: "fast_job"
+    then:
+      - *fifo_queue
+        then:
+          - route: "worker-pool-1"
+            mode: "proxy"
+
+  &match_slow
+  match:
+    type: "slow_job"
+    then:
+      - *auth_check
+        then:
+          - *priority_queue
+            then:
+              - route: "worker-pool-2"
+                mode: "redirect"
+
+  &match_urgent
+  match:
+    type: "urgent_job"
+    then:
+      - *add_priority
+        then:
+          - *fifo_queue
+            then:
+              - route: "urgent-worker-pool"
+                mode: "proxy"
+
+  &match_admin
+  match:
+    type: "admin_job"
+    then:
+      - *admin_check
+        then:
+          - *fifo_queue
+            then:
+              - route: "admin-worker-pool"
+                mode: "proxy"
+
+  &fifo_queue
+  queue: "fifo"
+
+  &priority_queue
+  queue: "priority"
+    params:
+      max_age: 3600
+
+  &auth_check
+  rule:
+    name: "auth_check"
+    params:
+      required_role: "user"
+
+  &admin_check
+  rule:
+    name: "admin_check"
+    params:
+      required_role: "admin"
+
+  &add_priority
+  rule:
+    name: "add_priority"
+    params:
+      key: "priority"
+      value: "high" 
+
+queues:
+  auth_service:
+    type: "fifo"
+    capacity: 1000
+    workers: 4
+    
+  forecast_processor:
+    type: "fifo"
+    capacity: 500
+    # External workers poll this queue from LUMI
+    
+  analysis_processor:
+    type: "priority"
+    capacity: 800
+    # External workers from Leonardo
+    
+  bulk_dissemination:
+    type: "fair"
+    capacity: 2000
+
+routes:
+  operational_forecast:
+    - type: "filter"
+      class: "od"
+      stream: "oper"
+      type: "fc"
+    - type: "check"
+      rule: "has_forecast_access"
+    - type: "via"
+      queue: "forecast_processor"
+    - type: "destination"
+      queue: "bulk_dissemination"
+      
+  era5_reanalysis:
+    - type: "filter"
+      class: "ea"
+      stream: "oper"
+      type: "an"
+    - type: "via"
+      queue: "analysis_processor"
+    - type: "destination"
+      queue: "bulk_dissemination"
+      
+  copernicus_climate:
+    - type: "filter"
+      class: "c3"
+    - type: "switch"
+      routes:
+        surface_data:
+          - type: "filter"
+            levtype: "sfc"
+            param: ["2t", "10u", "10v", "tp", "msl"]
+          - type: "destination"
+            url: "https://lumi.csc.fi/ecmwf/surface"
+            method: "POST"
+        pressure_levels:
+          - type: "filter"
+            levtype: "pl"
+          - type: "destination"
+            url: "https://leonardo.cineca.it/ecmwf/pressure"
+            method: "POST"
+        
+  default_route:
+    - type: "destination"
+      queue: "bulk_dissemination" 

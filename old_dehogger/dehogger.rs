@@ -4,18 +4,23 @@ pub type Pressure = HashMap<String, f64>;
 pub type Resources = HashMap<String, i64>;
 
 
+pub enum DehoggerPeerError {
+    FatalError(String),
+    TemporaryError(String),
+}
+
 pub trait DehoggerPeer {
 
     /// Set the pressure on the peer. This is used to balance resources between peers. This is used to balance resources between peers.
-    fn set_pressure(&mut self, pressure: &Pressure) -> Result<(),()>;
+    fn set_pressure(&mut self, pressure: &Pressure) -> Result<(), DehoggerPeerError>;
 
     /// Try to allocate from the allocated resources.
-    fn allocate(&mut self, request: &Resources) -> Result<(),()>;
+    fn allocate(&mut self, request: &Resources) -> Result<bool, DehoggerPeerError>;
 
     /// Free the allocated resources.
     fn free(&mut self, resources: &Resources);
 
-    fn sync(&mut self) -> Result<(),()>;
+    fn sync(&mut self) -> Result<(), DehoggerPeerError>;
 }
 
 pub trait DehoggerManager {

@@ -49,24 +49,24 @@ impl PgDehoggerManager {
                 FOREIGN KEY (peer_id) REFERENCES peers(peer_id) ON DELETE CASCADE
             );
             
-            CREATE TABLE IF NOT EXISTS allocations (
+            CREATE TABLE IF NOT EXISTS reservations (
                 peer_id TEXT,
-                target_allocation JSONB NOT NULL,
-                actual_allocation JSONB NOT NULL,
-                usage JSONB NOT NULL,
+                target_reservation JSONB NOT NULL,
+                reservation JSONB NOT NULL,
+                allocation JSONB NOT NULL,
                 PRIMARY KEY (peer_id),
                 FOREIGN KEY (peer_id) REFERENCES peers(peer_id) ON DELETE CASCADE
             );
             
             CREATE TABLE IF NOT EXISTS global_state (
                 id INTEGER PRIMARY KEY DEFAULT 1,
-                last_allocation_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                last_reservation_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                 last_renegotiation_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                 last_pressure_update_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-                last_usage_update_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                last_allocation_update_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                 total_resources JSONB NOT NULL
             );
-            INSERT INTO global_state (id, last_renegotiation_time, last_pressure_update_time, last_usage_update_time, total_resources) VALUES (1, NOW(), NOW(), NOW(), '{}') ON CONFLICT (id) DO NOTHING;
+            INSERT INTO global_state (id, last_renegotiation_time, last_pressure_update_time, last_allocation_update_time, total_resources) VALUES (1, NOW(), NOW(), NOW(), '{}') ON CONFLICT (id) DO NOTHING;
             "
         ).map_err(|e| {
             eprintln!("Error creating tables: {}", e);
@@ -92,6 +92,8 @@ impl PgDehoggerManager {
 
 
     fn renegotiate(&mut self) -> Result<(),()> {
+
+        // What is the timestamp?
 
         println!("=== Renegotiating ===");
         
@@ -204,8 +206,8 @@ impl PgDehoggerManager {
             for (peer_id, target_allocation) in target_allocations {
                 let target_json = serde_json::to_value(&target_allocation).unwrap();
                 transaction.execute(
-                    "INSERT INTO allocations (peer_id, target_allocation, actual_allocation, usage) VALUES ($1, $2, '{}', '{}')
-                     ON CONFLICT (peer_id) DO UPDATE SET target_allocation = $2",
+                    "INSERT INTO reservations (peer_id, target_reservation, reservation, allocation) VALUES ($1, $2, '{}', '{}')
+                     ON CONFLICT (peer_id) DO UPDATE SET target_reservation = $2",
                     &[&peer_id, &target_json]
                 ).unwrap();
             }
@@ -231,10 +233,15 @@ impl PgDehoggerManager {
 
         println!("=== Reallocating ===");
 
-        // Get the last usage update time, this is the timestamp we are working with.
-        let last_usage_update_time = self.db.query_one("SELECT last_usage_update_time FROM global_state", &[]).unwrap();
-        let last_usage_update_time: DateTime<Utc> = last_usage_update_time.get(0);
-        println!("Last usage update time: {:?}", last_usage_update_time);
+        // TODO
+        // THIS SHOULDNT BE USING THE ALLOCATION TABLE, IT SHOULD BE USING THE RESERVATION TABLE
+        // I think it is, but the timestamps are confusing me.
+        // What is the timestamp?
+
+        // Get the last allocation update time, this is the timestamp we are working with.
+        let last_allocation_update_time = self.db.query_one("SELECT last_allocation_update_time FROM global_state", &[]).unwrap();
+        let last_allocation_update_time: DateTime<Utc> = last_allocation_update_time.get(0);
+        println!("Last allocation update time: {:?}", last_allocation_update_time);
 
         // === Group Allocation ===
 
@@ -242,7 +249,7 @@ impl PgDehoggerManager {
 
 
         // Get the current allocations
-        let actual_allocations = self.db.query("SELECT peer_id, actual_allocation FROM allocations", &[]).unwrap();
+        let actual_allocations = self.db.query("SELECT peer_id, reservation FROM reservations", &[]).unwrap();
         let actual_allocations: HashMap<String, Resources> = actual_allocations.iter().map(|row| {
             let peer_id: String = row.get(0);
             let allocation: Resources = serde_json::from_value(row.get(1)).unwrap();
@@ -251,7 +258,7 @@ impl PgDehoggerManager {
         println!("Actual allocations: {:?}", actual_allocations);
 
         // Get the target allocations
-        let target_allocations = self.db.query("SELECT peer_id, target_allocation FROM allocations", &[]).unwrap();
+        let target_allocations = self.db.query("SELECT peer_id, target_reservation FROM reservations", &[]).unwrap();
         let target_allocations: HashMap<String, Resources> = target_allocations.iter().map(|row| {
             let peer_id: String = row.get(0);
             let allocation: Resources = serde_json::from_value(row.get(1)).unwrap();
@@ -331,11 +338,11 @@ impl PgDehoggerManager {
         }
         println!("New allocations: {:?}", new_allocations);
 
-        // do a transaction, if the stored last_usage_time >= last_allocation_time, then we can update the allocations
+        // do a transaction, if the stored last_allocation_time >= last_reservation_time, then we can update the allocations
         let mut transaction = self.db.transaction().unwrap();
-        let row = transaction.query_one("SELECT last_allocation_time FROM global_state", &[]).unwrap();
-        let last_allocation_time: DateTime<Utc> = row.get(0);
-        if last_usage_update_time <= last_allocation_time {
+        let row = transaction.query_one("SELECT last_reservation_time FROM global_state", &[]).unwrap();
+        let last_reservation_time: DateTime<Utc> = row.get(0);
+        if last_allocation_update_time <= last_reservation_time {
             println!("Another process already updated the allocations, cancel this transaction");
             transaction.rollback().unwrap();
         } else {
@@ -344,16 +351,16 @@ impl PgDehoggerManager {
             for (peer_id, new_allocation) in new_allocations {
                 let new_allocation_json = serde_json::to_value(&new_allocation).unwrap();
                 transaction.execute(
-                    "INSERT INTO allocations (peer_id, actual_allocation, target_allocation, usage) VALUES ($1, $2, '{}', '{}')
-                     ON CONFLICT (peer_id) DO UPDATE SET actual_allocation = $2",
+                    "INSERT INTO reservations (peer_id, reservation, target_reservation, allocation) VALUES ($1, $2, '{}', '{}')
+                     ON CONFLICT (peer_id) DO UPDATE SET reservation = $2",
                     &[&peer_id, &new_allocation_json]
                 ).unwrap();
             }
 
-            // Update the last_allocation_time
+            // Update the last_reservation_time
             transaction.execute(
-                "UPDATE global_state SET last_allocation_time = $1",
-                &[&last_usage_update_time]
+                "UPDATE global_state SET last_reservation_time = $1",
+                &[&last_allocation_update_time]
             ).unwrap();
             
             // Commit the transaction   
@@ -412,9 +419,8 @@ mod tests {
 
         let pressure = HashMap::from([("cpu".to_string(), 0.5), ("memory".to_string(), 0.5)]);
 
-        let peer1 = PgDehoggerPeer::new(db, "peer1");
-
-        peer1.set_total_resources(&total_resources).unwrap();
+        let db2 = Client::connect(&connection_string, NoTls).unwrap();
+        let mut peer1 = PgDehoggerPeer::new(db2, "peer1".to_string());
 
         // renogiate should show that no renegotiation is needed
         dehogger.renegotiate().unwrap();
@@ -440,7 +446,7 @@ mod tests {
         );
 
         let db1 = Client::connect(&connection_string, NoTls).unwrap();
-        let mut dehogger = PgDehogger::new(db1, 1);
+        let mut dehogger = PgDehoggerManager::new(db1, 1);
 
         let mut total_resources = Resources::new();
         total_resources.insert("cpu".to_string(), 100);
@@ -448,12 +454,12 @@ mod tests {
         dehogger.set_total_resources(&total_resources).unwrap();
 
         let db2 = Client::connect(&connection_string, NoTls).unwrap();
-        let mut dehogger2 = PgDehogger::new(db2, 1);
+        let mut dehogger2 = PgDehoggerManager::new(db2, 1);
 
         let pressure1 = HashMap::from([("cpu".to_string(), 0.5), ("memory".to_string(), 0.5)]);
         let pressure2 = HashMap::from([("cpu".to_string(), 3.0), ("memory".to_string(), 0.5)]);
-        dehogger.set_pressure(&pressure1).unwrap();
-        dehogger2.set_pressure(&pressure2).unwrap();
+        // dehogger.set_pressure(&pressure1).unwrap();
+        // dehogger2.set_pressure(&pressure2).unwrap();
 
         dehogger.sync().unwrap();
         dehogger2.sync().unwrap();

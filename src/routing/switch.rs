@@ -1,7 +1,7 @@
 use crate::{
     job::Job,
     routing::{
-        actions::{Action, ActionError, CheckResult, HopAction, HopResult},
+        actions::{Action, ActionError, CheckResult, RouteAction, RouteResult, ViaResult},
         Route,
     },
 };
@@ -20,8 +20,8 @@ impl Switch {
 }
 
 #[async_trait]
-impl HopAction for Switch {
-    async fn hop(&self, job: &mut Job) -> Result<HopResult, ActionError> {
+impl RouteAction for Switch {
+    async fn route(&self, job: &mut Job) -> Result<RouteResult, ActionError> {
         for route in &self.routes {
             // we only need to clone the job if we need to send it to a Via or Router action
             // this stops us needing to clone the job for every branch of the switch
@@ -36,13 +36,18 @@ impl HopAction for Switch {
                         }
                     },
                     Action::Via(via) => {
-                        via.execute(current_job.to_mut()).await?;
-                    }
-                    Action::Router(router) => match router.hop(current_job.to_mut()).await? {
-                        HopResult::Complete(result) => {
-                            return Ok(HopResult::Complete(result));
+                        match via.execute(current_job.to_mut()).await? {
+                            ViaResult::Continue => continue,
+                            ViaResult::Reject { reason: _ } => {
+                                break;
+                            }
                         }
-                        HopResult::Reject { reason: _ } => {
+                    }
+                    Action::Router(router) => match router.route(current_job.to_mut()).await? {
+                        RouteResult::Complete(result) => {
+                            return Ok(RouteResult::Complete(result));
+                        }
+                        RouteResult::Reject { reason: _ } => {
                             break;
                         }
                     },
@@ -50,7 +55,7 @@ impl HopAction for Switch {
             }
         }
 
-        Ok(HopResult::Reject {
+        Ok(RouteResult::Reject {
             reason: "No route in switch matched the job".to_string(),
         })
     }

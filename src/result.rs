@@ -31,6 +31,8 @@ impl std::fmt::Debug for JobResult {
     }
 }
 
+// ------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;

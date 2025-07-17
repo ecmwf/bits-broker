@@ -6,23 +6,26 @@ actions:
 
   - &valid_data
     check::has_role:
-      mars: "valid_forecast"
+      role: "valid_forecast"
 
   - &era5_data
     check::match:
       class: "ea"
-      stream: "oper"
+
   - &era5_license
     check::has_license:
-      copernicus: "era5"
+      license: "era5"
 
   - &mars_od
     route::mars_destination:
-      host: "mars.ecmwf.int"
-      port: 8080
+      endpoint: "mars.ecmwf.int:8080"
+      queue:
+        type: basic
+        pool_size: 10
 
   - &metkit_expansion
-    via::metkit_expansion: {}
+    via::metkit_expansion:
+      expand_parameters: true
 
 routes:
 
@@ -37,17 +40,21 @@ routes:
         era5_priveleged:
           - *era5_data
           - *era5_license
-          - route::dss_destination: {}
+          - route::dss_destination:
+              endpoint: "dss.ecmwf.int:9090"
         era5_public:
           - *era5_data
-          - route::dss_destination: {}
+          - route::dss_destination:
+              endpoint: "dss.ecmwf.int:9090"
 
   extremes_dt:
     - *valid_data
     - *metkit_expansion
-    - route::dss_destination: {}
+    - route::dss_destination:
+        endpoint: "dss.ecmwf.int:9090"
 
   extremes_fc:
     - *valid_data
     - *metkit_expansion
-    - route::dss_destination: {}
+    - route::dss_destination:
+        endpoint: "dss.ecmwf.int:9090"

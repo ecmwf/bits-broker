@@ -1,18 +1,18 @@
-// use crate::job::Job;
-// use crate::queue::Queue;
+// use crate::queue::{Queue, queued_action::{QueuedTask, QueuedTaskSender}};
+// use crate::actions::Action;
 // use std::sync::Arc;
 // use tokio::task::JoinHandle;
 
-// /// Manages a pool of internal workers for a queue.
+// /// Manages a pool of workers for processing queued tasks.
 // pub struct WorkerPool {
 //     worker_count: usize,
-//     queue: Arc<dyn Queue>,
+//     queue: Arc<dyn Queue<QueuedTask>>,
 //     handles: Vec<JoinHandle<()>>,
 // }
 
 // impl WorkerPool {
 //     /// Create a new worker pool.
-//     pub fn new(worker_count: usize, queue: Arc<dyn Queue>) -> Self {
+//     pub fn new(worker_count: usize, queue: Arc<dyn Queue<QueuedTask>>) -> Self {
 //         Self {
 //             worker_count,
 //             queue,
@@ -51,39 +51,60 @@
 //     }
 
 //     /// Main worker loop.
-//     async fn worker_loop(worker_id: usize, queue: Arc<dyn Queue>) {
+//     async fn worker_loop(worker_id: usize, queue: Arc<dyn Queue<QueuedTask>>) {
 //         println!("Worker {} started", worker_id);
         
 //         loop {
-//             // Poll for jobs
-//             if let Some(job) = queue.dequeue().await {
-//                 println!("Worker {} processing job: {}", worker_id, job.id);
+//             // Poll for tasks
+//             if let Some(task) = queue.dequeue().await {
+//                 println!("Worker {} processing task: {}", worker_id, task.id);
                 
-//                 // Process the job
-//                 match Self::process_job(job).await {
-//                     Ok(_) => {
-//                         println!("Worker {} completed job successfully", worker_id);
-//                     }
-//                     Err(e) => {
-//                         println!("Worker {} failed to process job: {}", worker_id, e);
-//                     }
-//                 }
+//                 // Process the task
+//                 Self::process_task(task).await;
 //             } else {
-//                 // No jobs available, sleep briefly
+//                 // No tasks available, sleep briefly
 //                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 //             }
 //         }
 //     }
 
-//     /// Process a single job.
-//     async fn process_job(job: Job) -> Result<(), String> {
-//         // TODO: Implement actual job processing logic
-//         // This depends on the job type and what processing is needed
+//     /// Process a single queued task.
+//     async fn process_task(task: QueuedTask) {
+//         let QueuedTask { id, job, action_name, action_config, response_sender } = task;
         
-//         // For now, just simulate some work
-//         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+//         // Recreate the action from the stored name and config
+//         let action = match crate::routing::registry::create_action(&action_name, action_config) {
+//             Ok(action) => action,
+//             Err(e) => {
+//                 eprintln!("Failed to recreate action {} for task {}: {}", action_name, id, e);
+//                 return;
+//             }
+//         };
         
-//         println!("Processed job: {} with data: {}", job.id, job.data);
-//         Ok(())
+//         match (action, response_sender) {
+//             (Action::Check(check_action), QueuedTaskSender::Check(sender)) => {
+//                 let result = check_action.evaluate(&job).await;
+//                 if let Err(_) = sender.send(result) {
+//                     eprintln!("Failed to send check result for task {}", id);
+//                 }
+//             }
+//             (Action::Via(via_action), QueuedTaskSender::Via(sender)) => {
+//                 let mut job_copy = job.clone();
+//                 let result = via_action.execute(&mut job_copy).await;
+//                 if let Err(_) = sender.send(result) {
+//                     eprintln!("Failed to send via result for task {}", id);
+//                 }
+//                 // TODO: Handle job mutations - this is a limitation we need to address
+//             }
+//             (Action::Router(route_action), QueuedTaskSender::Route(sender)) => {
+//                 let result = route_action.route(&job).await;
+//                 if let Err(_) = sender.send(result) {
+//                     eprintln!("Failed to send route result for task {}", id);
+//                 }
+//             }
+//             _ => {
+//                 eprintln!("Mismatched action and response sender types for task {}", id);
+//             }
+//         }
 //     }
 // } 

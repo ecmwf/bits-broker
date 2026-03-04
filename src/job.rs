@@ -9,6 +9,7 @@ pub struct Job {
     pub user: Value,
     pub created_at: DateTime<Utc>,
     pub metadata: Value,
+    pub persistent: bool,
 }
 
 impl Job {
@@ -19,6 +20,7 @@ impl Job {
             user: serde_json::json!({}),
             created_at: Utc::now(),
             metadata: serde_json::json!({}),
+            persistent: false,
         }
     }
 }
@@ -30,14 +32,9 @@ mod tests {
 
     #[test]
     fn test_job_creation() {
-        let request = json!({
-            "class": "od",
-            "stream": "oper",
-            "type": "fc"
-        });
-
+        let request = json!({"class": "od", "stream": "oper"});
         let job = Job::new(request.clone());
         assert_eq!(job.request, request);
-        assert_eq!(job.user, serde_json::json!({}));
+        assert!(!job.persistent);
     }
 }

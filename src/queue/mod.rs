@@ -1,9 +1,10 @@
-// pub mod queue_manager;
-// pub mod queue_types;
-// pub mod worker_pool;
-pub mod queued_action;
-
-// pub use queue_manager::QueueManager;
-// pub use queue_types::{QueueType, Queue};
-// pub use worker_pool::WorkerPool;
-// pub use queued_action::QueuedAction; 
+// Queue implementation — pending
+//
+// A Queue wraps any action and provides:
+//   - Bounded concurrency (capacity)
+//   - Optional internal worker pool (workers: Some(n))
+//   - Pull routes: capacity without workers (workers: None)
+//
+// Queue is represented as Action::Queue { capacity, workers, action } in the
+// action pipeline and handled by the routing switch. Runtime implementation
+// (the shared channel, semaphore, and worker tasks) is pending.

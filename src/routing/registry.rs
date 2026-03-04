@@ -10,7 +10,7 @@ pub struct ActionRegistration {
     pub factory: ActionFactory,
 }
 
-/// Collect all registered actions using inventory
+// Collect all registered actions using inventory
 inventory::collect!(ActionRegistration);
 
 /// Create an action from a name and config

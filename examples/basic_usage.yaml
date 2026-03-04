@@ -1,56 +1,60 @@
-steps:
-
-  expand:
-    via::metkit_expansion:
-      expand_parameters: true
+checks:
 
   valid_data:
-    check::has_role:
-      role: "valid_forecast"
+    type: has_role
+    role: valid_forecast
 
   era5_data:
-    check::match:
-      class: "ea"
+    type: match
+    class: ea
 
   era5_license:
-    check::has_license:
-      license: "era5"
+    type: has_license
+    license: era5
+
+transforms:
+
+  expand:
+    type: metkit_expansion
+    expand_parameters: true
+
+targets:
 
   mars_od:
-    route::mars_destination:
-      endpoint: "mars.ecmwf.int:8080"
+    type: mars_destination
+    endpoint: "mars.ecmwf.int:8080"
 
   dss_od:
-    route::dss_destination:
-      endpoint: "dss.ecmwf.int:9090"
+    type: dss_destination
+    endpoint: "dss.ecmwf.int:9090"
 
 
-routes:
+pipelines:
 
   operational_forecast:
-    - expand
-    - valid_data
+    - transform::expand
+    - check::valid_data
     - persist
-    - mars_od
+    - target::mars_od
 
   era5_reanalysis:
-    - expand
+    - transform::expand
     - switch:
         era5_privileged:
-          - era5_data
-          - era5_license
+          - check::era5_data
+          - check::era5_license
           - persist
-          - dss_od
+          - target::dss_od
         era5_public:
-          - era5_data
-          - dss_od
+          - check::era5_data
+          - target::dss_od
 
   extremes_dt:
-    - valid_data
-    - expand
-    - dss_od
+    - check::valid_data
+    - transform::expand
+    - target::dss_od
 
   extremes_fc:
-    - valid_data
-    - expand
-    - dss_od
+    - check::valid_data
+    - transform::expand
+    - target::dss_od

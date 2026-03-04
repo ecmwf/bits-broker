@@ -1,48 +1,48 @@
 use crate::{
     job::Job,
-    actions::{Action, ActionError, CheckResult, RouteAction, RouteResult, ViaResult},
-    routing::Route,
+    actions::{Action, ActionError, CheckResult, TargetAction, TargetResult, TransformResult},
+    routing::Pipeline,
 };
 use async_trait::async_trait;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-/// Tries named route branches in sequence, returning the result of the first that does not reject.
+/// Tries named routes in sequence, returning the result of the first that does not reject.
 #[derive(Debug)]
 pub struct Switch {
-    routes: HashMap<String, Route>,
+    routes: HashMap<String, Pipeline>,
 }
 
 impl Switch {
-    pub fn new(routes: HashMap<String, Route>) -> Self {
+    pub fn new(routes: HashMap<String, Pipeline>) -> Self {
         Self { routes }
     }
 }
 
 #[async_trait]
-impl RouteAction for Switch {
-    async fn route(&self, job: &Job) -> Result<RouteResult, ActionError> {
-        'route: for (_name, route) in &self.routes {
-            // Defer cloning the job until a Via action actually needs to mutate it.
+impl TargetAction for Switch {
+    async fn dispatch(&self, job: &Job) -> Result<TargetResult, ActionError> {
+        'route: for (_name, pipeline) in &self.routes {
+            // Defer cloning the job until a Transform action actually needs to mutate it.
             let mut current_job: Cow<Job> = Cow::Borrowed(job);
 
-            for action in &route.actions {
+            for action in &pipeline.actions {
                 match action {
                     Action::Check(check) => match check.evaluate(&current_job).await? {
                         CheckResult::Pass => {}
                         CheckResult::Reject { .. } => continue 'route,
                     },
-                    Action::Via(via) => match via.execute(current_job.to_mut()).await? {
-                        ViaResult::Continue => {}
-                        ViaResult::Reject { .. } => continue 'route,
+                    Action::Transform(transform) => match transform.execute(current_job.to_mut()).await? {
+                        TransformResult::Continue => {}
+                        TransformResult::Reject { .. } => continue 'route,
                     },
-                    Action::Router(router) => match router.route(&current_job).await? {
-                        RouteResult::Complete(result) => return Ok(RouteResult::Complete(result)),
-                        RouteResult::Reject { .. } => continue 'route,
+                    Action::Target(target) => match target.dispatch(&current_job).await? {
+                        TargetResult::Complete(result) => return Ok(TargetResult::Complete(result)),
+                        TargetResult::Reject { .. } => continue 'route,
                     },
-                    Action::Switch(switch) => match switch.route(&current_job).await? {
-                        RouteResult::Complete(result) => return Ok(RouteResult::Complete(result)),
-                        RouteResult::Reject { .. } => continue 'route,
+                    Action::Switch(switch) => match switch.dispatch(&current_job).await? {
+                        TargetResult::Complete(result) => return Ok(TargetResult::Complete(result)),
+                        TargetResult::Reject { .. } => continue 'route,
                     },
                     Action::Persist => {
                         current_job.to_mut().persistent = true;
@@ -54,7 +54,7 @@ impl RouteAction for Switch {
             }
         }
 
-        Ok(RouteResult::Reject {
+        Ok(TargetResult::Reject {
             reason: "No route matched the job".to_string(),
         })
     }

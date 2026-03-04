@@ -1,64 +1,82 @@
-# B.I.T.S. — Broker for Intelligent Task Scheduling
+<div align="center">
 
-Most scalable job queues, or brokers, assume FIFO semantics and minimal decision logic. They perform well because the queue logic is simple and uniform. But as soon as queueing behaviour depends on job attributes — such as age, cost, resource requirements, or other constraints such as user quotas — the logic becomes more complex, and the broker becomes a computational bottleneck. Scaling a broker is a hard problem, which B.I.T.S. is designed to solve.
+# BITS
+
+**Broker for Intelligent Task Scheduling**
+
+[![Static Badge](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity/sandbox_badge.svg)](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity#sandbox)
+[![Rust](https://img.shields.io/badge/rust-stable-blue)]()
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
+
+</div>
+
+> \[!IMPORTANT\]
+> This software is **Sandbox** and subject to ECMWF's guidelines on [Software Maturity](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity).
 
 
-## Design
 
-* The queue is sharded arbitrarily among multiple brokers. Each broker has a partial view of the queue.
-* The queue logic is custom, and defined in software on an in-memory view of the queue. It can be adapted for different use-cases.
-* The broker periodically reports to a central resource-tracking database with its _resource pressure_, a metric stating how much of each given resource is being demanded.
-* The brokers negotiate, using deterministic logic, how much of the resource quota they are allowed. They lease this reservation from the resource tracker.
-* Workers connect to the brokers to ask for work (pull). The broker gives them work within the broker's leased resource allowance. They block jobs which cannot be scheduled immediately.
+> A policy-aware job broker that classifies, transforms, and dispatches requests across distributed infrastructure — with queuing, persistence, and fault recovery built in.
 
-* User statistics (mainly usage) are tracked in a central database. For persisent jobs, usage is tracked per-job. For ephemeral jobs, usage stats are aggregated and batched.
-* To avoid querying the database for each user request, brokers reserve an allocation of a user's quota and manage it locally.
+---
 
-## Persistence
+## ✨ Features
 
-Each task can have optional persistence. If the task is flagged as persistent, then it is committed to the _task database_ at every stage of its lifetime. If it is ephemeral, then it exists only in-memory of a particular broker. Both can be supported at the same time, allowing for cheap jobs to have higher throughput while more expensive jobs are persisted.
+- ⚡ **Fast and slow requests, one broker** — ephemeral jobs flow through the pipeline in-memory with no overhead; long-lived jobs opt into persistence with a single `persist` step.
 
-## Failure Modes
+- 📡 **Horizontal scalability with consistency** — multiple broker instances share quota of shared resources safely and efficiently.
 
-* Broker loss:
-  * Connected workers abandon all jobs and free their resources.
-  * Resource lease of the broker expires. Brokers begin redistributing the resources.
-  * Persistent jobs are queued onto alternative brokers.
- 
-* Database loss:
-  * A high availability database is recommended, so that failure of individual nodes can be tolerated.
-  * Loss of the entire database means brokers cannot negotiate resources.
-  * It cannot safely keep its lease of resources. It does not know if the database is unavailable or if has become disconnected (similar to a broker loss).
-  * All incoming jobs should be rejected. Jobs in flight may continue, but cannot be persisted.
- 
-* Worker loss:
-  * When a worker has no task, this has no considerable impact.
-  * When it has a task, the broker no longer receives the heartbeat from the worker.
-    * If the job was ephemeral, the broker does nothing. The job is lost.
-    * If the job is persistent, it tries to reschedule it.
-   
-* Poisoned task:
-  * If the content of the task is causing the worker to terminate (e.g. it consumes too much memory) it is hard to distinguish from worker loss.
-    * For persisent jobs, a retry count is incremented on every retry. After a configurable number of retries the task is dropped.
-  * If the content of the task is causing the worker to hang indefinetely (but not unresponsive, it's still sending a heartbeat):
-    * An optional timeout can terminate these tasks.
-    * Task response time metrics are also collected, and should also be used for observability.
-   
-  * Network partition:
-    * Any broker not connected to the database is considered as a broker loss.
-    * Any broker still connected can pick up the resource allocation and any persistent jobs which are no longer assigned.
-    * The queue can continue functioning with reduced throughput.
-    * If the database loses quorum, the service is lost.
+- 🚦 **Queuing and backpressure** — any pipeline action can have bounded queues with configurable capacity and worker count.
 
-# Progress
+- 🔀 **Push and pull targets** — push jobs to a target consumer directly from the pipeline, or publish to a topic for external workers to pull.
 
-- [ ] Build the resource-sharing logic based on a basic local database or filesystem
-- [ ] Build a basic visualisation of the resource partitioning
-- [ ] Build a basic queue loop
-- [ ] Mock producer and consumer
-- [ ] Demonstrate correct behaviour of scaling up/down the amount of resources
+- 💾 **Persistence and recovery** — persistent jobs survive broker termination. Jobs are rebalanced to live instances.
 
-## Longer Term
+- 🔌 **Pluggable actions** — additional actions can be created in Rust or Python.
 
-- [ ] User statistics
-- [ ] Persistence and rescheduling
+
+---
+
+## 🚀 Quick Start
+
+Define your routing policy in YAML:
+
+```yaml
+checks:
+  is_privileged:
+    type: has_role
+    role: privileged
+
+transforms:
+  expand:
+    type: metkit_expansion
+    expand_parameters: true
+
+targets:
+  mars:
+    type: mars_destination
+    endpoint: "mars.ecmwf.int:8080"
+    queue:
+      type: fifo
+      capacity: 200
+      workers: 8
+
+pipelines:
+  ecmwf_data:
+    - persist
+    - transform::expand
+    - switch:
+        privileged:
+          - check::is_privileged
+          - target::mars
+        public:
+          - check::match:
+              class: od
+          - target::mars
+```
+
+Load it and process jobs:
+
+```rust
+let bits = Bits::from_config(config)?;
+let result = bits.process(job).await;
+```

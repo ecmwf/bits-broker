@@ -3,12 +3,12 @@ use crate::result::JobResult;
 use async_trait::async_trait;
 
 pub mod check;
-pub mod via;
-pub mod route;
+pub mod transform;
+pub mod target;
 
 pub use check::*;
-pub use via::*;
-pub use route::*;
+pub use transform::*;
+pub use target::*;
 
 pub use crate::routing::registry::{create_action, list_actions};
 
@@ -18,9 +18,9 @@ pub use crate::routing::registry::{create_action, list_actions};
 
 /// Register an action with the global registry.
 /// Usage:
-///   register_action!(check, "match", Match);
-///   register_action!(via,   "metkit_expansion", MetkitExpansion);
-///   register_action!(route, "mars_destination", MarsDestination);
+///   register_action!(check,     "match",             Match);
+///   register_action!(transform, "metkit_expansion",  MetkitExpansion);
+///   register_action!(target,    "mars_destination",  MarsDestination);
 #[macro_export]
 macro_rules! register_action {
     (check, $name:expr, $action_type:ty) => {
@@ -35,26 +35,26 @@ macro_rules! register_action {
             }
         }
     };
-    (via, $name:expr, $action_type:ty) => {
+    (transform, $name:expr, $action_type:ty) => {
         inventory::submit! {
             $crate::routing::registry::ActionRegistration {
                 name: $name,
                 factory: |config| {
                     let action: $action_type = serde_json::from_value(config)
                         .map_err(|e| $crate::actions::ActionError::ConfigError(e.to_string()))?;
-                    Ok($crate::actions::Action::Via(Box::new(action)))
+                    Ok($crate::actions::Action::Transform(Box::new(action)))
                 }
             }
         }
     };
-    (route, $name:expr, $action_type:ty) => {
+    (target, $name:expr, $action_type:ty) => {
         inventory::submit! {
             $crate::routing::registry::ActionRegistration {
                 name: $name,
                 factory: |config| {
                     let action: $action_type = serde_json::from_value(config)
                         .map_err(|e| $crate::actions::ActionError::ConfigError(e.to_string()))?;
-                    Ok($crate::actions::Action::Router(Box::new(action)))
+                    Ok($crate::actions::Action::Target(Box::new(action)))
                 }
             }
         }
@@ -96,8 +96,8 @@ impl std::error::Error for ActionError {}
 
 pub enum Action {
     Check(Box<dyn CheckAction>),
-    Via(Box<dyn ViaAction>),
-    Router(Box<dyn RouteAction>),
+    Transform(Box<dyn TransformAction>),
+    Target(Box<dyn TargetAction>),
     Switch(crate::routing::switch::Switch),
     /// Mark the job as persistent from this point forward.
     Persist,
@@ -113,8 +113,8 @@ impl std::fmt::Debug for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Action::Check(_) => write!(f, "Action::Check(..)"),
-            Action::Via(_) => write!(f, "Action::Via(..)"),
-            Action::Router(_) => write!(f, "Action::Router(..)"),
+            Action::Transform(_) => write!(f, "Action::Transform(..)"),
+            Action::Target(_) => write!(f, "Action::Target(..)"),
             Action::Switch(_) => write!(f, "Action::Switch(..)"),
             Action::Persist => write!(f, "Action::Persist"),
             Action::Queue { capacity, workers, .. } => {
@@ -128,7 +128,7 @@ impl std::fmt::Debug for Action {
 //   Check Actions
 // ================================
 
-/// Guard conditions on a job. A rejection stops the current route branch.
+/// Guard conditions on a job. A rejection stops the current pipeline branch.
 #[async_trait]
 pub trait CheckAction: Send + Sync {
     async fn evaluate(&self, job: &Job) -> Result<CheckResult, ActionError>;
@@ -141,33 +141,33 @@ pub enum CheckResult {
 }
 
 // ================================
-//   Via Actions
+//   Transform Actions
 // ================================
 
 /// Transformations that mutate the job and continue the pipeline.
 #[async_trait]
-pub trait ViaAction: Send + Sync {
-    async fn execute(&self, job: &mut Job) -> Result<ViaResult, ActionError>;
+pub trait TransformAction: Send + Sync {
+    async fn execute(&self, job: &mut Job) -> Result<TransformResult, ActionError>;
 }
 
 #[derive(Debug)]
-pub enum ViaResult {
+pub enum TransformResult {
     Continue,
     Reject { reason: String },
 }
 
 // ================================
-//   Route Actions
+//   Target Actions
 // ================================
 
-/// Terminal dispatch — sends the job somewhere and returns a result.
+/// Terminal dispatch — sends the job to a destination and returns a result.
 #[async_trait]
-pub trait RouteAction: Send + Sync {
-    async fn route(&self, job: &Job) -> Result<RouteResult, ActionError>;
+pub trait TargetAction: Send + Sync {
+    async fn dispatch(&self, job: &Job) -> Result<TargetResult, ActionError>;
 }
 
 #[derive(Debug)]
-pub enum RouteResult {
+pub enum TargetResult {
     Complete(JobResult),
     Reject { reason: String },
 }

@@ -4,12 +4,12 @@ pub mod switch;
 use crate::actions::Action;
 
 #[derive(Debug)]
-pub struct Pipeline {
+pub struct Route {
     pub name: String,
     pub actions: Vec<Action>,
 }
 
-impl Pipeline {
+impl Route {
     pub fn new(name: String, actions: Vec<Action>) -> Self {
         Self { name, actions }
     }

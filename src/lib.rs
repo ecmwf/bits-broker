@@ -1,4 +1,5 @@
 mod bits;
+mod config;
 pub mod actions;
 pub mod job;
 pub mod result;

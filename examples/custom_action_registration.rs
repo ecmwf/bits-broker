@@ -20,7 +20,7 @@ impl CheckAction for CustomFilter {
                 Ok(CheckResult::Pass)
             } else {
                 Ok(CheckResult::Reject {
-                    reason: format!("Custom field '{}' does not match required '{}'", 
+                    reason: format!("Custom field '{}' does not match required '{}'",
                                    value, self.required_field)
                 })
             }
@@ -42,25 +42,25 @@ register_action!(check, "custom_filter", CustomFilter);
 // This could be in a completely different module or crate
 mod my_custom_actions {
     use super::*;
-    
-    // Example custom via action - registered right after definition
+
+    // Example custom transform action - registered right after definition
     #[derive(Debug, Serialize, Deserialize)]
     pub struct CustomTransform {
         pub add_field: String,
     }
 
     #[async_trait]
-    impl ViaAction for CustomTransform {
-        async fn execute(&self, job: &mut Job) -> Result<ViaResult, ActionError> {
+    impl TransformAction for CustomTransform {
+        async fn execute(&self, job: &mut Job) -> Result<TransformResult, ActionError> {
             let mut metadata = job.metadata.as_object().unwrap_or(&serde_json::Map::new()).clone();
             metadata.insert("custom_transform".to_string(), serde_json::json!(self.add_field));
             job.metadata = serde_json::Value::Object(metadata);
-            Ok(ViaResult::Continue)
+            Ok(TransformResult::Continue)
         }
     }
 
     // Register the custom transform action in-situ
-    register_action!(via, "custom_transform", CustomTransform);
+    register_action!(transform, "custom_transform", CustomTransform);
 }
 
 // ================================
@@ -74,15 +74,15 @@ pub struct CustomDestination {
 }
 
 #[async_trait]
-impl RouteAction for CustomDestination {
-    async fn route(&self, _job: &Job) -> Result<RouteResult, ActionError> {
+impl TargetAction for CustomDestination {
+    async fn dispatch(&self, _job: &Job) -> Result<TargetResult, ActionError> {
         let data = format!("Data sent to {}", self.endpoint);
         let data_bytes = bytes::Bytes::from(data.into_bytes());
         let size = data_bytes.len() as i64;
-        let stream: Box<dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Unpin> = 
+        let stream: Box<dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Unpin> =
             Box::new(futures::stream::iter(vec![Ok(data_bytes)]));
-        
-        Ok(RouteResult::Complete(JobResult::Success {
+
+        Ok(TargetResult::Complete(JobResult::Success {
             content_type: "text/plain".to_string(),
             size,
             stream,
@@ -91,35 +91,35 @@ impl RouteAction for CustomDestination {
 }
 
 // Register the custom destination action in-situ
-register_action!(route, "custom_destination", CustomDestination);
+register_action!(target, "custom_destination", CustomDestination);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Custom Action Registration Example");
     println!("==================================");
     println!();
-    
+
     // Show all available actions (including our custom ones)
     println!("Available actions: {:?}", list_actions());
     println!();
-    
+
     // Test the custom filter action
     println!("Testing custom_filter action:");
     let config = serde_json::json!({
         "required_field": "test_value"
     });
-    
+
     let action = create_action("custom_filter", config)?;
     println!("✓ Created custom action: {:?}", action);
-    
+
     // Create a test job
     let job_data = serde_json::json!({
         "custom_field": "test_value",
         "other_field": "some_data"
     });
-    
+
     let job = Job::new(job_data);
-    
+
     // Test the action
     match action {
         Action::Check(check_action) => {
@@ -131,64 +131,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => println!("Unexpected action type"),
     }
-    
+
     println!();
-    
+
     // Test the custom transform action
     println!("Testing custom_transform action:");
     let config = serde_json::json!({
         "add_field": "transformed_data"
     });
-    
+
     let action = create_action("custom_transform", config)?;
     println!("✓ Created custom transform action: {:?}", action);
-    
+
     // Test the transform action
     let mut job = Job::new(serde_json::json!({"test": "data"}));
     match action {
-        Action::Via(via_action) => {
-            let result = via_action.execute(&mut job).await?;
+        Action::Transform(transform_action) => {
+            let result = transform_action.execute(&mut job).await?;
             match result {
-                ViaResult::Continue => {
+                TransformResult::Continue => {
                     println!("✓ Custom transform executed successfully!");
                     println!("  Job metadata: {}", job.metadata);
                 }
-                ViaResult::Reject { reason } => println!("✗ Custom transform rejected: {}", reason),
+                TransformResult::Reject { reason } => println!("✗ Custom transform rejected: {}", reason),
             }
         }
         _ => println!("Unexpected action type"),
     }
-    
+
     println!();
-    
+
     // Test the custom destination action
     println!("Testing custom_destination action:");
     let config = serde_json::json!({
         "endpoint": "https://my-custom-service.com/api"
     });
-    
+
     let action = create_action("custom_destination", config)?;
     println!("✓ Created custom destination action: {:?}", action);
-    
-    // Test the route action
+
+    // Test the target action
     let job = Job::new(serde_json::json!({"data": "to_route"}));
     match action {
-        Action::Router(route_action) => {
-            let result = route_action.route(&job).await?;
+        Action::Target(target_action) => {
+            let result = target_action.dispatch(&job).await?;
             match result {
-                RouteResult::Complete(job_result) => {
-                    println!("✓ Custom destination routed successfully!");
+                TargetResult::Complete(job_result) => {
+                    println!("✓ Custom destination dispatched successfully!");
                     println!("  Result: {:?}", job_result);
                 }
-                RouteResult::Reject { reason } => println!("✗ Custom destination rejected: {}", reason),
+                TargetResult::Reject { reason } => println!("✗ Custom destination rejected: {}", reason),
             }
         }
         _ => println!("Unexpected action type"),
     }
-    
+
     println!();
     println!("All custom actions registered and tested successfully!");
     println!("Actions can be defined anywhere in the codebase and will be automatically discovered.");
-    
+
     Ok(())
-} 
+}

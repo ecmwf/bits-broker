@@ -33,7 +33,7 @@ targets:
     endpoint: "dss.ecmwf.int:9090"
 
 
-pipelines:
+routes:
 
   operational_forecast:
     - transform::expand

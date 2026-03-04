@@ -1,7 +1,7 @@
 use crate::{
     job::Job,
     actions::{Action, ActionError, CheckResult, TargetAction, TargetResult, TransformResult},
-    routing::Pipeline,
+    routing::Route,
 };
 use async_trait::async_trait;
 use std::borrow::Cow;
@@ -10,15 +10,18 @@ use std::collections::HashMap;
 /// Tries named routes in sequence, returning the result of the first that does not reject.
 #[derive(Debug)]
 pub struct Switch {
-    routes: HashMap<String, Pipeline>,
+    routes: HashMap<String, Route>,
 }
 
 impl Switch {
-    pub fn new(routes: HashMap<String, Pipeline>) -> Self {
+    pub fn new(routes: HashMap<String, Route>) -> Self {
         Self { routes }
     }
 }
 
+// Switch implements TargetAction because its external contract is identical to a target's:
+// it either completes the job (first matching route succeeds) or rejects it (no route matched).
+// This also allows switches to be nested inside other pipelines as an Action::Switch.
 #[async_trait]
 impl TargetAction for Switch {
     async fn dispatch(&self, job: &Job) -> Result<TargetResult, ActionError> {

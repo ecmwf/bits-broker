@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::actions::Action;
+use crate::queue::Queue;
 use crate::routing::{switch::Switch, Route};
 use crate::routing::registry::create_action;
 
@@ -172,11 +173,7 @@ fn target_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::e
         let q = q.as_object().ok_or("queue must be an object")?;
         let capacity = q.get("capacity").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
         let workers = q.get("workers").and_then(|v| v.as_u64()).map(|n| n as usize);
-        Ok(Action::Queue {
-            capacity,
-            workers,
-            action: Box::new(action),
-        })
+        Ok(Action::Queue(Queue::new(capacity, workers, action)))
     } else {
         Ok(action)
     }

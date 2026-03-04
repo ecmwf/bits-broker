@@ -1,0 +1,60 @@
+checks:
+
+  valid_data:
+    type: has_role
+    role: valid_forecast
+
+  era5_data:
+    type: match
+    class: ea
+
+  era5_license:
+    type: has_license
+    license: era5
+
+transforms:
+
+  expand:
+    type: metkit_expansion
+    expand_parameters: true
+
+targets:
+
+  mars_od:
+    type: mars_destination
+    endpoint: "mars.ecmwf.int:8080"
+
+  dss_od:
+    type: dss_destination
+    endpoint: "dss.ecmwf.int:9090"
+
+
+routes:
+
+  operational_forecast:
+    - transform::expand
+    - check::valid_data
+    - persist
+    - target::mars_od
+
+  era5_reanalysis:
+    - transform::expand
+    - switch:
+        era5_privileged:
+          - check::era5_data
+          - check::era5_license
+          - persist
+          - target::dss_od
+        era5_public:
+          - check::era5_data
+          - target::dss_od
+
+  extremes_dt:
+    - check::valid_data
+    - transform::expand
+    - target::dss_od
+
+  extremes_fc:
+    - check::valid_data
+    - transform::expand
+    - target::dss_od

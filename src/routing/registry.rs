@@ -36,18 +36,22 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_action_registry() {
+    fn test_builtin_actions_registered() {
         let actions = list_actions();
-        assert!(actions.contains(&"match".to_string()));
-        assert!(actions.contains(&"mars_destination".to_string()));
-        
-        // Test creating an action
-        let config = json!({"class": "od"});
-        let action = create_action("match", config).unwrap();
-        
-        match action {
-            Action::Check(_) => {}, // Expected
-            _ => panic!("Expected Check action"),
-        }
+        assert!(actions.contains(&"has_role".to_string()));
+        assert!(actions.contains(&"http".to_string()));
+    }
+
+    #[test]
+    fn test_create_has_role_action() {
+        let config = json!({"role": "admin"});
+        let action = create_action("has_role", config).unwrap();
+        assert!(matches!(action, Action::Check(_)));
+    }
+
+    #[test]
+    fn test_unknown_action_errors() {
+        let result = create_action("nonexistent", json!({}));
+        assert!(matches!(result, Err(ActionError::ConfigError(_))));
     }
 } 

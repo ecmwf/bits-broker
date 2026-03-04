@@ -1,14 +1,10 @@
-use crate::actions::{ActionError, TargetAction, TargetResult};
-use crate::job::Job;
-use crate::result::JobResult;
+use bits::actions::{ActionError, TargetAction, TargetResult};
+use bits::result::JobResult;
+use bits::Job;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-// ================================
-//   MarsDestination Action
-// ================================
-
-/// Dispatch to MARS destination
+/// Dispatch to a MARS retrieval endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MarsDestination {
     pub endpoint: String,
@@ -22,7 +18,6 @@ impl TargetAction for MarsDestination {
         let size = data_bytes.len() as i64;
         let stream: Box<dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Unpin> =
             Box::new(futures::stream::iter(vec![Ok(data_bytes)]));
-
         Ok(TargetResult::Complete(JobResult::Success {
             content_type: "application/json".to_string(),
             size,
@@ -31,14 +26,9 @@ impl TargetAction for MarsDestination {
     }
 }
 
-// Register the MarsDestination action
-crate::register_action!(target, "mars_destination", MarsDestination);
+bits::register_action!(target, "mars_destination", MarsDestination);
 
-// ================================
-//   DssDestination Action
-// ================================
-
-/// Dispatch to DSS destination
+/// Dispatch to a DSS (Data Store Service) endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DssDestination {
     pub endpoint: String,
@@ -52,7 +42,6 @@ impl TargetAction for DssDestination {
         let size = data_bytes.len() as i64;
         let stream: Box<dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Unpin> =
             Box::new(futures::stream::iter(vec![Ok(data_bytes)]));
-
         Ok(TargetResult::Complete(JobResult::Success {
             content_type: "application/json".to_string(),
             size,
@@ -61,5 +50,4 @@ impl TargetAction for DssDestination {
     }
 }
 
-// Register the DssDestination action
-crate::register_action!(target, "dss_destination", DssDestination);
+bits::register_action!(target, "dss_destination", DssDestination);

@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "bits-ecmwf"]
+
 [package]
 name = "bits"
 version = "0.1.0"
@@ -6,10 +9,6 @@ edition = "2021"
 [lib]
 name = "bits"
 path = "src/lib.rs"
-
-[[example]]
-name = "basic_usage"
-path = "examples/basic_usage.rs"
 
 [[example]]
 name = "custom_action_registration"
@@ -26,3 +25,8 @@ uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 inventory = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+[dev-dependencies]
+bits-ecmwf = { path = "bits-ecmwf" }
+axum = "0.8"

@@ -1,13 +1,9 @@
-use crate::actions::{ActionError, TransformAction, TransformResult};
-use crate::job::Job;
+use bits::actions::{ActionError, TransformAction, TransformResult};
+use bits::Job;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-// ================================
-//   MetkitExpansion Action
-// ================================
-
-/// Expand metkit request parameters
+/// Expand MARS request parameters using Metkit conventions.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MetkitExpansion {
     pub expand_parameters: bool,
@@ -17,7 +13,6 @@ pub struct MetkitExpansion {
 impl TransformAction for MetkitExpansion {
     async fn execute(&self, job: &mut Job) -> Result<TransformResult, ActionError> {
         if self.expand_parameters {
-            // Add metkit expansion metadata
             let mut metadata = job.metadata.as_object().unwrap_or(&serde_json::Map::new()).clone();
             metadata.insert("metkit_expanded".to_string(), serde_json::json!(true));
             job.metadata = serde_json::Value::Object(metadata);
@@ -26,5 +21,4 @@ impl TransformAction for MetkitExpansion {
     }
 }
 
-// Register the MetkitExpansion action
-crate::register_action!(transform, "metkit_expansion", MetkitExpansion);
+bits::register_action!(transform, "metkit_expansion", MetkitExpansion);

@@ -2,13 +2,11 @@ use crate::job::Job;
 use crate::result::JobResult;
 use async_trait::async_trait;
 
-pub mod check;
-pub mod transform;
-pub mod target;
+pub mod check_hasrole;
+pub mod target_http;
 
-pub use check::*;
-pub use transform::*;
-pub use target::*;
+pub use check_hasrole::*;
+pub use target_http::*;
 
 pub use crate::routing::registry::{create_action, list_actions};
 
@@ -102,11 +100,7 @@ pub enum Action {
     /// Mark the job as persistent from this point forward.
     Persist,
     /// Bound concurrency and add backpressure for the wrapped action.
-    Queue {
-        capacity: usize,
-        workers: Option<usize>,
-        action: Box<Action>,
-    },
+    Queue(crate::queue::Queue),
 }
 
 impl std::fmt::Debug for Action {
@@ -117,8 +111,8 @@ impl std::fmt::Debug for Action {
             Action::Target(_) => write!(f, "Action::Target(..)"),
             Action::Switch(_) => write!(f, "Action::Switch(..)"),
             Action::Persist => write!(f, "Action::Persist"),
-            Action::Queue { capacity, workers, .. } => {
-                write!(f, "Action::Queue(capacity={}, workers={:?})", capacity, workers)
+            Action::Queue(q) => {
+                write!(f, "Action::Queue(capacity={}, workers={:?})", q.capacity, q.workers)
             }
         }
     }

@@ -99,8 +99,6 @@ pub enum Action {
     Switch(crate::routing::switch::Switch),
     /// Mark the job as persistent from this point forward.
     Persist,
-    /// Bound concurrency and add backpressure for the wrapped action.
-    Queue(crate::queue::Queue),
 }
 
 impl std::fmt::Debug for Action {
@@ -111,9 +109,6 @@ impl std::fmt::Debug for Action {
             Action::Target(_) => write!(f, "Action::Target(..)"),
             Action::Switch(_) => write!(f, "Action::Switch(..)"),
             Action::Persist => write!(f, "Action::Persist"),
-            Action::Queue(q) => {
-                write!(f, "Action::Queue(capacity={}, workers={:?})", q.capacity, q.workers)
-            }
         }
     }
 }

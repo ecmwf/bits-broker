@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::actions::Action;
-use crate::queue::Queue;
+use crate::queue::{SemaphoreQueue, WorkerQueue};
 use crate::routing::{switch::Switch, Route};
 use crate::routing::registry::create_action;
 
@@ -135,32 +135,18 @@ fn resolve_named(
         "target" => {
             let entry = reg.targets.get(name)
                 .ok_or_else(|| format!("unknown target '{}'", name))?;
-            target_from_entry(entry)
+            action_from_entry(entry)
         }
         _ => Err(format!("unknown namespace '{}' in '{}::{}'", ns, ns, name).into()),
     }
 }
 
-/// Build a Check or Transform Action from a named registry entry.
+/// Build an Action from a named registry entry, with optional queue wrapping.
 fn action_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::error::Error>> {
     let map = entry.as_object().ok_or("registry entry must be an object")?;
     let type_name = map.get("type")
         .and_then(|v| v.as_str())
         .ok_or("registry entry must have a 'type' field")?;
-    let config: serde_json::Value = map.iter()
-        .filter(|(k, _)| k.as_str() != "type")
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect::<serde_json::Map<_, _>>()
-        .into();
-    create_action(type_name, config).map_err(Into::into)
-}
-
-/// Build a Target Action (with optional queue) from a named registry entry.
-fn target_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::error::Error>> {
-    let map = entry.as_object().ok_or("target entry must be an object")?;
-    let type_name = map.get("type")
-        .and_then(|v| v.as_str())
-        .ok_or("target entry must have a 'type' field")?;
     let queue_val = map.get("queue").cloned();
     let config: serde_json::Value = map.iter()
         .filter(|(k, _)| k.as_str() != "type" && k.as_str() != "queue")
@@ -171,9 +157,38 @@ fn target_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::e
 
     if let Some(q) = queue_val {
         let q = q.as_object().ok_or("queue must be an object")?;
+        let queue_type = q.get("type").and_then(|v| v.as_str()).unwrap_or("semaphore");
         let capacity = q.get("capacity").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
-        let workers = q.get("workers").and_then(|v| v.as_u64()).map(|n| n as usize);
-        Ok(Action::Queue(Queue::new(capacity, workers, action)))
+
+        enum Kind { Check, Transform, Target }
+        let kind = match &action {
+            Action::Check(_)     => Kind::Check,
+            Action::Transform(_) => Kind::Transform,
+            Action::Target(_)    => Kind::Target,
+            _ => return Err("queue can only wrap check, transform, or target actions".into()),
+        };
+
+        macro_rules! wrap {
+            ($queue:expr) => {
+                Ok(match kind {
+                    Kind::Check     => Action::Check(Box::new($queue)),
+                    Kind::Transform => Action::Transform(Box::new($queue)),
+                    Kind::Target    => Action::Target(Box::new($queue)),
+                })
+            };
+        }
+
+        match queue_type {
+            "semaphore" => {
+                let concurrency = q.get("concurrency").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                wrap!(SemaphoreQueue::new(capacity, concurrency, action))
+            }
+            "worker" => {
+                let workers = q.get("workers").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                wrap!(WorkerQueue::new(capacity, workers, action))
+            }
+            other => Err(format!("unknown queue type '{}', expected 'semaphore' or 'worker'", other).into()),
+        }
     } else {
         Ok(action)
     }

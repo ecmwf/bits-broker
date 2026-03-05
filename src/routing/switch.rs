@@ -50,9 +50,6 @@ impl TargetAction for Switch {
                     Action::Persist => {
                         current_job.to_mut().persistent = true;
                     }
-                    Action::Queue(_) => {
-                        todo!("queue execution not yet implemented")
-                    }
                 }
             }
         }

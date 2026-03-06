@@ -16,7 +16,7 @@ name = "design_config_test"
 path = "examples/design_config_test.rs"
 
 [dependencies]
-bits = { path = ".." }
+bits = { path = "../bits" }
 async-trait = "0.1.88"
 bytes = "1.10.1"
 serde = { version = "1.0.219", features = ["derive"] }

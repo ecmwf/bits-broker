@@ -25,7 +25,9 @@ impl Bits {
         let server_config = server.ok_or("no server block in config")?;
         let bits = Arc::new(Bits { router, server: None });
         match server_config {
-            ServerConfig::Http { bind } => HttpService::new(bind, bits).run().await,
+            ServerConfig::Http { bind, poll_timeout_ms } => {
+                HttpService::new(bind, bits, poll_timeout_ms).run().await
+            }
         }
     }
 

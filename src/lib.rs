@@ -2,6 +2,7 @@ mod bits;
 mod config;
 pub mod actions;
 pub mod cli;
+pub mod telemetry;
 pub mod job;
 pub mod result;
 pub mod routing;

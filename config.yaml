@@ -1,0 +1,24 @@
+server:
+  type: http
+  bind: "0.0.0.0:8080"
+  poll_timeout_ms: 5000
+
+checks:
+  is_privileged:
+    type: has_role
+    role: privileged
+
+targets:
+  backend:
+    type: http
+    url: "http://httpbin.org/post"
+
+routes:
+  default:
+    - switch:
+        privileged:
+          - check::is_privileged
+          - target::backend
+        public:
+          - target::backend
+

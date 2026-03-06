@@ -15,7 +15,7 @@ struct Registries {
 // ================================
 
 pub(crate) enum ServerConfig {
-    Http { bind: String },
+    Http { bind: String, poll_timeout_ms: Option<u64> },
 }
 
 // ================================
@@ -93,7 +93,11 @@ fn parse_server_config(val: &serde_json::Value) -> Result<ServerConfig, Box<dyn 
                 .and_then(|v| v.as_str())
                 .ok_or("http server must have a 'bind' field")?
                 .to_string();
-            Ok(ServerConfig::Http { bind })
+            let poll_timeout_ms = map
+                .get("poll_timeout_ms")
+                .map(|v| v.as_u64().ok_or("poll_timeout_ms must be a positive integer"))
+                .transpose()?;
+            Ok(ServerConfig::Http { bind, poll_timeout_ms })
         }
         other => Err(format!("unknown server type '{}'", other).into()),
     }

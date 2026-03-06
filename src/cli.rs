@@ -24,6 +24,21 @@ enum Command {
 /// Exposed as a library function so extension crates can provide their own
 /// binary entry point, pre-registering actions before delegating here.
 pub async fn run() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        tracing_subscriber::fmt()
+            .event_format(crate::telemetry::PrettyFormat)
+            .with_env_filter(filter)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init();
+    }
+
     let cli = Cli::parse();
 
     match cli.command {

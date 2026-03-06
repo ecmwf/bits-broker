@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -12,14 +12,13 @@ use axum::{Json, Router};
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
+use tracing::Instrument;
 use utoipa::OpenApi;
 
 use crate::result::JobResult;
 use crate::job::Job;
 use crate::Bits;
 use super::Service;
-
-const POLL_TIMEOUT: Duration = Duration::from_secs(25);
 
 // ================================
 //   OpenAPI spec
@@ -43,6 +42,7 @@ struct ApiDoc;
 struct InFlightJob {
     result: Mutex<Option<JobResult>>,
     notify: Notify,
+    started: Instant,
 }
 
 // ================================
@@ -53,6 +53,7 @@ struct InFlightJob {
 struct AppState {
     bits: Arc<Bits>,
     jobs: Arc<Mutex<HashMap<String, Arc<InFlightJob>>>>,
+    poll_timeout: Duration,
 }
 
 // ================================
@@ -62,11 +63,16 @@ struct AppState {
 pub struct HttpService {
     bind: String,
     bits: Arc<Bits>,
+    poll_timeout: Duration,
 }
 
 impl HttpService {
-    pub fn new(bind: impl Into<String>, bits: Arc<Bits>) -> Self {
-        Self { bind: bind.into(), bits }
+    pub fn new(bind: impl Into<String>, bits: Arc<Bits>, poll_timeout_ms: Option<u64>) -> Self {
+        Self {
+            bind: bind.into(),
+            bits,
+            poll_timeout: Duration::from_millis(poll_timeout_ms.unwrap_or(25_000)),
+        }
     }
 }
 
@@ -76,6 +82,7 @@ impl Service for HttpService {
         let state = AppState {
             bits: self.bits.clone(),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            poll_timeout: self.poll_timeout,
         };
 
         let spec = ApiDoc::openapi();
@@ -86,6 +93,7 @@ impl Service for HttpService {
             .with_state(state);
 
         let listener = TcpListener::bind(&self.bind).await?;
+        tracing::info!(address = %listener.local_addr()?, "BITS listening");
         axum::serve(listener, app).await?;
         Ok(())
     }
@@ -123,19 +131,33 @@ async fn submit_job(State(state): State<AppState>, Json(body): Json<Value>) -> R
     let job = Job::new(body);
     let job_id = job.id.clone();
 
+    let span = tracing::info_span!("job", job.id = %job_id);
+    tracing::info!(parent: &span, "job received");
+
     let in_flight = Arc::new(InFlightJob {
         result: Mutex::new(None),
         notify: Notify::new(),
+        started: Instant::now(),
     });
 
     state.jobs.lock().unwrap().insert(job_id.clone(), in_flight.clone());
 
     let bits = state.bits.clone();
-    tokio::spawn(async move {
-        let result = bits.process(job).await;
-        *in_flight.result.lock().unwrap() = Some(result);
-        in_flight.notify.notify_waiters();
-    });
+    tokio::spawn(
+        async move {
+            let result = bits.process(job).await;
+            let ms = in_flight.started.elapsed().as_millis();
+            match &result {
+                JobResult::Success { .. } => tracing::info!(duration_ms = ms, "job completed"),
+                JobResult::Redirect { .. } => tracing::info!(duration_ms = ms, "job redirected"),
+                JobResult::Error { message } => tracing::warn!(duration_ms = ms, error = %message, "job error"),
+                JobResult::Failed { reason } => tracing::error!(duration_ms = ms, reason = %reason, "job failed"),
+            }
+            *in_flight.result.lock().unwrap() = Some(result);
+            in_flight.notify.notify_waiters();
+        }
+        .instrument(span),
+    );
 
     wait_for_result(&job_id, &state).await
 }
@@ -193,8 +215,8 @@ async fn wait_for_result(job_id: &str, state: &AppState) -> Response {
         return job_result_to_response(result);
     }
 
-    // Wait up to 25s, then redirect the client back to reconnect
-    match tokio::time::timeout(POLL_TIMEOUT, notified).await {
+    // Wait up to the configured timeout, then redirect the client back to reconnect
+    match tokio::time::timeout(state.poll_timeout, notified).await {
         Ok(()) => {
             if let Some(result) = in_flight.result.lock().unwrap().take() {
                 state.jobs.lock().unwrap().remove(job_id);

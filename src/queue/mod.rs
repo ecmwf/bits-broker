@@ -1,14 +1,20 @@
-pub mod semaphore_queue;
-pub mod worker_queue;
-#[cfg(test)]
-pub mod test_helpers;
+pub mod cost_weighted;
+pub mod fifo;
 
-pub use semaphore_queue::SemaphoreQueue;
-pub use worker_queue::WorkerQueue;
+pub use cost_weighted::CostWeightedQueue;
+pub use fifo::FifoQueue;
 
-use crate::actions::{CheckAction, TargetAction, TransformAction};
+use async_trait::async_trait;
 
-/// All queue types must implement all three action traits so they are
-/// transparent to the pipeline — the switch never needs to know a queue
-/// is involved.
-pub trait Queue: CheckAction + TransformAction + TargetAction {}
+use crate::actions::ActionError;
+use crate::job::Job;
+
+/// A queue controls when a task is allowed to proceed.
+///
+/// `acquire` suspends the caller until the queue grants admission.
+/// The returned permit holds the slot open; dropping it releases it.
+#[async_trait]
+pub trait Queue: Send + Sync {
+    type Permit: Send;
+    async fn acquire(&self, job: &Job) -> Result<Self::Permit, ActionError>;
+}

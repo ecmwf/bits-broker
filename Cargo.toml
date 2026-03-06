@@ -10,6 +10,10 @@ edition = "2021"
 name = "bits"
 path = "src/lib.rs"
 
+[[bin]]
+name = "bits"
+path = "src/main.rs"
+
 [[example]]
 name = "custom_action_registration"
 path = "examples/custom_action_registration.rs"
@@ -26,7 +30,9 @@ chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 inventory = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+axum = "0.8"
+utoipa = { version = "5", features = ["axum_extras"] }
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 bits-ecmwf = { path = "bits-ecmwf" }
-axum = "0.8"

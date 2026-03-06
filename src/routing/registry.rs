@@ -1,29 +1,28 @@
 use crate::actions::{Action, ActionError};
 use serde_json::Value;
 
-/// Type alias for action factory functions
+/// Type alias for action factory functions.
 pub type ActionFactory = fn(Value) -> Result<Action, ActionError>;
 
-/// Action registration struct for inventory
+/// Action registration struct for inventory.
 pub struct ActionRegistration {
     pub name: &'static str,
     pub factory: ActionFactory,
 }
 
-// Collect all registered actions using inventory
 inventory::collect!(ActionRegistration);
 
-/// Create an action from a name and config
+/// Create an action by name.
 pub fn create_action(name: &str, config: Value) -> Result<Action, ActionError> {
-    for registration in inventory::iter::<ActionRegistration> {
-        if registration.name == name {
-            return (registration.factory)(config);
+    for reg in inventory::iter::<ActionRegistration> {
+        if reg.name == name {
+            return (reg.factory)(config);
         }
     }
     Err(ActionError::ConfigError(format!("Unknown action: {}", name)))
 }
 
-/// Get all registered action names
+/// List all registered action names.
 pub fn list_actions() -> Vec<String> {
     inventory::iter::<ActionRegistration>()
         .map(|reg| reg.name.to_string())

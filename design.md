@@ -13,9 +13,9 @@ across distributed infrastructure based on job attributes, user quotas, and reso
 
 - **Horizontal scalability with consistency** — multiple broker instances share quota of shared resources safely and efficiently.
 
-- **Queuing and backpressure** — any pipeline action can have bounded queues with configurable capacity and worker count.
+- **Weighted fair scheduling** — requests are costed before dispatch; the scheduler prioritises cheap requests and enforces per-user fairness so heavy users don't starve others.
 
-- **Forward targets and pull targets** — push jobs to a target directly from the pipeline, or publish to a topic for external workers to pull.
+- **External worker pools** — targets can dispatch to external workers via HTTP long-poll. Workers pull jobs from the broker and post results back. The submitting connection is held open and receives the result when the worker completes.
 
 - **Persistence and recovery** — persistent jobs survive broker termination. Jobs are rebalanced to live instances.
 
@@ -45,11 +45,11 @@ A job flows through a **pipeline** — an ordered list of actions. Three action 
   the current route and tries the next route in the switch. Examples: `check::match`,
   `check::has_role`, `check::has_license`.
 
-- **Transform** — mutation. Mutates the job, perhaps changing the request or adding metadata, and continues.
-  Examples: `transform::cost`.
+- **Transform** — mutation. Mutates the job, perhaps changing the request or adding metadata, and
+  continues. Examples: `transform::cost`, `transform::metkit_expansion`.
 
 - **Target** — terminal dispatch. Sends the job to a destination and returns a result.
-  Examples: `target::mars_destination`, `target::dss_destination`, `target::pull`.
+  Examples: `target::mars_retrieval`, `target::external_pool`.
 
 ### Switch
 
@@ -73,24 +73,19 @@ checks:
 
 transforms:
   cost:
-    type: size_estimation_cost
-    scaling_factor: 0.1
+    type: metkit_cost
+    endpoint: "cost-service.ecmwf.int:9000"
+    max_concurrent: 16      # concurrency limit for calls to the cost service
 
 targets:
   mars_retrieval:
     type: mars_destination
     endpoint: "mars.ecmwf.int:8080"
-    queue:
-      type: fifo
-      capacity: 200
-      workers: 8
+    capacity: 200           # max jobs waiting in the scheduler
 
-  dss_pull:
-    type: pull
-    topic: dss-jobs
-    queue:
-      type: fifo
-      capacity: 50
+  dss_workers:
+    type: external_pool
+    capacity: 50            # max jobs waiting for a worker to claim them
 
 pipelines:
   ecmwf_data:
@@ -103,7 +98,7 @@ pipelines:
         public:
           - check::match:       # inline — no name needed
               class: od
-          - target::dss_pull
+          - target::dss_workers
 ```
 
 **Key decisions:**
@@ -113,12 +108,12 @@ pipelines:
   which registry to look up. This makes the type of each pipeline step visible at a glance.
 - `type:` is the reserved key within each entry. All other keys at the same level are config
   for that action, keeping definitions flat.
-- `queue:` is a sibling property on target entries, not a wrapper. `type:` on a queue selects the
-  scheduling discipline (`fifo`, `priority`).
+- Scheduling and concurrency config (e.g. `capacity`, `max_concurrent`) are properties of the
+  action that needs them, not a generic `queue:` wrapper. Each action manages its own internal
+  scheduling primitives.
 - The reserved string `"persist"` is a built-in pipeline step, not a user-defined entry.
 - YAML anchors are deliberately not used — the named registries are an explicit feature of the
-  schema, not a YAML trick. Named entries also ensure shared resources (e.g. a queue shared
-  across multiple pipelines) are the same instance in memory.
+  schema, not a YAML trick. Named entries also ensure shared resources are the same instance in memory.
 - Inline actions (e.g. `check::match:` directly in a pipeline) bypass the registry entirely and
   are not reusable.
 
@@ -131,7 +126,7 @@ to register their own actions without the core crate knowing about them:
 
 ```rust
 register_action!(check,     "match",            Match);
-register_action!(transform, "metkit_expansion", MetkitExpansion);
+register_action!(transform, "metkit_cost",      MetkitCost);
 register_action!(target,    "mars_destination", MarsDestination);
 ```
 
@@ -140,18 +135,43 @@ action from its JSON config.
 
 ---
 
-## Queue
+## Scheduling Primitives
 
-A `Queue` can feature in any action and adds a queue to that particular action, providing:
+Scheduling is not a pipeline concept — it is infrastructure that action implementations use
+internally. The pipeline only sees `CheckAction`, `TransformAction`, `TargetAction`. How an
+action manages concurrency or ordering is entirely its own concern.
 
-- **Bounded concurrency** — at most `capacity` jobs waiting, `workers` executing concurrently
-- **Backpressure** — jobs are rejected or block when the queue is full
-- **Persistence checkpoint** — when a persistent job enters a queue, its state is written to the
-  DB (see Persistence)
+Two primitives cover all cases:
 
-`Queue` can be implemented with dedicated threads, external worker processes, or just a wait on the async task.
+### Semaphore
 
-Some actions (e.g. `target::pull`) must have a queue to function, because a shared state is needed to connect the job to a worker that will execute it. For other actions, the queue is optional — if omitted, the action executes immediately in the pipeline.
+A standard concurrency limit. Any action that calls an external service with finite capacity
+holds a `Semaphore` and acquires a permit before each call. The permit is dropped when the call
+returns, freeing the slot for the next waiter. Waiters queue in FIFO order internally.
+
+Used by: costing transforms, per-user throttle checks, any action with a `max_concurrent` config.
+
+### Scheduler
+
+A weighted fair queue. Accepts jobs with a cost, prioritises cheap jobs over expensive ones,
+and enforces fairness across users. Used when the ordering of execution matters — specifically
+for dispatch to backends with finite capacity where large requests should not starve small ones.
+
+`acquire(job, cost)` suspends the calling task until the scheduler assigns execution. It returns
+a handle the caller uses to complete the work and receive the result.
+
+Used by: target actions dispatching to finite-capacity backends.
+
+### External Worker Pool
+
+A target action that dispatches to external workers via HTTP long-poll. The job thread calls
+`scheduler.acquire(job, cost)`, which suspends it. An external worker connects and calls a
+long-poll endpoint; the scheduler assigns the next job to that worker and wakes the job thread
+with a handle to the worker connection. The job thread holds the original client connection open
+and streams the result back when the worker completes.
+
+The scheduler inside an external pool target is the same `Scheduler` primitive — the difference
+is only that workers are remote processes rather than internal async tasks.
 
 ---
 
@@ -171,8 +191,8 @@ The DB record stores:
 ```
 job_id
 original_request    — written once at persist; mirrors job.original_request, never updated
-checkpoint_state    — current job state (request + metadata), updated at each queue entry
-checkpoint_name     — name of the last queue entered; null means start from original_request
+checkpoint_state    — current job state (request + metadata), updated at each scheduler entry
+checkpoint_name     — name of the last scheduler entered; null means start from original_request
 status              — registered | queued | in_flight | done | failed
 ```
 
@@ -188,26 +208,26 @@ When a broker restarts, it loads persistent jobs from the DB and recovers based 
 | checkpoint_name | action |
 |---|---|
 | null | Re-run from `original_request` (persist action and all transforms will re-execute) |
-| matches a queue in the current pipeline | Re-insert into that queue with `checkpoint_state` |
-| does not match any queue | Re-run from `original_request` |
+| matches a scheduler in the current pipeline | Re-insert into that scheduler with `checkpoint_state` |
+| does not match any scheduler | Re-run from `original_request` |
 
 If a pipeline is reconfigured and a checkpoint name no longer exists, the job restarts from the
-beginning. This is acceptable for redeployment scenarios — all pre-queue actions are pure and
+beginning. This is acceptable for redeployment scenarios — all pre-scheduler actions are pure and
 safe to replay.
 
-**Queue actions must be idempotent** — if a worker dies mid-execution, the job times back to
+**Scheduler actions must be idempotent** — if a worker dies mid-execution, the job times back to
 `queued` state and will be retried.
 
 ---
 
 ## HTTP Transport
 
-Clients submit jobs and poll for results over HTTP. Because jobs may wait in queues for extended
-periods, the connection model matters:
+Clients submit jobs and poll for results over HTTP. Because jobs may wait in schedulers for
+extended periods, the connection model matters:
 
 - **Long polling** — the client holds the HTTP connection open while the job is processing.
   When the job is nearly ready, BITS holds the connection and streams the result when available.
-- **Retry-After** — for jobs deep in a queue (long estimated wait), BITS returns a `Retry-After`
+- **Retry-After** — for jobs deep in a scheduler (long estimated wait), BITS returns a `Retry-After`
   header and the client switches to periodic polling. This frees the connection slot on the F5
   load balancer.
 - **Reconnect** — clients reconnect with their `job_id` to reattach to a waiting job. The
@@ -221,7 +241,7 @@ and returns a URL the client fetches directly, keeping BITS out of the data path
 
 ## Distributed Broker
 
-Multiple broker instances each hold a shard of the queue:
+Multiple broker instances each hold a shard of the scheduler:
 
 - Brokers **lease resource quotas** from a central Postgres DB atomically. Local quota
   reservations avoid per-job DB queries. On broker crash, unreleased reservations expire by TTL.
@@ -236,8 +256,8 @@ Multiple broker instances each hold a shard of the queue:
 
 ## What is not yet implemented
 
-- Queue runtime (the `Action::Queue` variant is parsed and stored; execution is `todo!()`)
-- Pull target worker API (registration, heartbeat, job handoff endpoints)
+- Scheduler runtime (weighted fair queue, semaphore primitives in `src/scheduler/`)
+- External worker pool target (HTTP long-poll worker API, job handoff, result callback)
 - HTTP server (`src/api/` is a stub)
 - Persistence / DB integration
 - Resource quota tracking and broker negotiation

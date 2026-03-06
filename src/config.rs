@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use crate::actions::Action;
-use crate::queue::{SemaphoreQueue, WorkerQueue};
 use crate::routing::{switch::Switch, Route};
 use crate::routing::registry::create_action;
 
@@ -11,7 +10,28 @@ struct Registries {
     pub targets: HashMap<String, serde_json::Value>,
 }
 
-pub(crate) fn parse_config(config: &str) -> Result<Switch, Box<dyn std::error::Error>> {
+// ================================
+//   ServerConfig
+// ================================
+
+pub(crate) enum ServerConfig {
+    Http { bind: String },
+}
+
+// ================================
+//   ParsedConfig
+// ================================
+
+pub(crate) struct ParsedConfig {
+    pub router: Switch,
+    pub server: Option<ServerConfig>,
+}
+
+// ================================
+//   parse_config
+// ================================
+
+pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::error::Error>> {
     let raw: serde_json::Value = serde_yaml::from_str(config)?;
 
     let checks: HashMap<String, serde_json::Value> = raw
@@ -49,7 +69,34 @@ pub(crate) fn parse_config(config: &str) -> Result<Switch, Box<dyn std::error::E
         branches.insert(name.clone(), Route::new(name, actions));
     }
 
-    Ok(Switch::new(branches))
+    let router = Switch::new(branches);
+
+    let server = raw
+        .get("server")
+        .map(parse_server_config)
+        .transpose()?;
+
+    Ok(ParsedConfig { router, server })
+}
+
+fn parse_server_config(val: &serde_json::Value) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+    let map = val.as_object().ok_or("server must be an object")?;
+    let type_name = map
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or("server must have a 'type' field")?;
+
+    match type_name {
+        "http" => {
+            let bind = map
+                .get("bind")
+                .and_then(|v| v.as_str())
+                .ok_or("http server must have a 'bind' field")?
+                .to_string();
+            Ok(ServerConfig::Http { bind })
+        }
+        other => Err(format!("unknown server type '{}'", other).into()),
+    }
 }
 
 /// Parse a single action value, resolving named registry references.
@@ -155,40 +202,8 @@ fn action_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::e
         .into();
     let action = create_action(type_name, config)?;
 
-    if let Some(q) = queue_val {
-        let q = q.as_object().ok_or("queue must be an object")?;
-        let queue_type = q.get("type").and_then(|v| v.as_str()).unwrap_or("semaphore");
-        let capacity = q.get("capacity").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
-
-        enum Kind { Check, Transform, Target }
-        let kind = match &action {
-            Action::Check(_)     => Kind::Check,
-            Action::Transform(_) => Kind::Transform,
-            Action::Target(_)    => Kind::Target,
-            _ => return Err("queue can only wrap check, transform, or target actions".into()),
-        };
-
-        macro_rules! wrap {
-            ($queue:expr) => {
-                Ok(match kind {
-                    Kind::Check     => Action::Check(Box::new($queue)),
-                    Kind::Transform => Action::Transform(Box::new($queue)),
-                    Kind::Target    => Action::Target(Box::new($queue)),
-                })
-            };
-        }
-
-        match queue_type {
-            "semaphore" => {
-                let concurrency = q.get("concurrency").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-                wrap!(SemaphoreQueue::new(capacity, concurrency, action))
-            }
-            "worker" => {
-                let workers = q.get("workers").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-                wrap!(WorkerQueue::new(capacity, workers, action))
-            }
-            other => Err(format!("unknown queue type '{}', expected 'semaphore' or 'worker'", other).into()),
-        }
+    if queue_val.is_some() {
+        Err("queue configuration is not yet implemented".into())
     } else {
         Ok(action)
     }

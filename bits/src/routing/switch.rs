@@ -7,6 +7,35 @@ use async_trait::async_trait;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::result::JobResult;
+
+    struct AlwaysSucceed;
+
+    #[async_trait]
+    impl TargetAction for AlwaysSucceed {
+        async fn dispatch(&self, _job: &Job) -> Result<TargetResult, ActionError> {
+            Ok(TargetResult::Complete(JobResult::Error { message: "dummy".into() }))
+        }
+    }
+
+    #[tokio::test]
+    async fn client_gone_before_target() {
+        let switch = Switch::new(HashMap::from([(
+            "default".to_string(),
+            Route::new("default".to_string(), vec![Action::Target(Box::new(AlwaysSucceed))]),
+        )]));
+
+        // Job::new() has reconnect_deadline = Instant::now() (immediately expired)
+        // and client_connected = false, so client_present() returns false.
+        let job = Job::new(serde_json::json!({}));
+        let result = switch.dispatch(&job).await;
+        assert!(matches!(result, Err(ActionError::ClientGone)));
+    }
+}
+
 /// Tries named routes in sequence, returning the result of the first that does not reject.
 #[derive(Debug)]
 pub struct Switch {
@@ -30,6 +59,9 @@ impl TargetAction for Switch {
             let mut current_job: Cow<Job> = Cow::Borrowed(job);
 
             for action in &pipeline.actions {
+                if current_job.is_cancelled() {
+                    return Err(ActionError::Cancelled);
+                }
                 match action {
                     Action::Check(check) => match check.evaluate(&current_job).await? {
                         CheckResult::Pass => {}
@@ -39,13 +71,20 @@ impl TargetAction for Switch {
                         TransformResult::Continue => {}
                         TransformResult::Reject { .. } => continue 'route,
                     },
-                    Action::Target(target) => match target.dispatch(&current_job).await? {
-                        TargetResult::Complete(result) => return Ok(TargetResult::Complete(result)),
-                        TargetResult::Reject { .. } => continue 'route,
+                    Action::Target(target) => {
+                        if !current_job.client_present() {
+                            return Err(ActionError::ClientGone);
+                        }
+                        match target.dispatch(&current_job).await? {
+                            TargetResult::Complete(result) => return Ok(TargetResult::Complete(result)),
+                            TargetResult::Reject { .. } => continue 'route,
+                        }
                     },
-                    Action::Switch(switch) => match switch.dispatch(&current_job).await? {
-                        TargetResult::Complete(result) => return Ok(TargetResult::Complete(result)),
-                        TargetResult::Reject { .. } => continue 'route,
+                    Action::Switch(switch) => {
+                        match switch.dispatch(&current_job).await? {
+                            TargetResult::Complete(result) => return Ok(TargetResult::Complete(result)),
+                            TargetResult::Reject { .. } => continue 'route,
+                        }
                     },
                     Action::Persist => {
                         current_job.to_mut().persistent = true;

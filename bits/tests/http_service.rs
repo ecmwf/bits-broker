@@ -33,7 +33,7 @@ async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Resp
 }
 
 async fn poll_by_id(id: &str, state: &AppState) -> Response {
-    match state.bits.poll(id, state.poll_timeout).await {
+    match state.bits.poll(id, Some(state.poll_timeout)).await {
         PollOutcome::Ready(result) => match result {
             JobResult::Success { content_type, stream, .. } => {
                 ([(header::CONTENT_TYPE, content_type)], Body::from_stream(stream)).into_response()
@@ -45,6 +45,7 @@ async fn poll_by_id(id: &str, state: &AppState) -> Response {
             JobResult::Failed { reason } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response()
             }
+            JobResult::Cancelled | JobResult::ClientGone => StatusCode::GONE.into_response(),
         },
         PollOutcome::Pending { id } => (
             StatusCode::SEE_OTHER,

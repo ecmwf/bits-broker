@@ -52,7 +52,7 @@ async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Resp
 /// Wait for a job result, long-polling up to POLL_TIMEOUT.
 /// On timeout, redirects the client back to GET /job/{id} to reconnect.
 async fn poll_by_id(id: &str, state: &AppState) -> Response {
-    match state.bits.poll(id, POLL_TIMEOUT).await {
+    match state.bits.poll(id, Some(POLL_TIMEOUT)).await {
         PollOutcome::Ready(result) => result_to_response(result),
         PollOutcome::Pending { id } => (
             StatusCode::SEE_OTHER,
@@ -76,6 +76,7 @@ fn result_to_response(result: JobResult) -> Response {
         }
         JobResult::Error { message } => (StatusCode::BAD_REQUEST, message).into_response(),
         JobResult::Failed { reason } => (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response(),
+        JobResult::Cancelled | JobResult::ClientGone => StatusCode::GONE.into_response(),
     }
 }
 

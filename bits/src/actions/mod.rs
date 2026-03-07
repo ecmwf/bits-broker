@@ -71,6 +71,8 @@ pub enum ActionError {
     ConfigError(String),
     AuthError(String),
     ResourceError(String),
+    Cancelled,
+    ClientGone,
 }
 
 impl std::fmt::Display for ActionError {
@@ -82,6 +84,8 @@ impl std::fmt::Display for ActionError {
             ActionError::ConfigError(msg) => write!(f, "Config error: {}", msg),
             ActionError::AuthError(msg) => write!(f, "Auth error: {}", msg),
             ActionError::ResourceError(msg) => write!(f, "Resource error: {}", msg),
+            ActionError::Cancelled => write!(f, "Cancelled"),
+            ActionError::ClientGone => write!(f, "Client disconnected before data could be delivered"),
         }
     }
 }

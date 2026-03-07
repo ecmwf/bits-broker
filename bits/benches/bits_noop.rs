@@ -45,7 +45,7 @@ routes:
 // Benchmarks
 // ---------------------------------------------------------------------------
 
-/// Cost of a single `Bits::process` call through the routing + action pipeline,
+/// Cost of a single submit+poll round-trip through the routing + action pipeline,
 /// with no HTTP, no network, and no queue — pure dispatch overhead.
 fn bench_sequential(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -54,9 +54,10 @@ fn bench_sequential(c: &mut Criterion) {
     let mut group = c.benchmark_group("sequential");
     group.throughput(Throughput::Elements(1));
 
-    group.bench_function("process", |b| {
+    group.bench_function("submit_poll", |b| {
         b.to_async(&rt).iter(|| async {
-            bits.process(Job::new(serde_json::json!({}))).await
+            let handle = bits.submit(Job::new(serde_json::json!({})));
+            bits.poll(&handle.id, None).await
         });
     });
 
@@ -77,7 +78,13 @@ fn bench_concurrent(c: &mut Criterion) {
             let bits = bits.clone();
             b.to_async(&rt).iter(|| async {
                 let futs: Vec<_> = (0..n)
-                    .map(|_| bits.process(Job::new(serde_json::json!({}))))
+                    .map(|_| {
+                        let bits = bits.clone();
+                        async move {
+                            let handle = bits.submit(Job::new(serde_json::json!({})));
+                            bits.poll(&handle.id, None).await
+                        }
+                    })
                     .collect();
                 futures::future::join_all(futs).await
             });

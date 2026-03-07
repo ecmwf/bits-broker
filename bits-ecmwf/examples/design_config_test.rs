@@ -46,7 +46,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let handle = tokio::spawn(async move {
             let job = Job::new(job_data);
             println!("Processing {} job: {}", route_name, job.id);
-            let result = bits.process(job).await;
+            let handle = bits.submit(job);
+            let result = match bits.poll(&handle.id, None).await {
+                bits::PollOutcome::Ready(r) => r,
+                _ => unreachable!(),
+            };
             (route_name, result)
         });
         handles.push(handle);
@@ -66,6 +70,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             JobResult::Redirect { location, message } => {
                 println!("→ {} redirected to: {} ({})", route_name, location, message);
+            }
+            JobResult::Cancelled | JobResult::ClientGone => {
+                println!("✗ {} cancelled", route_name);
             }
         }
     }

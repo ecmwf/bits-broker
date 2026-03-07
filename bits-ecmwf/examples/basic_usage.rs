@@ -32,7 +32,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, job) in jobs.into_iter().enumerate() {
         println!("Processing job {}: {}", i + 1, job.request);
 
-        let result = bits.process(job).await;
+        let handle = bits.submit(job);
+        let result = match bits.poll(&handle.id, None).await {
+            bits::PollOutcome::Ready(r) => r,
+            _ => unreachable!(),
+        };
         match result {
             JobResult::Success { content_type, size, .. } => {
                 println!("Job {} completed successfully", i + 1);
@@ -46,6 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             JobResult::Failed { reason } => {
                 println!("Job {} system failure: {}", i + 1, reason);
+            }
+            JobResult::Cancelled | JobResult::ClientGone => {
+                println!("Job {} cancelled", i + 1);
             }
         }
         println!();

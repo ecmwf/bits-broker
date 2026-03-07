@@ -85,7 +85,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for request in jobs {
         print!("{} -> ", request);
-        match bits.process(Job::new(request)).await {
+        let handle = bits.submit(Job::new(request));
+        let result = match bits.poll(&handle.id, None).await {
+            bits::PollOutcome::Ready(r) => r,
+            _ => unreachable!(),
+        };
+        match result {
             JobResult::Success { content_type, size, .. } => {
                 println!("{} ({} bytes)", content_type, size);
             }
@@ -97,6 +102,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             JobResult::Failed { reason } => {
                 println!("failed: {}", reason);
+            }
+            JobResult::Cancelled | JobResult::ClientGone => {
+                println!("cancelled");
             }
         }
     }

@@ -5,7 +5,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 #[cfg(test)]
 mod tests {
@@ -23,10 +22,10 @@ mod tests {
 
     #[tokio::test]
     async fn client_gone_before_target() {
-        let switch = Switch::new(HashMap::from([(
+        let switch = Switch::new(vec![Route::new(
             "default".to_string(),
-            Route::new("default".to_string(), vec![Action::Target(Box::new(AlwaysSucceed))]),
-        )]));
+            vec![Action::Target(Box::new(AlwaysSucceed))],
+        )]);
 
         // Job::new() has reconnect_deadline = Instant::now() (immediately expired)
         // and client_connected = false, so client_present() returns false.
@@ -39,11 +38,11 @@ mod tests {
 /// Tries named routes in sequence, returning the result of the first that does not reject.
 #[derive(Debug)]
 pub struct Switch {
-    routes: HashMap<String, Route>,
+    routes: Vec<Route>,
 }
 
 impl Switch {
-    pub fn new(routes: HashMap<String, Route>) -> Self {
+    pub fn new(routes: Vec<Route>) -> Self {
         Self { routes }
     }
 }
@@ -54,7 +53,7 @@ impl Switch {
 #[async_trait]
 impl TargetAction for Switch {
     async fn dispatch(&self, job: &Job) -> Result<TargetResult, ActionError> {
-        'route: for (_name, pipeline) in &self.routes {
+        'route: for pipeline in &self.routes {
             // Defer cloning the job until a Transform action actually needs to mutate it.
             let mut current_job: Cow<Job> = Cow::Borrowed(job);
 

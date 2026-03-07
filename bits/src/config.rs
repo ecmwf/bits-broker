@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::actions::Action;
 use crate::routing::{switch::Switch, Route};
@@ -16,6 +17,7 @@ struct Registries {
 
 pub(crate) struct ParsedConfig {
     pub router: Switch,
+    pub sweep_interval: Option<Duration>,
 }
 
 // ================================
@@ -45,24 +47,37 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
 
     let registries = Registries { checks, transforms, targets };
 
+    let sweep_interval = match raw.get("bits").and_then(|v| v.get("sweep_interval_ms")) {
+        None => None,
+        Some(value) => Some(Duration::from_millis(
+            value
+                .as_u64()
+                .ok_or("bits.sweep_interval_ms must be a number")?,
+        )),
+    };
+
     let pipelines_val = raw
         .get("routes")
         .ok_or("config must have a 'routes' section")?;
-    let pipelines_raw: HashMap<String, Vec<serde_json::Value>> =
-        serde_json::from_value(pipelines_val.clone())?;
+    let pipelines_obj = pipelines_val
+        .as_object()
+        .ok_or("routes must be an object")?;
 
-    let mut branches = HashMap::new();
-    for (name, action_values) in pipelines_raw {
+    let mut branches = Vec::new();
+    for (name, route_val) in pipelines_obj {
+        let action_values = route_val
+            .as_array()
+            .ok_or_else(|| format!("route '{}' must be an array", name))?;
         let actions = action_values
             .iter()
             .map(|v| parse_action(v, &registries))
             .collect::<Result<Vec<_>, _>>()?;
-        branches.insert(name.clone(), Route::new(name, actions));
+        branches.push(Route::new(name.clone(), actions));
     }
 
     let router = Switch::new(branches);
 
-    Ok(ParsedConfig { router })
+    Ok(ParsedConfig { router, sweep_interval })
 }
 
 /// Parse a single action value, resolving named registry references.
@@ -85,7 +100,7 @@ fn parse_action(
                 let branches = switch_val
                     .as_object()
                     .ok_or("switch must be an object")?;
-                let mut route_map = HashMap::new();
+                let mut routes = Vec::new();
                 for (route_name, route_val) in branches {
                     let action_list = route_val.as_array().ok_or_else(|| {
                         format!("switch route '{}' must be an array", route_name)
@@ -94,22 +109,17 @@ fn parse_action(
                         .iter()
                         .map(|v| parse_action(v, reg))
                         .collect::<Result<Vec<_>, _>>()?;
-                    route_map.insert(
-                        route_name.clone(),
-                        Route::new(route_name.clone(), actions),
-                    );
+                    routes.push(Route::new(route_name.clone(), actions));
                 }
-                return Ok(Action::Switch(Switch::new(route_map)));
+                return Ok(Action::Switch(Switch::new(routes)));
             }
 
             // namespace::name: { config } — inline action, bypasses named registries
             for (key, config) in map {
                 if key.contains("::") {
-                    let action_name = key
-                        .split("::")
-                        .nth(1)
-                        .ok_or_else(|| format!("invalid action key '{}'", key))?;
-                    return create_action(action_name, config.clone()).map_err(Into::into);
+                    let (ns, action_name) = split_ns(key)?;
+                    let action = create_action(action_name, config.clone())?;
+                    return validate_inline_action(ns, action);
                 }
             }
 
@@ -151,6 +161,19 @@ fn resolve_named(
             action_from_entry(entry)
         }
         _ => Err(format!("unknown namespace '{}' in '{}::{}'", ns, ns, name).into()),
+    }
+}
+
+/// Ensure inline namespace matches the resolved action type.
+fn validate_inline_action(
+    ns: &str,
+    action: Action,
+) -> Result<Action, Box<dyn std::error::Error>> {
+    match (ns, &action) {
+        ("check", Action::Check(_)) => Ok(action),
+        ("transform", Action::Transform(_)) => Ok(action),
+        ("target", Action::Target(_)) => Ok(action),
+        _ => Err(format!("inline action namespace '{}' does not match action type", ns).into()),
     }
 }
 

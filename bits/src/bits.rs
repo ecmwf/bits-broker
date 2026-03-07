@@ -13,6 +13,8 @@ use crate::routing::switch::Switch;
 
 /// Buffer added on top of the poll timeout to allow for the reconnect round-trip.
 const RECONNECT_BUFFER: Duration = Duration::from_secs(5);
+/// Default sweep interval for removing expired completed jobs.
+const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 // ================================
 //   ConnectedGuard
@@ -69,10 +71,15 @@ pub struct Bits {
 impl Bits {
     pub fn from_config(config: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let parsed = parse_config(config)?;
-        Ok(Bits {
+        let sweep_interval = parsed.sweep_interval.unwrap_or(DEFAULT_SWEEP_INTERVAL);
+        let bits = Bits {
             router: Arc::new(parsed.router),
             jobs: Arc::new(DashMap::new()),
-        })
+        };
+
+        start_sweeper(bits.jobs.clone(), sweep_interval);
+
+        Ok(bits)
     }
 
     /// Submit a job for async processing. Returns immediately with a handle; the job runs in the background.
@@ -178,6 +185,26 @@ impl Bits {
 
         outcome
     }
+}
+
+fn start_sweeper(jobs: Arc<DashMap<String, Arc<Job>>>, sweep_interval: Duration) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(sweep_interval);
+        let mut expired = Vec::new();
+
+        for entry in jobs.iter() {
+            let job = entry.value();
+            let has_result = job.result.lock().unwrap().is_some();
+
+            if has_result && !job.client_present() {
+                expired.push(entry.key().clone());
+            }
+        }
+
+        for id in expired {
+            jobs.remove(&id);
+        }
+    });
 }
 
 async fn dispatch(router: &Switch, job: Job) -> JobResult {

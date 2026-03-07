@@ -22,6 +22,7 @@ fn default_reconnect_deadline() -> Arc<Mutex<Instant>> {
     Arc::new(Mutex::new(Instant::now()))
 }
 
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,

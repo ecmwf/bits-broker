@@ -1,44 +1,93 @@
 mod common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use bits::Bits;
+use axum::body::Body;
+use axum::extract::{Json, Path, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::Router;
+use bits::{Bits, Job, JobResult, PollOutcome};
+use serde_json::Value;
 use tokio::net::TcpListener;
 
-/// Bind to port 0, capture the assigned port, then drop the listener so
-/// the server can bind immediately after.
-async fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+// ================================
+//   Minimal server (mirrors examples/http_server.rs)
+// ================================
+
+#[derive(Clone)]
+struct AppState {
+    bits: Arc<Bits>,
+    poll_timeout: Duration,
 }
+
+async fn submit_job(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    let handle = state.bits.submit(Job::new(body));
+    poll_by_id(&handle.id, &state).await
+}
+
+async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Response {
+    poll_by_id(&id, &state).await
+}
+
+async fn poll_by_id(id: &str, state: &AppState) -> Response {
+    match state.bits.poll(id, state.poll_timeout).await {
+        PollOutcome::Ready(result) => match result {
+            JobResult::Success { content_type, stream, .. } => {
+                ([(header::CONTENT_TYPE, content_type)], Body::from_stream(stream)).into_response()
+            }
+            JobResult::Redirect { location, .. } => {
+                (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
+            }
+            JobResult::Error { message } => (StatusCode::BAD_REQUEST, message).into_response(),
+            JobResult::Failed { reason } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response()
+            }
+        },
+        PollOutcome::Pending { id } => (
+            StatusCode::SEE_OTHER,
+            [
+                (header::LOCATION, format!("/job/{id}")),
+                (header::RETRY_AFTER, "0".to_string()),
+            ],
+        )
+            .into_response(),
+        PollOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn start_server(config: &str, poll_timeout: Duration) -> u16 {
+    let bits = Arc::new(Bits::from_config(config).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let state = AppState { bits, poll_timeout };
+    let app = Router::new()
+        .route("/job", post(submit_job))
+        .route("/job/{id}", get(poll_job))
+        .with_state(state);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    port
+}
+
+// ================================
+//   Tests
+// ================================
 
 #[tokio::test]
 async fn post_job_returns_result() {
-    // Reference common types so the register_action! inventory entries are linked in.
     let _ = common::TargetDummyDelay::new(0, 1);
 
-    let port = free_port().await;
-
-    let config = format!(r#"
-server:
-  type: http
-  bind: "127.0.0.1:{port}"
+    let config = r#"
 routes:
   default:
     - target::dummy_dispatch:
         duration_ms: 10
         concurrency: 1
-"#);
+"#;
 
-    tokio::spawn(async move {
-        Bits::from_config(&config).unwrap().serve().await.unwrap();
-    });
-
-    // Give the server time to bind and accept connections.
+    let port = start_server(config, Duration::from_secs(25)).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = reqwest::Client::builder()
@@ -57,32 +106,22 @@ routes:
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
 }
 
-
 #[tokio::test]
 async fn poll_redirect_resolves_to_final_result() {
     let _ = common::TargetDummyDelay::new(0, 1);
 
-    let port = free_port().await;
-
-    // poll_timeout_ms=200 → first request times out and returns a poll redirect.
-    // duration_ms=300 → job finishes 100ms into the second poll window,
+    // poll_timeout=50ms → first request times out and returns a poll redirect.
+    // duration_ms=100 → job finishes 50ms into the second poll window,
     // so the second GET returns the final result.
-    let config = format!(r#"
-server:
-  type: http
-  bind: "127.0.0.1:{port}"
-  poll_timeout_ms: 50
+    let config = r#"
 routes:
   default:
     - target::dummy_dispatch:
         duration_ms: 100
         concurrency: 1
-"#);
+"#;
 
-    tokio::spawn(async move {
-        Bits::from_config(&config).unwrap().serve().await.unwrap();
-    });
-
+    let port = start_server(config, Duration::from_millis(50)).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = reqwest::Client::builder()
@@ -111,5 +150,8 @@ routes:
 
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     let final_location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(!final_location.starts_with("/job/"), "expected final result, not another poll redirect");
+    assert!(
+        !final_location.starts_with("/job/"),
+        "expected final result, not another poll redirect"
+    );
 }

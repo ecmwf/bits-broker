@@ -11,20 +11,11 @@ struct Registries {
 }
 
 // ================================
-//   ServerConfig
-// ================================
-
-pub(crate) enum ServerConfig {
-    Http { bind: String, poll_timeout_ms: Option<u64> },
-}
-
-// ================================
 //   ParsedConfig
 // ================================
 
 pub(crate) struct ParsedConfig {
     pub router: Switch,
-    pub server: Option<ServerConfig>,
 }
 
 // ================================
@@ -71,36 +62,7 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
 
     let router = Switch::new(branches);
 
-    let server = raw
-        .get("server")
-        .map(parse_server_config)
-        .transpose()?;
-
-    Ok(ParsedConfig { router, server })
-}
-
-fn parse_server_config(val: &serde_json::Value) -> Result<ServerConfig, Box<dyn std::error::Error>> {
-    let map = val.as_object().ok_or("server must be an object")?;
-    let type_name = map
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or("server must have a 'type' field")?;
-
-    match type_name {
-        "http" => {
-            let bind = map
-                .get("bind")
-                .and_then(|v| v.as_str())
-                .ok_or("http server must have a 'bind' field")?
-                .to_string();
-            let poll_timeout_ms = map
-                .get("poll_timeout_ms")
-                .map(|v| v.as_u64().ok_or("poll_timeout_ms must be a positive integer"))
-                .transpose()?;
-            Ok(ServerConfig::Http { bind, poll_timeout_ms })
-        }
-        other => Err(format!("unknown server type '{}'", other).into()),
-    }
+    Ok(ParsedConfig { router })
 }
 
 /// Parse a single action value, resolving named registry references.

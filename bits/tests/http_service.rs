@@ -78,7 +78,7 @@ async fn start_server(config: &str, poll_timeout: Duration) -> u16 {
 
 #[tokio::test]
 async fn post_job_returns_result() {
-    let _ = common::TargetDummyDelay::new(0, 1);
+    let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
 routes:
@@ -109,7 +109,7 @@ routes:
 
 #[tokio::test]
 async fn poll_redirect_resolves_to_final_result() {
-    let _ = common::TargetDummyDelay::new(0, 1);
+    let _ = common::TargetDummyDelay::new(0);
 
     // poll_timeout=50ms → first request times out and returns a poll redirect.
     // duration_ms=100 → job finishes 50ms into the second poll window,

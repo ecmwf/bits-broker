@@ -1,33 +1,36 @@
 use async_trait::async_trait;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 
-use crate::actions::ActionError;
 use crate::job::Job;
 use crate::queue::Queue;
 
-/// A simple FIFO queue backed by a semaphore.
-///
-/// Callers are admitted in arrival order up to `concurrency` at a time.
+/// A simple FIFO queue. Items are dequeued in the order they were enqueued.
 #[derive(Debug)]
 pub struct FifoQueue {
-    semaphore: Arc<Semaphore>,
+    tx: mpsc::UnboundedSender<Job>,
+    rx: Mutex<mpsc::UnboundedReceiver<Job>>,
 }
 
 impl FifoQueue {
-    pub fn new(concurrency: usize) -> Self {
-        Self { semaphore: Arc::new(Semaphore::new(concurrency)) }
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self { tx, rx: Mutex::new(rx) }
+    }
+}
+
+impl Default for FifoQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl Queue for FifoQueue {
-    type Permit = OwnedSemaphorePermit;
+    fn enqueue(&self, job: Job) {
+        let _ = self.tx.send(job);
+    }
 
-    async fn acquire(&self, _job: &Job) -> Result<Self::Permit, ActionError> {
-        Arc::clone(&self.semaphore)
-            .acquire_owned()
-            .await
-            .map_err(|_| ActionError::ResourceError("queue closed".into()))
+    async fn dequeue(&self) -> Option<Job> {
+        self.rx.lock().await.recv().await
     }
 }

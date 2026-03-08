@@ -15,34 +15,32 @@ fn job_with_cost(cost: u64) -> Job {
 }
 
 // ---------------------------------------------------------------------------
-// Single uncontended acquire
+// Single uncontended enqueue + dequeue
 //
-// Both queues have ample capacity so every acquire is immediately admitted.
-// This isolates the raw overhead of the acquire path itself.
+// Both queues are empty before each iteration; every enqueue is immediately
+// followed by a dequeue. Measures the raw round-trip overhead.
 // ---------------------------------------------------------------------------
 
-fn bench_single_uncontended(c: &mut Criterion) {
+fn bench_single_roundtrip(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let fifo = FifoQueue::new(1024);
-    let cost = rt.block_on(async { CostWeightedQueue::new(1024) });
+    let fifo = FifoQueue::new();
+    let cost = CostWeightedQueue::new();
 
-    let mut group = c.benchmark_group("single_uncontended");
+    let mut group = c.benchmark_group("single_roundtrip");
     group.throughput(Throughput::Elements(1));
 
     group.bench_function("fifo", |b| {
         b.to_async(&rt).iter(|| async {
-            let j = job();
-            let permit = fifo.acquire(&j).await.unwrap();
-            drop(permit);
+            fifo.enqueue(job());
+            let _ = fifo.dequeue().await;
         });
     });
 
     group.bench_function("cost_weighted", |b| {
         b.to_async(&rt).iter(|| async {
-            let j = job();
-            let permit = cost.acquire(&j).await.unwrap();
-            drop(permit);
+            cost.enqueue(job());
+            let _ = cost.dequeue().await;
         });
     });
 
@@ -50,45 +48,47 @@ fn bench_single_uncontended(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// Sequential drain through concurrency=1
+// Sequential drain (N pre-loaded items)
 //
-// One slot, jobs acquired and released one at a time. Measures the minimum
-// cycle time of each queue — how fast can it turn over a single permit.
+// Enqueue N items, then dequeue all N sequentially. Measures dequeue
+// throughput once the queue is already populated.
 // ---------------------------------------------------------------------------
 
 fn bench_sequential_drain(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let fifo = FifoQueue::new(1);
-    let cost = rt.block_on(async { CostWeightedQueue::new(1) });
-
     let mut group = c.benchmark_group("sequential_drain");
-    group.throughput(Throughput::Elements(1));
 
-    group.bench_function("fifo", |b| {
-        b.to_async(&rt).iter(|| async {
-            let j = job();
-            let permit = fifo.acquire(&j).await.unwrap();
-            drop(permit);
-        });
-    });
+    for &n in &[1u32, 16, 64] {
+        group.throughput(Throughput::Elements(n as u64));
 
-    group.bench_function("cost_weighted", |b| {
-        b.to_async(&rt).iter(|| async {
-            let j = job();
-            let permit = cost.acquire(&j).await.unwrap();
-            drop(permit);
+        group.bench_with_input(BenchmarkId::new("fifo", n), &n, |b, &n| {
+            b.to_async(&rt).iter(|| async move {
+                let q = FifoQueue::new();
+                for _ in 0..n { q.enqueue(job()); }
+                for _ in 0..n { let _ = q.dequeue().await; }
+            });
         });
-    });
+
+        group.bench_with_input(BenchmarkId::new("cost_weighted", n), &n, |b, &n| {
+            b.to_async(&rt).iter(|| async move {
+                let q = CostWeightedQueue::new();
+                for i in 0..n { q.enqueue(job_with_cost(i as u64)); }
+                // Give the worker a moment to ingest all items before draining.
+                tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+                for _ in 0..n { let _ = q.dequeue().await; }
+            });
+        });
+    }
 
     group.finish();
 }
 
 // ---------------------------------------------------------------------------
-// Concurrent fan-out (N tasks, N slots)
+// Concurrent fan-out (N producers, N consumers)
 //
-// N tasks all acquire simultaneously into a queue sized exactly N, so none
-// block. Measures how each queue handles parallel acquire pressure.
+// N tasks each enqueue one item; N tasks each dequeue one item in parallel.
+// Measures how each queue handles parallel pressure.
 // ---------------------------------------------------------------------------
 
 fn bench_concurrent_fan_out(c: &mut Criterion) {
@@ -96,43 +96,41 @@ fn bench_concurrent_fan_out(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("concurrent_fan_out");
 
-    for &n in &[4u32, 16, 32, 64, 128] {
-        let fifo = Arc::new(FifoQueue::new(n as usize));
-        let cost = Arc::new(rt.block_on(async { CostWeightedQueue::new(n as usize) }));
+    for &n in &[4u32, 16, 32, 64] {
+        let fifo = Arc::new(FifoQueue::new());
+        let cost = Arc::new(CostWeightedQueue::new());
 
         group.throughput(Throughput::Elements(n as u64));
 
         group.bench_with_input(BenchmarkId::new("fifo", n), &n, |b, &n| {
             let fifo = fifo.clone();
-            b.to_async(&rt).iter(|| async {
-                let futs: Vec<_> = (0..n)
-                    .map(|_| {
-                        let fifo = fifo.clone();
-                        async move {
-                            let j = job();
-                            let permit = fifo.acquire(&j).await.unwrap();
-                            drop(permit);
-                        }
-                    })
-                    .collect();
-                futures::future::join_all(futs).await
+            b.to_async(&rt).iter(|| async move {
+                let producers: Vec<_> = (0..n).map(|_| {
+                    let q = fifo.clone();
+                    async move { q.enqueue(job()); }
+                }).collect();
+                let consumers: Vec<_> = (0..n).map(|_| {
+                    let q = fifo.clone();
+                    async move { let _ = q.dequeue().await; }
+                }).collect();
+                futures::future::join_all(producers).await;
+                futures::future::join_all(consumers).await;
             });
         });
 
         group.bench_with_input(BenchmarkId::new("cost_weighted", n), &n, |b, &n| {
             let cost = cost.clone();
-            b.to_async(&rt).iter(|| async {
-                let futs: Vec<_> = (0..n)
-                    .map(|i| {
-                        let cost = cost.clone();
-                        async move {
-                            let j = job_with_cost(i as u64);
-                            let permit = cost.acquire(&j).await.unwrap();
-                            drop(permit);
-                        }
-                    })
-                    .collect();
-                futures::future::join_all(futs).await
+            b.to_async(&rt).iter(|| async move {
+                let producers: Vec<_> = (0..n).map(|i| {
+                    let q = cost.clone();
+                    async move { q.enqueue(job_with_cost(i as u64)); }
+                }).collect();
+                let consumers: Vec<_> = (0..n).map(|_| {
+                    let q = cost.clone();
+                    async move { let _ = q.dequeue().await; }
+                }).collect();
+                futures::future::join_all(producers).await;
+                futures::future::join_all(consumers).await;
             });
         });
     }
@@ -140,65 +138,5 @@ fn bench_concurrent_fan_out(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
-// Contended fan-in (N tasks, 1 slot)
-//
-// N tasks compete for a single slot. Each must wait for the previous to
-// finish. Measures scheduling overhead and worker throughput under
-// head-of-line conditions.
-// ---------------------------------------------------------------------------
-
-fn bench_contended_fan_in(c: &mut Criterion) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-
-    let mut group = c.benchmark_group("contended_fan_in");
-
-    for &n in &[4u32, 16, 32] {
-        group.throughput(Throughput::Elements(n as u64));
-
-        group.bench_with_input(BenchmarkId::new("fifo", n), &n, |b, &n| {
-            b.to_async(&rt).iter(|| async move {
-                let fifo = Arc::new(FifoQueue::new(1));
-                let futs: Vec<_> = (0..n)
-                    .map(|_| {
-                        let fifo = fifo.clone();
-                        tokio::spawn(async move {
-                            let j = job();
-                            let permit = fifo.acquire(&j).await.unwrap();
-                            drop(permit);
-                        })
-                    })
-                    .collect();
-                futures::future::join_all(futs).await
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("cost_weighted", n), &n, |b, &n| {
-            b.to_async(&rt).iter(|| async move {
-                let cost = Arc::new(CostWeightedQueue::new(1));
-                let futs: Vec<_> = (0..n)
-                    .map(|i| {
-                        let cost = cost.clone();
-                        tokio::spawn(async move {
-                            let j = job_with_cost(i as u64);
-                            let permit = cost.acquire(&j).await.unwrap();
-                            drop(permit);
-                        })
-                    })
-                    .collect();
-                futures::future::join_all(futs).await
-            });
-        });
-    }
-
-    group.finish();
-}
-
-criterion_group!(
-    benches,
-    bench_single_uncontended,
-    bench_sequential_drain,
-    bench_concurrent_fan_out,
-    bench_contended_fan_in
-);
+criterion_group!(benches, bench_single_roundtrip, bench_sequential_drain, bench_concurrent_fan_out);
 criterion_main!(benches);

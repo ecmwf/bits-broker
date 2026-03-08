@@ -8,8 +8,9 @@ use bits::actions::{ActionError, CheckAction, CheckResult};
 use bits::job::Job;
 use bits::queue::{FifoQueue, Queue};
 
-/// A check that always passes after sleeping for a fixed duration, serialised
-/// one-at-a-time through a FIFO queue. Useful for testing queue behaviour.
+/// A check that always passes after sleeping for a fixed duration.
+/// Jobs are enqueued into a FIFO queue and dequeued before sleeping,
+/// so they are processed in arrival order.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CheckDummyDelay {
     pub duration_ms: u64,
@@ -24,14 +25,15 @@ impl CheckDummyDelay {
     }
 
     fn default_queue() -> Arc<FifoQueue> {
-        Arc::new(FifoQueue::new(1))
+        Arc::new(FifoQueue::new())
     }
 }
 
 #[async_trait]
 impl CheckAction for CheckDummyDelay {
     async fn evaluate(&self, job: &Job) -> Result<CheckResult, ActionError> {
-        let _permit = self.queue.acquire(job).await?;
+        self.queue.enqueue(job.clone());
+        let _ = self.queue.dequeue().await;
         tokio::time::sleep(Duration::from_millis(self.duration_ms)).await;
         Ok(CheckResult::Pass)
     }

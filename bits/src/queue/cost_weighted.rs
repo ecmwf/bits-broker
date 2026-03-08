@@ -1,21 +1,20 @@
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::actions::ActionError;
 use crate::job::Job;
 use crate::queue::Queue;
 
-/// A queue that admits the cheapest waiting job first.
+/// A queue that yields the cheapest waiting job first.
 ///
 /// Cost is read from `job.metadata["cost"]` as a u64. Jobs with no cost
 /// value are treated as cost 0 (highest priority).
 ///
-/// Up to `concurrency` jobs run simultaneously. A background task maintains
-/// the priority heap and signals waiting callers when a slot opens.
+/// A background task maintains the priority heap and re-orders it as new
+/// items arrive. It never pops items on its own — only `dequeue` does that.
 pub struct CostWeightedQueue {
     tx: mpsc::UnboundedSender<WorkerCmd>,
     seq: Arc<AtomicU64>,
@@ -27,26 +26,16 @@ impl std::fmt::Debug for CostWeightedQueue {
     }
 }
 
-pub struct Permit {
-    done_tx: mpsc::UnboundedSender<WorkerCmd>,
-}
-
-impl Drop for Permit {
-    fn drop(&mut self) {
-        let _ = self.done_tx.send(WorkerCmd::Done);
-    }
-}
-
 enum WorkerCmd {
-    Enqueue { cost: u64, seq: u64, signal: oneshot::Sender<()> },
-    Done,
+    Enqueue { cost: u64, seq: u64, job: Job },
+    Dequeue(oneshot::Sender<Job>),
 }
 
 // Entry in the min-heap. Ordered by cost ascending, then seq ascending (FIFO tiebreak).
 struct Entry {
     cost: u64,
     seq: u64,
-    signal: oneshot::Sender<()>,
+    job: Job,
 }
 
 impl PartialEq for Entry {
@@ -62,74 +51,66 @@ impl PartialOrd for Entry {
 }
 impl Ord for Entry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // BinaryHeap is a max-heap; Reverse flips to min-heap by cost, then FIFO by seq.
+        // BinaryHeap is a max-heap; reverse flips to min-heap by cost, then FIFO by seq.
         other.cost.cmp(&self.cost).then(other.seq.cmp(&self.seq))
     }
 }
 
 impl CostWeightedQueue {
-    pub fn new(concurrency: usize) -> Self {
+    pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let tx_clone = tx.clone();
-        tokio::spawn(worker(rx, tx_clone, concurrency));
+        tokio::spawn(worker(rx));
         Self { tx, seq: Arc::new(AtomicU64::new(0)) }
     }
 }
 
-async fn worker(
-    mut rx: mpsc::UnboundedReceiver<WorkerCmd>,
-    done_tx: mpsc::UnboundedSender<WorkerCmd>,
-    concurrency: usize,
-) {
-    let mut in_flight: usize = 0;
+impl Default for CostWeightedQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The background worker shuffles the priority heap as items arrive and
+/// satisfies pending `dequeue` requests. It never pops from the heap
+/// spontaneously — a `Dequeue` command is required.
+async fn worker(mut rx: mpsc::UnboundedReceiver<WorkerCmd>) {
     let mut heap: BinaryHeap<Entry> = BinaryHeap::new();
+    let mut waiters: VecDeque<oneshot::Sender<Job>> = VecDeque::new();
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            WorkerCmd::Enqueue { cost, seq, signal } => {
-                heap.push(Entry { cost, seq, signal });
+            WorkerCmd::Enqueue { cost, seq, job } => {
+                heap.push(Entry { cost, seq, job });
             }
-            WorkerCmd::Done => {
-                in_flight = in_flight.saturating_sub(1);
+            WorkerCmd::Dequeue(reply) => {
+                waiters.push_back(reply);
             }
         }
 
-        // Dispatch as many waiting jobs as capacity allows.
-        while in_flight < concurrency {
-            match heap.pop() {
-                None => break,
-                Some(entry) => {
-                    if entry.signal.send(()).is_ok() {
-                        in_flight += 1;
-                    }
-                    // If send failed the caller cancelled — skip and try next.
-                }
+        // Match pending dequeue requests against the heap in priority order.
+        // The heap is the authoritative ordering; only this path pops from it.
+        while !waiters.is_empty() && !heap.is_empty() {
+            let reply = waiters.pop_front().unwrap();
+            let entry = heap.pop().unwrap();
+            if reply.send(entry.job).is_err() {
+                // Caller cancelled — skip and try next waiter.
             }
         }
     }
-
-    drop(done_tx);
 }
 
 #[async_trait]
-
 impl Queue for CostWeightedQueue {
-    type Permit = Permit;
-
-    async fn acquire(&self, job: &Job) -> Result<Self::Permit, ActionError> {
+    fn enqueue(&self, job: Job) {
         let cost = job.metadata["cost"].as_u64().unwrap_or(0);
         let seq = self.seq.fetch_add(1, AtomicOrdering::Relaxed);
+        let _ = self.tx.send(WorkerCmd::Enqueue { cost, seq, job });
+    }
 
-        let (signal_tx, signal_rx) = oneshot::channel();
-        self.tx
-            .send(WorkerCmd::Enqueue { cost, seq, signal: signal_tx })
-            .map_err(|_| ActionError::ResourceError("scheduler closed".into()))?;
-
-        signal_rx
-            .await
-            .map_err(|_| ActionError::ResourceError("scheduler closed".into()))?;
-
-        Ok(Permit { done_tx: self.tx.clone() })
+    async fn dequeue(&self) -> Option<Job> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(WorkerCmd::Dequeue(reply_tx)).ok()?;
+        reply_rx.await.ok()
     }
 }
 
@@ -146,69 +127,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admits_single_job_immediately() {
-        let q = Arc::new(CostWeightedQueue::new(1));
-        let job = job_with_cost(10);
-        let _permit = q.acquire(&job).await.unwrap();
+    async fn enqueue_then_dequeue_roundtrip() {
+        let q = CostWeightedQueue::new();
+        q.enqueue(job_with_cost(10));
+        let job = q.dequeue().await.unwrap();
+        assert_eq!(job.metadata["cost"].as_u64().unwrap(), 10);
     }
 
     #[tokio::test]
-    async fn cheap_admitted_before_expensive_when_both_waiting() {
-        // Fill the slot with a blocker, enqueue expensive then cheap, release blocker.
-        // The scheduler should pick cheap (cost=1) before expensive (cost=100).
-        let q = Arc::new(CostWeightedQueue::new(1));
-        let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    async fn cheap_dequeued_before_expensive() {
+        let q = CostWeightedQueue::new();
+        // Enqueue both before any dequeue so the worker can sort them.
+        q.enqueue(job_with_cost(100));
+        q.enqueue(job_with_cost(1));
 
-        // Occupy the sole slot.
-        let blocker = job_with_cost(0);
-        let hold = q.acquire(&blocker).await.unwrap();
+        // Give the worker a moment to insert both into the heap.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-        // Enqueue expensive first, then cheap, both will block on the held slot.
-        let mut set = JoinSet::new();
-        for cost in [100u64, 1u64] {
-            let q = Arc::clone(&q);
-            let order = Arc::clone(&order);
-            set.spawn(async move {
-                let permit = q.acquire(&job_with_cost(cost)).await.unwrap();
-                order.lock().unwrap().push(cost);
-                drop(permit);
-            });
-        }
+        let first = q.dequeue().await.unwrap();
+        let second = q.dequeue().await.unwrap();
 
-        // Give both tasks time to enter the heap before releasing.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        drop(hold);
-
-        while set.join_next().await.is_some() {}
-
-        assert_eq!(*order.lock().unwrap(), vec![1, 100], "cheap should be admitted first");
+        assert_eq!(first.metadata["cost"].as_u64().unwrap(), 1, "cheap should come first");
+        assert_eq!(second.metadata["cost"].as_u64().unwrap(), 100);
     }
 
     #[tokio::test]
     async fn fifo_tiebreak_for_equal_cost() {
-        let q = Arc::new(CostWeightedQueue::new(1));
+        let q = CostWeightedQueue::new();
         let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let hold = q.acquire(&job_with_cost(0)).await.unwrap();
-
-        // Submit three jobs with the same cost in sequence.
+        // Enqueue three jobs with the same cost in staggered order.
         let mut set = JoinSet::new();
         for seq in [1u64, 2, 3] {
-            let q = Arc::clone(&q);
-            let order = Arc::clone(&order);
+            let q_tx = q.tx.clone();
+            let q_seq = Arc::clone(&q.seq);
             set.spawn(async move {
-                // Stagger slightly to guarantee submission order.
                 tokio::time::sleep(std::time::Duration::from_millis(seq * 5)).await;
-                let permit = q.acquire(&job_with_cost(10)).await.unwrap();
-                order.lock().unwrap().push(seq);
-                drop(permit);
+                let cost = 10u64;
+                let s = q_seq.fetch_add(1, AtomicOrdering::Relaxed);
+                let mut job = Job::new(serde_json::json!({}));
+                job.metadata["cost"] = serde_json::json!(cost);
+                job.metadata["seq_label"] = serde_json::json!(seq);
+                let _ = q_tx.send(WorkerCmd::Enqueue { cost, seq: s, job });
             });
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        drop(hold);
-
         while set.join_next().await.is_some() {}
+
+        // Give worker time to insert all three.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        for _ in 0..3 {
+            let job = q.dequeue().await.unwrap();
+            order.lock().unwrap().push(job.metadata["seq_label"].as_u64().unwrap());
+        }
 
         assert_eq!(*order.lock().unwrap(), vec![1, 2, 3], "equal cost jobs should be FIFO");
     }

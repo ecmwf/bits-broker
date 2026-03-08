@@ -8,7 +8,7 @@ use bits::{Bits, Job, JobResult, PollOutcome};
 #[tokio::test]
 async fn cancel_stops_job_before_target() {
     let _ = common::CheckDummyDelay::new(100);
-    let _ = common::TargetDummyDelay::new(0, 1);
+    let _ = common::TargetDummyDelay::new(0);
 
     // The check runs for 100ms, giving us a window to cancel before the target is reached.
     let config = r#"

@@ -6,9 +6,8 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 
 use bits::actions::{ActionError, CheckResult, TargetResult};
-use bits::dispatcher::{Dispatcher, Executor, ExecutorKind, ThreadPoolExecutor};
+use bits::dispatcher::{Dispatcher, Executor, ExecutorKind, ThreadPoolExecutor, QueueKind};
 use bits::job::Job;
-use bits::queue::QueueKind;
 use bits::result::JobResult;
 use bits::{Bits, PollOutcome};
 

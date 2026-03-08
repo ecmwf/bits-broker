@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use bits::actions::{ActionError, TargetAction, TargetResult};
 use bits::job::Job;
-use bits::queue::{CostWeightedQueue, Queue};
+use bits::dispatcher::queue::{CostWeightedQueue, Queue};
 use bits::result::JobResult;
 
 /// A target that enqueues the job into a cost-weighted queue, dequeues it

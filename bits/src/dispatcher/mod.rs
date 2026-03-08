@@ -1,10 +1,8 @@
-pub mod external_pool;
-pub mod semaphore;
-pub mod thread_pool;
+pub mod executor;
+pub mod queue;
 
-pub use external_pool::RemotePoolExecutor;
-pub use semaphore::SemaphoreExecutor;
-pub use thread_pool::ThreadPoolExecutor;
+pub use executor::{RemotePoolExecutor, SemaphoreExecutor, ThreadPoolExecutor};
+pub use queue::{CostWeightedQueue, FifoQueue, Queue, QueueKind};
 
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -16,7 +14,6 @@ use tokio::sync::oneshot;
 
 use crate::actions::ActionError;
 use crate::job::Job;
-use crate::queue::{CostWeightedQueue, FifoQueue, Queue, QueueKind};
 
 fn default_remote_bind() -> String {
     "0.0.0.0:9001".into()

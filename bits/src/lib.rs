@@ -6,7 +6,6 @@ pub mod job;
 pub mod result;
 pub mod routing;
 pub mod dispatcher;
-pub mod queue;
 
 pub use bits::{Bits, JobHandle, PollOutcome};
 pub use job::Job;

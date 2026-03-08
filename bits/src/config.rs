@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::actions::{Action, target_remote::RemoteTarget};
-use crate::dispatcher::{Dispatcher, ExecutorKind};
-use crate::queue::QueueKind;
+use crate::dispatcher::{Dispatcher, ExecutorKind, QueueKind};
 use crate::routing::{switch::Switch, Route};
 use crate::routing::registry::create_action;
 
@@ -50,12 +49,12 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
 
     let registries = Registries { checks, transforms, targets };
 
-    let sweep_interval = match raw.get("bits").and_then(|v| v.get("sweep_interval_ms")) {
+    let sweep_interval = match raw.get("bits").and_then(|v| v.get("job_cleanup_interval_ms")) {
         None => None,
         Some(value) => Some(Duration::from_millis(
             value
                 .as_u64()
-                .ok_or("bits.sweep_interval_ms must be a number")?,
+                .ok_or("bits.job_cleanup_interval_ms must be a number")?,
         )),
     };
 
@@ -118,23 +117,16 @@ fn parse_action(
             }
 
             // namespace::name: { config } — inline action, bypasses named registries.
-            // Sibling keys `queue`, `executor`, `concurrency` attach a dispatcher to
-            // target actions.
+            // An optional sibling key `dispatcher: { queue, executor, concurrency }`
+            // attaches a dispatcher to the action.
             for (key, config) in map {
                 if key.contains("::") {
                     let (ns, action_name) = split_ns(key)?;
                     let action = create_action(action_name, config.clone())?;
                     let action = validate_inline_action(ns, action)?;
 
-                    let queue: Option<QueueKind> = map.get("queue")
-                        .map(|v| serde_json::from_value(v.clone()))
-                        .transpose()?;
-                    let executor: Option<ExecutorKind> = map.get("executor")
-                        .map(|v| serde_json::from_value(v.clone()))
-                        .transpose()?;
-                    let concurrency: Option<usize> = map.get("concurrency")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n as usize);
+                    let (queue, executor, concurrency) =
+                        parse_dispatcher_fields(map.get("dispatcher"))?;
 
                     return attach_dispatcher(action_name, action, queue, executor, concurrency);
                 }
@@ -194,28 +186,40 @@ fn validate_inline_action(
     }
 }
 
+/// Extract `queue`, `executor`, and `concurrency` from an optional `dispatcher` object.
+fn parse_dispatcher_fields(
+    dispatcher: Option<&serde_json::Value>,
+) -> Result<(Option<QueueKind>, Option<ExecutorKind>, Option<usize>), Box<dyn std::error::Error>> {
+    let Some(d) = dispatcher else {
+        return Ok((None, None, None));
+    };
+    let map = d.as_object().ok_or("dispatcher must be an object")?;
+    let queue = map.get("queue")
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()?;
+    let executor = map.get("executor")
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()?;
+    let concurrency = map.get("concurrency")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    Ok((queue, executor, concurrency))
+}
+
 /// Build an Action from a named registry entry.
 ///
-/// The entry may include `queue`, `executor`, and `concurrency` fields which
-/// are stripped from the action config and used to build a dispatcher.
+/// The entry may include a `dispatcher` object with `queue`, `executor`, and
+/// `concurrency` fields that are used to build a dispatcher.
 fn action_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::error::Error>> {
     let map = entry.as_object().ok_or("registry entry must be an object")?;
     let type_name = map.get("type")
         .and_then(|v| v.as_str())
         .ok_or("registry entry must have a 'type' field")?;
 
-    let queue: Option<QueueKind> = map.get("queue")
-        .map(|v| serde_json::from_value(v.clone()))
-        .transpose()?;
-    let executor: Option<ExecutorKind> = map.get("executor")
-        .map(|v| serde_json::from_value(v.clone()))
-        .transpose()?;
-    let concurrency: Option<usize> = map.get("concurrency")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
+    let (queue, executor, concurrency) = parse_dispatcher_fields(map.get("dispatcher"))?;
 
     let config: serde_json::Value = map.iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "type" | "queue" | "executor" | "concurrency"))
+        .filter(|(k, _)| !matches!(k.as_str(), "type" | "dispatcher"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<serde_json::Map<_, _>>()
         .into();

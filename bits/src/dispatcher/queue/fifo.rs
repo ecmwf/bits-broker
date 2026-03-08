@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::job::Job;
-use crate::queue::Queue;
+use super::Queue;
 
 /// A simple FIFO queue. Items are dequeued in the order they were enqueued.
 #[derive(Debug)]

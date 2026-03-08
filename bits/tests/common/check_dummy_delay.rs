@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use bits::actions::{ActionError, CheckAction, CheckResult};
 use bits::job::Job;
-use bits::queue::{FifoQueue, Queue};
+use bits::dispatcher::queue::{FifoQueue, Queue};
 
 /// A check that always passes after sleeping for a fixed duration.
 /// Jobs are enqueued into a FIFO queue and dequeued before sleeping,

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::job::Job;
-use crate::queue::Queue;
+use super::Queue;
 
 /// A queue that yields the cheapest waiting job first.
 ///
@@ -102,7 +102,9 @@ async fn worker(mut rx: mpsc::UnboundedReceiver<WorkerCmd>) {
 #[async_trait]
 impl Queue for CostWeightedQueue {
     fn enqueue(&self, job: Job) {
-        let cost = job.metadata["cost"].as_u64().unwrap_or(0);
+        let cost = job.metadata["cost"]
+            .as_u64()
+            .unwrap_or(0);
         let seq = self.seq.fetch_add(1, AtomicOrdering::Relaxed);
         let _ = self.tx.send(WorkerCmd::Enqueue { cost, seq, job });
     }
@@ -111,76 +113,5 @@ impl Queue for CostWeightedQueue {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx.send(WorkerCmd::Dequeue(reply_tx)).ok()?;
         reply_rx.await.ok()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-    use tokio::task::JoinSet;
-
-    fn job_with_cost(cost: u64) -> Job {
-        let mut job = Job::new(serde_json::json!({}));
-        job.metadata["cost"] = serde_json::json!(cost);
-        job
-    }
-
-    #[tokio::test]
-    async fn enqueue_then_dequeue_roundtrip() {
-        let q = CostWeightedQueue::new();
-        q.enqueue(job_with_cost(10));
-        let job = q.dequeue().await.unwrap();
-        assert_eq!(job.metadata["cost"].as_u64().unwrap(), 10);
-    }
-
-    #[tokio::test]
-    async fn cheap_dequeued_before_expensive() {
-        let q = CostWeightedQueue::new();
-        // Enqueue both before any dequeue so the worker can sort them.
-        q.enqueue(job_with_cost(100));
-        q.enqueue(job_with_cost(1));
-
-        // Give the worker a moment to insert both into the heap.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-
-        let first = q.dequeue().await.unwrap();
-        let second = q.dequeue().await.unwrap();
-
-        assert_eq!(first.metadata["cost"].as_u64().unwrap(), 1, "cheap should come first");
-        assert_eq!(second.metadata["cost"].as_u64().unwrap(), 100);
-    }
-
-    #[tokio::test]
-    async fn fifo_tiebreak_for_equal_cost() {
-        let q = CostWeightedQueue::new();
-        let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
-
-        // Enqueue three jobs with the same cost in staggered order.
-        let mut set = JoinSet::new();
-        for seq in [1u64, 2, 3] {
-            let q_tx = q.tx.clone();
-            let q_seq = Arc::clone(&q.seq);
-            set.spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(seq * 5)).await;
-                let cost = 10u64;
-                let s = q_seq.fetch_add(1, AtomicOrdering::Relaxed);
-                let mut job = Job::new(serde_json::json!({}));
-                job.metadata["cost"] = serde_json::json!(cost);
-                job.metadata["seq_label"] = serde_json::json!(seq);
-                let _ = q_tx.send(WorkerCmd::Enqueue { cost, seq: s, job });
-            });
-        }
-        while set.join_next().await.is_some() {}
-
-        // Give worker time to insert all three.
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
-        for _ in 0..3 {
-            let job = q.dequeue().await.unwrap();
-            order.lock().unwrap().push(job.metadata["seq_label"].as_u64().unwrap());
-        }
-
-        assert_eq!(*order.lock().unwrap(), vec![1, 2, 3], "equal cost jobs should be FIFO");
     }
 }

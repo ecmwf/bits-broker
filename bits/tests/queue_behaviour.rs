@@ -38,7 +38,7 @@ async fn target_dummy_cheap_job_dequeued_before_expensive() {
     //
     // We drive this directly against the queue rather than through dispatch
     // so we can control exactly when items enter and are consumed.
-    use bits::queue::{CostWeightedQueue, Queue};
+    use bits::dispatcher::queue::{CostWeightedQueue, Queue};
 
     let q = Arc::new(CostWeightedQueue::new());
     let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));

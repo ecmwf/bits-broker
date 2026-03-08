@@ -2,19 +2,40 @@ pub mod external_pool;
 pub mod semaphore;
 pub mod thread_pool;
 
-pub use external_pool::ExternalPoolExecutor;
+pub use external_pool::RemotePoolExecutor;
 pub use semaphore::SemaphoreExecutor;
 pub use thread_pool::ThreadPoolExecutor;
 
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 use tokio::sync::oneshot;
 
-use crate::actions::{ActionError, TargetResult};
+use crate::actions::ActionError;
 use crate::job::Job;
 use crate::queue::{CostWeightedQueue, FifoQueue, Queue, QueueKind};
+
+fn default_remote_bind() -> String {
+    "0.0.0.0:9001".into()
+}
+
+fn default_heartbeat_timeout_secs() -> u64 {
+    60
+}
+
+/// Configuration for the remote-pool executor.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemotePoolConfig {
+    /// Address the long-poll HTTP server binds to.
+    #[serde(default = "default_remote_bind")]
+    pub bind: String,
+    /// Seconds without a heartbeat before an in-progress job is evicted.
+    #[serde(default = "default_heartbeat_timeout_secs")]
+    pub heartbeat_timeout_secs: u64,
+}
 
 /// Selects the executor implementation to construct from config.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -22,6 +43,7 @@ use crate::queue::{CostWeightedQueue, FifoQueue, Queue, QueueKind};
 pub enum ExecutorKind {
     Semaphore,
     ThreadPool,
+    RemotePool(RemotePoolConfig),
 }
 
 /// An executor controls how a unit of work is run.
@@ -31,24 +53,25 @@ pub enum ExecutorKind {
 /// remote worker, etc. Ordering is handled separately by the [`Queue`].
 ///
 /// [`Queue`]: crate::queue::Queue
-pub trait Executor: Send + Sync {
+pub trait Executor<T>: Send + Sync {
     fn execute(
         &self,
         job: &Job,
-        work: BoxFuture<'static, Result<TargetResult, ActionError>>,
-    ) -> BoxFuture<'_, Result<TargetResult, ActionError>>;
+        action_type_id: TypeId,
+        work: BoxFuture<'static, Result<T, ActionError>>,
+    ) -> BoxFuture<'_, Result<T, ActionError>>;
 }
 
 // ================================
 //   Dispatcher
 // ================================
 
-type PendingItem = (
-    BoxFuture<'static, Result<TargetResult, ActionError>>,
-    oneshot::Sender<Result<TargetResult, ActionError>>,
+type PendingItem<T> = (
+    BoxFuture<'static, Result<T, ActionError>>,
+    oneshot::Sender<Result<T, ActionError>>,
 );
 
-type PendingMap = Mutex<HashMap<String, PendingItem>>;
+type PendingMap<T> = Mutex<HashMap<String, PendingItem<T>>>;
 
 /// Composes a [`Queue`] with an [`Executor`].
 ///
@@ -59,38 +82,45 @@ type PendingMap = Mutex<HashMap<String, PendingItem>>;
 /// suspends. A background worker is the only entity that calls `dequeue`;
 /// once it picks a job it runs the associated work through the executor and
 /// sends the result back to the suspended caller.
-pub struct Dispatcher {
+pub struct Dispatcher<T: Send + 'static> {
     queue: Arc<dyn Queue>,
     #[allow(dead_code)] // held to keep the Arc alive; worker uses executor_ref
-    executor: Arc<dyn Executor>,
-    pending: Arc<PendingMap>,
+    executor: Arc<dyn Executor<T>>,
+    pending: Arc<PendingMap<T>>,
+    #[allow(dead_code)] // captured by value into the worker task at construction
+    action_type_id: TypeId,
 }
 
-impl Dispatcher {
+impl<T: Send + 'static> Dispatcher<T> {
     /// Build a `Dispatcher` from config values, returning `None` if neither
     /// queue nor concurrency is specified (no scheduling needed).
     pub fn from_config(
         queue: Option<&QueueKind>,
         executor: Option<&ExecutorKind>,
         concurrency: Option<usize>,
+        action_type_id: TypeId,
     ) -> Option<Self> {
-        if queue.is_none() && concurrency.is_none() {
+        if queue.is_none() && concurrency.is_none() && executor.is_none() {
             return None;
         }
         let concurrency = concurrency.unwrap_or(tokio::sync::Semaphore::MAX_PERMITS);
-        let executor: Arc<dyn Executor> = match executor.unwrap_or(&ExecutorKind::Semaphore) {
-            ExecutorKind::Semaphore => Arc::new(SemaphoreExecutor::new(concurrency)),
-            ExecutorKind::ThreadPool => Arc::new(ThreadPoolExecutor::new(concurrency)),
+        let executor: Arc<dyn Executor<T>> = match executor {
+            None | Some(ExecutorKind::Semaphore) => Arc::new(SemaphoreExecutor::new(concurrency)),
+            Some(ExecutorKind::ThreadPool) => Arc::new(ThreadPoolExecutor::new(concurrency)),
+            Some(ExecutorKind::RemotePool(cfg)) => Arc::new(RemotePoolExecutor::new(
+                &cfg.bind,
+                Duration::from_secs(cfg.heartbeat_timeout_secs),
+            )),
         };
         let queue: Arc<dyn Queue> = match queue.unwrap_or(&QueueKind::Fifo) {
             QueueKind::Fifo => Arc::new(FifoQueue::new()),
             QueueKind::CostWeighted => Arc::new(CostWeightedQueue::new()),
         };
-        Some(Self::new(queue, executor))
+        Some(Self::new(queue, executor, action_type_id))
     }
 
-    pub fn new(queue: Arc<dyn Queue>, executor: Arc<dyn Executor>) -> Self {
-        let pending: Arc<PendingMap> = Arc::new(Mutex::new(HashMap::new()));
+    pub fn new(queue: Arc<dyn Queue>, executor: Arc<dyn Executor<T>>, action_type_id: TypeId) -> Self {
+        let pending: Arc<PendingMap<T>> = Arc::new(Mutex::new(HashMap::new()));
 
         let queue_ref = Arc::clone(&queue);
         let executor_ref = Arc::clone(&executor);
@@ -111,20 +141,20 @@ impl Dispatcher {
 
                 let executor = Arc::clone(&executor_ref);
                 tokio::spawn(async move {
-                    let result = executor.execute(&job, work).await;
+                    let result = executor.execute(&job, action_type_id, work).await;
                     let _ = reply_tx.send(result);
                 });
             }
         });
 
-        Self { queue, executor, pending }
+        Self { queue, executor, pending, action_type_id }
     }
 
     pub fn dispatch(
         &self,
         job: &Job,
-        work: BoxFuture<'static, Result<TargetResult, ActionError>>,
-    ) -> BoxFuture<'_, Result<TargetResult, ActionError>> {
+        work: BoxFuture<'static, Result<T, ActionError>>,
+    ) -> BoxFuture<'static, Result<T, ActionError>> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         // Insert before enqueue so the worker always finds the entry.

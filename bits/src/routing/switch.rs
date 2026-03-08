@@ -1,10 +1,14 @@
+use std::borrow::Cow;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::future::BoxFuture;
+
 use crate::{
     job::Job,
     actions::{Action, ActionError, CheckResult, TargetAction, TargetResult, TransformResult},
     routing::Route,
 };
-use async_trait::async_trait;
-use std::borrow::Cow;
 
 #[cfg(test)]
 mod tests {
@@ -24,7 +28,7 @@ mod tests {
     async fn client_gone_before_target() {
         let switch = Switch::new(vec![Route::new(
             "default".to_string(),
-            vec![Action::Target(Box::new(AlwaysSucceed))],
+            vec![Action::Target(Arc::new(AlwaysSucceed), None)],
         )]);
 
         // Job::new() has reconnect_deadline = Instant::now() (immediately expired)
@@ -62,19 +66,64 @@ impl TargetAction for Switch {
                     return Err(ActionError::Cancelled);
                 }
                 match action {
-                    Action::Check(check) => match check.evaluate(&current_job).await? {
-                        CheckResult::Pass => {}
-                        CheckResult::Reject { .. } => continue 'route,
-                    },
-                    Action::Transform(transform) => match transform.execute(current_job.to_mut()).await? {
-                        TransformResult::Continue => {}
-                        TransformResult::Reject { .. } => continue 'route,
-                    },
-                    Action::Target(target) => {
+                    Action::Check(check, dispatcher) => {
+                        let result = match dispatcher {
+                            Some(d) => {
+                                let c = Arc::clone(check);
+                                let j = (*current_job).clone();
+                                let work: BoxFuture<'static, Result<CheckResult, ActionError>> =
+                                    Box::pin(async move { c.evaluate(&j).await });
+                                d.dispatch(&current_job, work).await?
+                            }
+                            None => check.evaluate(&current_job).await?,
+                        };
+                        match result {
+                            CheckResult::Pass => {}
+                            CheckResult::Reject { .. } => continue 'route,
+                        }
+                    }
+                    Action::Transform(transform, dispatcher) => {
+                        let result = match dispatcher {
+                            Some(d) => {
+                                let t = Arc::clone(transform);
+                                let job_mux = Arc::new(tokio::sync::Mutex::new((*current_job).clone()));
+                                let job_mux2 = Arc::clone(&job_mux);
+                                let work: BoxFuture<'static, Result<TransformResult, ActionError>> =
+                                    Box::pin(async move {
+                                        let mut guard = job_mux2.lock().await;
+                                        t.execute(&mut *guard).await
+                                    });
+                                let result = d.dispatch(&current_job, work).await?;
+                                if matches!(result, TransformResult::Continue) {
+                                    let modified = Arc::try_unwrap(job_mux)
+                                        .expect("work future completed; Arc should be unique")
+                                        .into_inner();
+                                    *current_job.to_mut() = modified;
+                                }
+                                result
+                            }
+                            None => transform.execute(current_job.to_mut()).await?,
+                        };
+                        match result {
+                            TransformResult::Continue => {}
+                            TransformResult::Reject { .. } => continue 'route,
+                        }
+                    }
+                    Action::Target(target, dispatcher) => {
                         if !current_job.client_present() {
                             return Err(ActionError::ClientGone);
                         }
-                        match target.dispatch(&current_job).await? {
+                        let result = match dispatcher {
+                            Some(d) => {
+                                let t = Arc::clone(target);
+                                let j = (*current_job).clone();
+                                let work: BoxFuture<'static, Result<TargetResult, ActionError>> =
+                                    Box::pin(async move { t.dispatch(&j).await });
+                                d.dispatch(&current_job, work).await?
+                            }
+                            None => target.dispatch(&current_job).await?,
+                        };
+                        match result {
                             TargetResult::Complete(result) => return Ok(TargetResult::Complete(result)),
                             TargetResult::Reject { .. } => continue 'route,
                         }

@@ -1,12 +1,16 @@
+use std::sync::Arc;
+
 use crate::job::Job;
 use crate::result::JobResult;
 use async_trait::async_trait;
 
 pub mod check_hasrole;
 pub mod target_http;
+pub mod target_remote;
 
 pub use check_hasrole::*;
 pub use target_http::*;
+pub use target_remote::*;
 
 pub use crate::routing::registry::{create_action, list_actions};
 
@@ -28,7 +32,7 @@ macro_rules! register_action {
                 factory: |config| {
                     let action: $action_type = serde_json::from_value(config)
                         .map_err(|e| $crate::actions::ActionError::ConfigError(e.to_string()))?;
-                    Ok($crate::actions::Action::Check(Box::new(action)))
+                    Ok($crate::actions::Action::Check(std::sync::Arc::new(action), None))
                 }
             }
         }
@@ -40,7 +44,7 @@ macro_rules! register_action {
                 factory: |config| {
                     let action: $action_type = serde_json::from_value(config)
                         .map_err(|e| $crate::actions::ActionError::ConfigError(e.to_string()))?;
-                    Ok($crate::actions::Action::Transform(Box::new(action)))
+                    Ok($crate::actions::Action::Transform(std::sync::Arc::new(action), None))
                 }
             }
         }
@@ -52,7 +56,7 @@ macro_rules! register_action {
                 factory: |config| {
                     let action: $action_type = serde_json::from_value(config)
                         .map_err(|e| $crate::actions::ActionError::ConfigError(e.to_string()))?;
-                    Ok($crate::actions::Action::Target(Box::new(action)))
+                    Ok($crate::actions::Action::Target(std::sync::Arc::new(action), None))
                 }
             }
         }
@@ -97,9 +101,9 @@ impl std::error::Error for ActionError {}
 // ================================
 
 pub enum Action {
-    Check(Box<dyn CheckAction>),
-    Transform(Box<dyn TransformAction>),
-    Target(Box<dyn TargetAction>),
+    Check(Arc<dyn CheckAction>, Option<crate::dispatcher::Dispatcher<CheckResult>>),
+    Transform(Arc<dyn TransformAction>, Option<crate::dispatcher::Dispatcher<TransformResult>>),
+    Target(Arc<dyn TargetAction>, Option<crate::dispatcher::Dispatcher<TargetResult>>),
     Switch(crate::routing::switch::Switch),
     /// Mark the job as persistent from this point forward.
     Persist,
@@ -108,9 +112,9 @@ pub enum Action {
 impl std::fmt::Debug for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Action::Check(_) => write!(f, "Action::Check(..)"),
-            Action::Transform(_) => write!(f, "Action::Transform(..)"),
-            Action::Target(_) => write!(f, "Action::Target(..)"),
+            Action::Check(..) => write!(f, "Action::Check(..)"),
+            Action::Transform(..) => write!(f, "Action::Transform(..)"),
+            Action::Target(..) => write!(f, "Action::Target(..)"),
             Action::Switch(_) => write!(f, "Action::Switch(..)"),
             Action::Persist => write!(f, "Action::Persist"),
         }

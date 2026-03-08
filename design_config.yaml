@@ -1,3 +1,20 @@
+# Example ECMWF routing config demonstrating the full dispatcher architecture.
+#
+# Dispatcher config (queue, executor, concurrency) lives inside the registry
+# entry alongside `type:`, not inside the action's own config.
+#
+# queue:
+#   fifo          — first-in, first-out ordering
+#   cost_weighted — cheaper jobs (lower metadata["cost"]) run first
+#
+# executor:
+#   semaphore     — inline async, bounded by concurrency (default)
+#   thread_pool   — offload to dedicated OS threads (CPU/blocking work)
+#   remote_pool   — hand off to external workers via HTTP long-poll
+#                   (only valid with target::remote)
+#
+# concurrency: <n>  — max simultaneous executions
+
 checks:
 
   valid_data:
@@ -17,31 +34,26 @@ transforms:
   expand:
     type: metkit_expansion
     expand_parameters: true
+    concurrency: 16           # limit concurrent calls to the expansion service
 
 targets:
 
   mars_od:
-    type: mars_destination
-    endpoint: "mars.ecmwf.int:8080"
-    queue:
-      type: fifo
-      capacity: 100
-      workers: 10
+    type: http
+    url: "http://mars.ecmwf.int:8080/retrieve"
+    queue: cost_weighted      # cheap jobs first
+    concurrency: 10
 
   dss_od:
-    type: http_call
-    endpoint: "dss.ecmwf.int:9090"
-    queue:
-      type: fifo
+    type: http
+    url: "http://dss.ecmwf.int:9090/retrieve"
+    queue: fifo
+    concurrency: 8
 
   fdb_worker:
-    type: http_pull
-    capability: fdb
-    queue:
-      type: fifo
-
-
-  
+    type: remote              # noop — work is done by external FDB workers
+    queue: cost_weighted
+    concurrency: 50           # max jobs waiting for a worker to claim them
 
 
 routes:
@@ -67,9 +79,9 @@ routes:
   extremes_dt:
     - check::valid_data
     - transform::expand
-    - target::dss_od
+    - target::fdb_worker
 
   extremes_fc:
     - check::valid_data
     - transform::expand
-    - target::dss_od
+    - target::fdb_worker

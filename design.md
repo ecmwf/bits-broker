@@ -15,7 +15,7 @@ across distributed infrastructure based on job attributes, user quotas, and reso
 
 - **Weighted fair scheduling** — requests are costed before dispatch; the scheduler prioritises cheap requests and enforces per-user fairness so heavy users don't starve others.
 
-- **External worker pools** — targets can dispatch to external workers via HTTP long-poll. Workers pull jobs from the broker and post results back. The submitting connection is held open and receives the result when the worker completes.
+- **External worker pools** — the `remote` target action hands jobs to external workers via HTTP long-poll. Workers pull jobs from the broker and post results back.
 
 - **Persistence and recovery** — persistent jobs survive broker termination. Jobs are rebalanced to live instances.
 
@@ -42,14 +42,14 @@ A `Job` is the unit of work. It carries:
 A job flows through a **pipeline** — an ordered list of actions. Three action types:
 
 - **Check** — guard condition. Evaluates the job and either passes or rejects. A rejection stops
-  the current route and tries the next route in the switch. Examples: `check::match`,
-  `check::has_role`, `check::has_license`.
+  the current route and tries the next route in the switch. Examples: `check::has_role`,
+  `check::has_license`.
 
 - **Transform** — mutation. Mutates the job, perhaps changing the request or adding metadata, and
-  continues. Examples: `transform::cost`, `transform::metkit_expansion`.
+  continues. Examples: `transform::metkit_expansion`, `transform::cost`.
 
 - **Target** — terminal dispatch. Sends the job to a destination and returns a result.
-  Examples: `target::mars_retrieval`, `target::external_pool`.
+  Examples: `target::http`, `target::remote`.
 
 ### Switch
 
@@ -63,7 +63,8 @@ Switches can be nested inside routes.
 
 ## Configuration
 
-Config is YAML with four top-level sections — three typed registries and a pipelines section:
+Config is YAML. The top-level sections are three typed registries (`checks`, `transforms`,
+`targets`) for reusable named entries, and a `routes` section defining the pipelines:
 
 ```yaml
 checks:
@@ -72,49 +73,50 @@ checks:
     role: privileged
 
 transforms:
-  cost:
-    type: metkit_cost
-    endpoint: "cost-service.ecmwf.int:9000"
-    max_concurrent: 16      # concurrency limit for calls to the cost service
+  expand:
+    type: metkit_expansion
+    expand_parameters: true
 
 targets:
   mars_retrieval:
-    type: mars_destination
-    endpoint: "mars.ecmwf.int:8080"
-    capacity: 200           # max jobs waiting in the scheduler
+    type: http
+    url: "http://mars.ecmwf.int:8080"
+    queue: cost_weighted   # dispatcher config — see Dispatcher section
+    concurrency: 8
 
-  dss_workers:
-    type: external_pool
-    capacity: 50            # max jobs waiting for a worker to claim them
+  fdb_workers:
+    type: remote           # noop; work is done by external workers
+    queue: cost_weighted
+    concurrency: 50
 
-pipelines:
+routes:
   ecmwf_data:
     - persist                   # built-in: mark job as persistent and write to DB
-    - transform::cost           # evaluate the cost of the request
+    - transform::expand         # evaluate the cost of the request
     - switch:                   # try privileged path first, fall back to public
         privileged:
           - check::is_privileged
           - target::mars_retrieval
         public:
-          - check::match:       # inline — no name needed
-              class: od
-          - target::dss_workers
+          - check::has_role:    # inline — no registry entry needed
+              role: registered
+          - target::fdb_workers
 ```
 
 **Key decisions:**
 
 - Named entries in `checks:`, `transforms:`, and `targets:` are resolved at parse time. The
-  `check::`, `transform::`, and `target::` prefixes in pipelines are meaningful — they identify
-  which registry to look up. This makes the type of each pipeline step visible at a glance.
-- `type:` is the reserved key within each entry. All other keys at the same level are config
-  for that action, keeping definitions flat.
-- Scheduling and concurrency config (e.g. `capacity`, `max_concurrent`) are properties of the
-  action that needs them, not a generic `queue:` wrapper. Each action manages its own internal
-  scheduling primitives.
+  `check::`, `transform::`, and `target::` prefixes in routes are meaningful — they identify
+  which registry to look up. This makes the type of each route step visible at a glance.
+- `type:` is the reserved key within each registry entry. All other keys at the same level are
+  either config for that action or dispatcher config (`queue`, `executor`, `concurrency`).
+- Dispatcher config (`queue`, `executor`, `concurrency`) is a **route-step concern** — it sits
+  alongside `type:` in a registry entry, or as sibling keys for inline step definitions. See the
+  Dispatcher section below.
 - The reserved string `"persist"` is a built-in pipeline step, not a user-defined entry.
 - YAML anchors are deliberately not used — the named registries are an explicit feature of the
   schema, not a YAML trick. Named entries also ensure shared resources are the same instance in memory.
-- Inline actions (e.g. `check::match:` directly in a pipeline) bypass the registry entirely and
+- Inline actions (e.g. `check::has_role:` directly in a pipeline) bypass the registry entirely and
   are not reusable.
 
 ---
@@ -125,9 +127,10 @@ Actions are registered at compile time using the `inventory` crate. This allows 
 to register their own actions without the core crate knowing about them:
 
 ```rust
-register_action!(check,     "match",            Match);
-register_action!(transform, "metkit_cost",      MetkitCost);
-register_action!(target,    "mars_destination", MarsDestination);
+register_action!(check,     "has_role",          HasRole);
+register_action!(transform, "metkit_expansion",  MetkitExpansion);
+register_action!(target,    "http",              HttpTarget);
+register_action!(target,    "remote",            RemoteTarget);
 ```
 
 At runtime, `create_action(name, config)` looks up the registered factory and constructs the
@@ -135,43 +138,83 @@ action from its JSON config.
 
 ---
 
-## Scheduling Primitives
+## Dispatcher
 
-Scheduling is not a pipeline concept — it is infrastructure that action implementations use
-internally. The pipeline only sees `CheckAction`, `TransformAction`, `TargetAction`. How an
-action manages concurrency or ordering is entirely its own concern.
+Any pipeline step — Check, Transform, or Target — can have an optional **dispatcher** that
+controls ordering and concurrency before the action runs. A dispatcher composes two orthogonal
+concerns: a **queue** that controls *which* job runs next, and an **executor** that controls
+*how* the work runs.
 
-Two primitives cover all cases:
+### Queue — ordering
 
-### Semaphore
+| Kind | Behaviour |
+|------|-----------|
+| `fifo` | First-in, first-out. Default when `queue` is set without an explicit kind. |
+| `cost_weighted` | Cheaper jobs (lower `metadata["cost"]`) run before expensive ones. |
 
-A standard concurrency limit. Any action that calls an external service with finite capacity
-holds a `Semaphore` and acquires a permit before each call. The permit is dropped when the call
-returns, freeing the slot for the next waiter. Waiters queue in FIFO order internally.
+### Executor — execution
 
-Used by: costing transforms, per-user throttle checks, any action with a `max_concurrent` config.
+| Kind | Behaviour |
+|------|-----------|
+| `semaphore` | Runs work inline on the async scheduler, bounded by `concurrency`. Default. |
+| `thread_pool` | Offloads work to a pool of `concurrency` dedicated OS threads. Use for CPU-bound or blocking work that would otherwise starve the async runtime. |
+| `remote_pool` | Hands the job to an external worker via HTTP long-poll. Used exclusively with `target::remote`. |
 
-### Scheduler
+### Attaching a dispatcher to a step
 
-A weighted fair queue. Accepts jobs with a cost, prioritises cheap jobs over expensive ones,
-and enforces fairness across users. Used when the ordering of execution matters — specifically
-for dispatch to backends with finite capacity where large requests should not starve small ones.
+For **named registry entries**, dispatcher fields sit alongside `type:` in the entry:
 
-`acquire(job, cost)` suspends the calling task until the scheduler assigns execution. It returns
-a handle the caller uses to complete the work and receive the result.
+```yaml
+targets:
+  mars_retrieval:
+    type: http
+    url: "http://mars.ecmwf.int:8080"
+    queue: cost_weighted
+    concurrency: 8
+```
 
-Used by: target actions dispatching to finite-capacity backends.
+For **inline steps**, they are sibling keys in the mapping:
 
-### External Worker Pool
+```yaml
+routes:
+  default:
+    - target::http:
+        url: "http://mars.ecmwf.int:8080"
+      queue: cost_weighted
+      concurrency: 8
+```
 
-A target action that dispatches to external workers via HTTP long-poll. The job thread calls
-`scheduler.acquire(job, cost)`, which suspends it. An external worker connects and calls a
-long-poll endpoint; the scheduler assigns the next job to that worker and wakes the job thread
-with a handle to the worker connection. The job thread holds the original client connection open
-and streams the result back when the worker completes.
+Dispatcher config is valid on any step type — Check, Transform, or Target:
 
-The scheduler inside an external pool target is the same `Scheduler` primitive — the difference
-is only that workers are remote processes rather than internal async tasks.
+```yaml
+transforms:
+  expand:
+    type: metkit_expansion
+    expand_parameters: true
+    concurrency: 4            # limit concurrent expansion calls
+```
+
+`queue` accepts `fifo` or `cost_weighted`. `executor` accepts `semaphore`, `thread_pool`, or
+`remote_pool`. `concurrency` is a positive integer; omitting it with a queue defaults to unlimited.
+
+### Remote pool
+
+`target::remote` is a no-op action paired exclusively with `executor: remote_pool`. When a job
+reaches this step, the dispatcher holds the caller suspended and hands the job to an external
+worker via HTTP long-poll. The worker posts the result back; the caller is woken and the result
+is returned to the client.
+
+```yaml
+targets:
+  fdb_workers:
+    type: remote
+    queue: cost_weighted
+    concurrency: 50
+```
+
+`remote` always implies `executor: remote_pool` — it is auto-inserted if not specified. Any
+other executor paired with `remote`, or `remote_pool` paired with a non-`remote` action, is
+rejected at config parse time.
 
 ---
 
@@ -191,8 +234,8 @@ The DB record stores:
 ```
 job_id
 original_request    — written once at persist; mirrors job.original_request, never updated
-checkpoint_state    — current job state (request + metadata), updated at each scheduler entry
-checkpoint_name     — name of the last scheduler entered; null means start from original_request
+checkpoint_state    — current job state (request + metadata), updated at each dispatcher entry
+checkpoint_name     — name of the last dispatcher entered; null means start from original_request
 status              — registered | queued | in_flight | done | failed
 ```
 
@@ -208,28 +251,28 @@ When a broker restarts, it loads persistent jobs from the DB and recovers based 
 | checkpoint_name | action |
 |---|---|
 | null | Re-run from `original_request` (persist action and all transforms will re-execute) |
-| matches a scheduler in the current pipeline | Re-insert into that scheduler with `checkpoint_state` |
-| does not match any scheduler | Re-run from `original_request` |
+| matches a dispatcher in the current pipeline | Re-insert into that dispatcher with `checkpoint_state` |
+| does not match any dispatcher | Re-run from `original_request` |
 
 If a pipeline is reconfigured and a checkpoint name no longer exists, the job restarts from the
-beginning. This is acceptable for redeployment scenarios — all pre-scheduler actions are pure and
+beginning. This is acceptable for redeployment scenarios — all pre-dispatcher actions are pure and
 safe to replay.
 
-**Scheduler actions must be idempotent** — if a worker dies mid-execution, the job times back to
+**Dispatcher actions must be idempotent** — if a worker dies mid-execution, the job times back to
 `queued` state and will be retried.
 
 ---
 
 ## HTTP Transport
 
-Clients submit jobs and poll for results over HTTP. Because jobs may wait in schedulers for
+Clients submit jobs and poll for results over HTTP. Because jobs may wait in dispatchers for
 extended periods, the connection model matters:
 
 - **Long polling** — the client holds the HTTP connection open while the job is processing.
   When the job is nearly ready, BITS holds the connection and streams the result when available.
-- **Retry-After** — for jobs deep in a scheduler (long estimated wait), BITS returns a `Retry-After`
-  header and the client switches to periodic polling. This frees the connection slot on the F5
-  load balancer.
+- **Retry-After** — for jobs deep in a dispatcher (long estimated wait), BITS returns a `Retry-After`
+  header and the client switches to periodic polling. This frees the connection slot on the load
+  balancer.
 - **Reconnect** — clients reconnect with their `job_id` to reattach to a waiting job. The
   async task for the job remains alive across reconnects; only the HTTP connection is reestablished.
 - **Jitter** — reconnect timers should include random jitter to avoid thundering herd on restart.
@@ -241,7 +284,7 @@ and returns a URL the client fetches directly, keeping BITS out of the data path
 
 ## Distributed Broker
 
-Multiple broker instances each hold a shard of the scheduler:
+Multiple broker instances each hold a shard of the dispatcher:
 
 - Brokers **lease resource quotas** from a central Postgres DB atomically. Local quota
   reservations avoid per-job DB queries. On broker crash, unreleased reservations expire by TTL.
@@ -256,8 +299,8 @@ Multiple broker instances each hold a shard of the scheduler:
 
 ## What is not yet implemented
 
-- Scheduler runtime (weighted fair queue, semaphore primitives in `src/scheduler/`)
-- External worker pool target (HTTP long-poll worker API, job handoff, result callback)
+- Remote pool runtime — full HTTP long-poll worker API, job handoff, and result callback
+  (`executor: remote_pool` is stubbed and returns an error)
 - HTTP server (`src/api/` is a stub)
 - Persistence / DB integration
 - Resource quota tracking and broker negotiation

@@ -1,7 +1,10 @@
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::actions::Action;
+use crate::actions::{Action, target_remote::RemoteTarget};
+use crate::dispatcher::{Dispatcher, ExecutorKind};
+use crate::queue::QueueKind;
 use crate::routing::{switch::Switch, Route};
 use crate::routing::registry::create_action;
 
@@ -114,12 +117,26 @@ fn parse_action(
                 return Ok(Action::Switch(Switch::new(routes)));
             }
 
-            // namespace::name: { config } — inline action, bypasses named registries
+            // namespace::name: { config } — inline action, bypasses named registries.
+            // Sibling keys `queue`, `executor`, `concurrency` attach a dispatcher to
+            // target actions.
             for (key, config) in map {
                 if key.contains("::") {
                     let (ns, action_name) = split_ns(key)?;
                     let action = create_action(action_name, config.clone())?;
-                    return validate_inline_action(ns, action);
+                    let action = validate_inline_action(ns, action)?;
+
+                    let queue: Option<QueueKind> = map.get("queue")
+                        .map(|v| serde_json::from_value(v.clone()))
+                        .transpose()?;
+                    let executor: Option<ExecutorKind> = map.get("executor")
+                        .map(|v| serde_json::from_value(v.clone()))
+                        .transpose()?;
+                    let concurrency: Option<usize> = map.get("concurrency")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize);
+
+                    return attach_dispatcher(action_name, action, queue, executor, concurrency);
                 }
             }
 
@@ -170,30 +187,99 @@ fn validate_inline_action(
     action: Action,
 ) -> Result<Action, Box<dyn std::error::Error>> {
     match (ns, &action) {
-        ("check", Action::Check(_)) => Ok(action),
-        ("transform", Action::Transform(_)) => Ok(action),
-        ("target", Action::Target(_)) => Ok(action),
+        ("check", Action::Check(..)) => Ok(action),
+        ("transform", Action::Transform(..)) => Ok(action),
+        ("target", Action::Target(..)) => Ok(action),
         _ => Err(format!("inline action namespace '{}' does not match action type", ns).into()),
     }
 }
 
-/// Build an Action from a named registry entry, with optional queue wrapping.
+/// Build an Action from a named registry entry.
+///
+/// The entry may include `queue`, `executor`, and `concurrency` fields which
+/// are stripped from the action config and used to build a dispatcher.
 fn action_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::error::Error>> {
     let map = entry.as_object().ok_or("registry entry must be an object")?;
     let type_name = map.get("type")
         .and_then(|v| v.as_str())
         .ok_or("registry entry must have a 'type' field")?;
-    let queue_val = map.get("queue").cloned();
+
+    let queue: Option<QueueKind> = map.get("queue")
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()?;
+    let executor: Option<ExecutorKind> = map.get("executor")
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()?;
+    let concurrency: Option<usize> = map.get("concurrency")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+
     let config: serde_json::Value = map.iter()
-        .filter(|(k, _)| k.as_str() != "type" && k.as_str() != "queue")
+        .filter(|(k, _)| !matches!(k.as_str(), "type" | "queue" | "executor" | "concurrency"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<serde_json::Map<_, _>>()
         .into();
-    let action = create_action(type_name, config)?;
 
-    if queue_val.is_some() {
-        Err("queue configuration is not yet implemented".into())
+    let action = create_action(type_name, config)?;
+    attach_dispatcher(type_name, action, queue, executor, concurrency)
+}
+
+/// Attach a dispatcher to a target action, validating `remote` ↔ `remote_pool` pairing.
+///
+/// Rules:
+/// - `remote` action always uses `remote_pool`; any other executor is an error.
+///   If no executor is specified for a `remote` action, `remote_pool` is auto-selected.
+/// - `remote_pool` executor requires a `remote` action; using it with any other
+///   action type is an error.
+/// - For non-target actions, dispatcher config is invalid.
+fn attach_dispatcher(
+    action_name: &str,
+    action: Action,
+    queue: Option<QueueKind>,
+    mut executor: Option<ExecutorKind>,
+    concurrency: Option<usize>,
+) -> Result<Action, Box<dyn std::error::Error>> {
+    let is_remote_action = action_name == "remote";
+    let is_remote_pool = matches!(&executor, Some(ExecutorKind::RemotePool(_)));
+
+    if is_remote_action {
+        match &executor {
+            None => executor = Some(ExecutorKind::RemotePool(crate::dispatcher::RemotePoolConfig {
+                bind: "0.0.0.0:9001".into(),
+                heartbeat_timeout_secs: 60,
+            })),
+            Some(ExecutorKind::RemotePool(_)) => {}
+            Some(_) => return Err("'remote' target requires executor: remote_pool".into()),
+        }
+    } else if is_remote_pool {
+        return Err("executor: remote_pool requires a 'remote' target action".into());
+    }
+
+    let has_dispatcher_config = queue.is_some() || executor.is_some() || concurrency.is_some();
+
+    // Capture the concrete action type so executors can guard against misconfiguration.
+    let action_type_id = if action_name == "remote" {
+        TypeId::of::<RemoteTarget>()
     } else {
-        Ok(action)
+        TypeId::of::<()>()
+    };
+
+    match action {
+        Action::Check(check, _) => {
+            let dispatcher = Dispatcher::from_config(queue.as_ref(), executor.as_ref(), concurrency, action_type_id);
+            Ok(Action::Check(check, dispatcher))
+        }
+        Action::Transform(transform, _) => {
+            let dispatcher = Dispatcher::from_config(queue.as_ref(), executor.as_ref(), concurrency, action_type_id);
+            Ok(Action::Transform(transform, dispatcher))
+        }
+        Action::Target(target, _) => {
+            let dispatcher = Dispatcher::from_config(queue.as_ref(), executor.as_ref(), concurrency, action_type_id);
+            Ok(Action::Target(target, dispatcher))
+        }
+        _ if has_dispatcher_config => {
+            Err("queue/executor/concurrency are only valid for Check, Transform, and Target actions".into())
+        }
+        _ => Ok(action),
     }
 }

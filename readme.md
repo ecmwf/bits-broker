@@ -25,9 +25,9 @@
 
 - 📡 **Horizontal scalability with consistency** — multiple broker instances share quota of shared resources safely and efficiently.
 
-- 🚦 **Queuing and backpressure** — any pipeline action can have bounded queues with configurable capacity and worker count.
+- 🚦 **Queuing and backpressure** — any pipeline step (check, transform, or target) can have a dispatcher with configurable ordering and concurrency.
 
-- 🔀 **Push and pull targets** — push jobs to a target consumer directly from the pipeline, or publish to a topic for external workers to pull.
+- 🔀 **Push and pull targets** — push jobs directly to a target via HTTP, or use `target::remote` to hand off to an external worker pool.
 
 - 💾 **Persistence and recovery** — persistent jobs survive broker termination. Jobs are rebalanced to live instances.
 
@@ -46,37 +46,74 @@ checks:
     type: has_role
     role: privileged
 
-transforms:
-  expand:
-    type: metkit_expansion
-    expand_parameters: true
-
 targets:
-  mars:
-    type: mars_destination
-    endpoint: "mars.ecmwf.int:8080"
-    queue:
-      type: fifo
-      capacity: 200
-      workers: 8
+  backend:
+    type: http
+    url: "http://my-service/api"
+    queue: cost_weighted   # order cheap jobs first
+    concurrency: 8         # max simultaneous requests
 
-pipelines:
-  ecmwf_data:
-    - persist
-    - transform::expand
+routes:
+  default:
     - switch:
         privileged:
           - check::is_privileged
-          - target::mars
+          - target::backend
         public:
-          - check::match:
-              class: od
-          - target::mars
+          - check::has_role:
+              role: registered
+          - target::backend
 ```
 
 Load it and process jobs:
 
 ```rust
 let bits = Bits::from_config(config)?;
-let result = bits.process(job).await;
+
+// Submit a job — returns a handle immediately
+let handle = bits.submit(Job::new(json!({"class": "od"})));
+
+// Poll for the result (blocks until ready or timeout)
+let outcome = bits.poll(&handle.id, Some(Duration::from_secs(30))).await;
 ```
+
+---
+
+## 📐 Dispatcher Config
+
+Any step in a pipeline can be given a dispatcher by adding `queue`, `executor`, and/or `concurrency` alongside the action. For named registry entries these sit next to `type:`; for inline steps they are sibling keys:
+
+```yaml
+# Named registry entry
+targets:
+  mars:
+    type: http
+    url: "http://mars/api"
+    queue: cost_weighted
+    concurrency: 10
+
+# Inline step
+routes:
+  default:
+    - transform::metkit_expansion:
+        expand_parameters: true
+      concurrency: 4
+    - target::http:
+        url: "http://mars/api"
+      queue: cost_weighted
+      concurrency: 10
+```
+
+| Field | Values | Default |
+|-------|--------|---------|
+| `queue` | `fifo`, `cost_weighted` | none (FIFO when `concurrency` is set) |
+| `executor` | `semaphore`, `thread_pool`, `remote_pool`* | `semaphore` |
+| `concurrency` | positive integer | unlimited |
+
+\* `remote_pool` is only valid with `target::remote`.
+
+---
+
+## 🏗 Architecture
+
+See [design.md](design.md) for the full design specification.

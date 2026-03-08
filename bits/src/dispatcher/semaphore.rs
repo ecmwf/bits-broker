@@ -1,9 +1,10 @@
+use std::any::TypeId;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use tokio::sync::Semaphore;
 
-use crate::actions::{ActionError, TargetResult};
+use crate::actions::ActionError;
 use crate::dispatcher::Executor;
 use crate::job::Job;
 
@@ -23,12 +24,13 @@ impl SemaphoreExecutor {
     }
 }
 
-impl Executor for SemaphoreExecutor {
+impl<T: Send + 'static> Executor<T> for SemaphoreExecutor {
     fn execute(
         &self,
         _job: &Job,
-        work: BoxFuture<'static, Result<TargetResult, ActionError>>,
-    ) -> BoxFuture<'_, Result<TargetResult, ActionError>> {
+        _action_type_id: TypeId,
+        work: BoxFuture<'static, Result<T, ActionError>>,
+    ) -> BoxFuture<'_, Result<T, ActionError>> {
         let semaphore = Arc::clone(&self.semaphore);
         Box::pin(async move {
             let _permit = semaphore

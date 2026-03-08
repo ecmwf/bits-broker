@@ -21,7 +21,7 @@ bytes = "1.10.1"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml = "0.9"
-tokio = { version = "1.46.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1.46.1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"

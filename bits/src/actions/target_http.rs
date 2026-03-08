@@ -1,23 +1,12 @@
-    use std::sync::OnceLock;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
-use futures::{future::BoxFuture, TryStreamExt};
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::actions::{ActionError, TargetAction, TargetResult};
-use crate::dispatcher::{Dispatcher, ExecutorKind};
 use crate::job::Job;
-use crate::queue::QueueKind;
 use crate::result::JobResult;
-
-// ================================
-//   Runtime (not serialised)
-// ================================
-
-struct HttpRuntime {
-    client: reqwest::Client,
-    dispatcher: Option<Dispatcher>,
-}
 
 // ================================
 //   HttpTarget
@@ -25,10 +14,8 @@ struct HttpRuntime {
 
 /// POST the job request as JSON to an HTTP endpoint and stream the response back.
 ///
-/// Optional scheduling:
-///   `queue`       — "fifo" | "cost_weighted"  — orders waiting jobs before dispatch
-///   `concurrency` — integer                   — max simultaneous in-flight requests
-///   `executor`    — "semaphore" (default) | "thread_pool"  — execution policy
+/// Scheduling (queue ordering and concurrency limits) is configured at the
+/// route step level, not inside this action.
 ///
 /// Response code mapping:
 ///   2xx → Complete(Success)  — streams body with content-type and size from headers
@@ -37,47 +24,23 @@ struct HttpRuntime {
 #[derive(Serialize, Deserialize)]
 pub struct HttpTarget {
     pub url: String,
-    #[serde(default)]
-    pub concurrency: Option<usize>,
-    #[serde(default)]
-    pub queue: Option<QueueKind>,
-    #[serde(default)]
-    pub executor: Option<ExecutorKind>,
     #[serde(skip)]
-    runtime: OnceLock<HttpRuntime>,
+    client: OnceLock<reqwest::Client>,
 }
 
 impl HttpTarget {
     pub fn new(url: String) -> Self {
-        Self {
-            url,
-            concurrency: None,
-            queue: None,
-            executor: None,
-            runtime: OnceLock::new(),
-        }
+        Self { url, client: OnceLock::new() }
     }
 
-    fn runtime(&self) -> &HttpRuntime {
-        self.runtime.get_or_init(|| {
-            let dispatcher = Dispatcher::from_config(
-                self.queue.as_ref(),
-                self.executor.as_ref(),
-                self.concurrency,
-            );
-            HttpRuntime { client: reqwest::Client::new(), dispatcher }
-        })
+    fn client(&self) -> &reqwest::Client {
+        self.client.get_or_init(reqwest::Client::new)
     }
 }
 
 impl std::fmt::Debug for HttpTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpTarget")
-            .field("url", &self.url)
-            .field("concurrency", &self.concurrency)
-            .field("queue", &self.queue)
-            .field("executor", &self.executor)
-            .finish_non_exhaustive()
+        f.debug_struct("HttpTarget").field("url", &self.url).finish_non_exhaustive()
     }
 }
 
@@ -131,15 +94,7 @@ async fn execute(
 #[async_trait]
 impl TargetAction for HttpTarget {
     async fn dispatch(&self, job: &Job) -> Result<TargetResult, ActionError> {
-        let rt = self.runtime();
-
-        let work: BoxFuture<'static, Result<TargetResult, ActionError>> =
-            Box::pin(execute(rt.client.clone(), self.url.clone(), job.request.clone()));
-
-        match &rt.dispatcher {
-            Some(d) => d.dispatch(job, work).await,
-            None => work.await,
-        }
+        execute(self.client().clone(), self.url.clone(), job.request.clone()).await
     }
 }
 

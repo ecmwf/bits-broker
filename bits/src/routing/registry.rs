@@ -45,7 +45,7 @@ mod tests {
     fn test_create_has_role_action() {
         let config = json!({"role": "admin"});
         let action = create_action("has_role", config).unwrap();
-        assert!(matches!(action, Action::Check(_)));
+        assert!(matches!(action, Action::Check(..)));
     }
 
     #[test]

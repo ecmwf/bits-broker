@@ -19,8 +19,8 @@ fn default_remote_bind() -> String {
     "0.0.0.0:9001".into()
 }
 
-fn default_heartbeat_timeout_secs() -> u64 {
-    60
+fn default_heartbeat_timeout_secs() -> f64 {
+    60.0
 }
 
 /// Configuration for the remote-pool executor.
@@ -30,8 +30,9 @@ pub struct RemotePoolConfig {
     #[serde(default = "default_remote_bind")]
     pub bind: String,
     /// Seconds without a heartbeat before an in-progress job is evicted.
+    /// Fractional values are supported (e.g. 0.1 for 100 ms).
     #[serde(default = "default_heartbeat_timeout_secs")]
-    pub heartbeat_timeout_secs: u64,
+    pub heartbeat_timeout_secs: f64,
 }
 
 /// Selects the executor implementation to construct from config.
@@ -106,7 +107,7 @@ impl<T: Send + 'static> Dispatcher<T> {
             Some(ExecutorKind::ThreadPool) => Arc::new(ThreadPoolExecutor::new(concurrency)),
             Some(ExecutorKind::RemotePool(cfg)) => Arc::new(RemotePoolExecutor::new(
                 &cfg.bind,
-                Duration::from_secs(cfg.heartbeat_timeout_secs),
+                Duration::from_secs_f64(cfg.heartbeat_timeout_secs),
             )),
         };
         let queue: Arc<dyn Queue> = match queue.unwrap_or(&QueueKind::Fifo) {

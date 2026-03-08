@@ -31,17 +31,18 @@ async fn wait_for_server(port: u16) {
     panic!("remote_pool server on port {port} never became ready");
 }
 
-fn make_bits(port: u16, heartbeat_timeout_secs: u64) -> Bits {
+fn make_bits(port: u16, heartbeat_timeout_secs: f64) -> Bits {
     // `target::remote: ~` — null value deserialized into the unit struct RemoteTarget.
     let config = format!(
         r#"
 routes:
   default:
     - target::remote: ~
-      executor:
-        remote_pool:
-          bind: "127.0.0.1:{port}"
-          heartbeat_timeout_secs: {heartbeat_timeout_secs}
+      dispatcher:
+        executor:
+          remote_pool:
+            bind: "127.0.0.1:{port}"
+            heartbeat_timeout_secs: {heartbeat_timeout_secs}
 "#
     );
     Bits::from_config(&config).expect("config error")
@@ -53,7 +54,7 @@ routes:
 #[tokio::test]
 async fn worker_completes_job() {
     let port = free_port().await;
-    let bits = make_bits(port, 60);
+    let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
     let handle = bits.submit(Job::new(serde_json::json!({"class": "od"})));
@@ -104,7 +105,7 @@ async fn worker_completes_job() {
 #[tokio::test]
 async fn worker_rejects_job() {
     let port = free_port().await;
-    let bits = make_bits(port, 60);
+    let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
     let handle = bits.submit(Job::new(serde_json::json!({})));
@@ -141,7 +142,7 @@ async fn worker_rejects_job() {
 #[tokio::test]
 async fn worker_reports_error() {
     let port = free_port().await;
-    let bits = make_bits(port, 60);
+    let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
     let handle = bits.submit(Job::new(serde_json::json!({})));
@@ -181,7 +182,7 @@ async fn worker_reports_error() {
 #[tokio::test]
 async fn long_poll_returns_204_when_no_work() {
     let port = free_port().await;
-    let _bits = make_bits(port, 60);
+    let _bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
     let resp = Client::new()
@@ -196,7 +197,7 @@ async fn long_poll_returns_204_when_no_work() {
 #[tokio::test]
 async fn heartbeat_unknown_job_returns_404() {
     let port = free_port().await;
-    let _bits = make_bits(port, 60);
+    let _bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
     let resp = Client::new()
@@ -211,7 +212,7 @@ async fn heartbeat_unknown_job_returns_404() {
 #[tokio::test]
 async fn complete_unknown_job_returns_404() {
     let port = free_port().await;
-    let _bits = make_bits(port, 60);
+    let _bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
     let resp = Client::new()
@@ -228,8 +229,8 @@ async fn complete_unknown_job_returns_404() {
 #[tokio::test]
 async fn heartbeat_timeout_evicts_job() {
     let port = free_port().await;
-    // heartbeat_timeout_secs = 1 → reaper ticks every 500 ms
-    let bits = make_bits(port, 1);
+    // heartbeat_timeout_secs = 0.1 → reaper ticks every 50 ms
+    let bits = make_bits(port, 0.1);
     wait_for_server(port).await;
 
     let handle = bits.submit(Job::new(serde_json::json!({})));
@@ -243,9 +244,9 @@ async fn heartbeat_timeout_evicts_job() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Wait long enough for the reaper to fire (two tick intervals = ~1 s,
-    // plus the 1 s timeout = ~2 s total; 3 s is a comfortable margin).
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait long enough for the reaper to fire (two tick intervals = ~100 ms,
+    // plus the 100 ms timeout = ~200 ms total; 500 ms is a comfortable margin).
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     match bits.poll(&handle.id, Some(Duration::from_secs(1))).await {
         PollOutcome::Ready(JobResult::Failed { .. }) => {}

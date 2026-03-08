@@ -250,7 +250,7 @@ fn attach_dispatcher(
         match &executor {
             None => executor = Some(ExecutorKind::RemotePool(crate::dispatcher::RemotePoolConfig {
                 bind: "0.0.0.0:9001".into(),
-                heartbeat_timeout_secs: 60,
+                heartbeat_timeout_secs: 60.0,
             })),
             Some(ExecutorKind::RemotePool(_)) => {}
             Some(_) => return Err("'remote' target requires executor: remote_pool".into()),

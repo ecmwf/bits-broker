@@ -29,8 +29,19 @@ targets:
       workers: 10
 
   dss_od:
-    type: dss_destination
+    type: http_call
     endpoint: "dss.ecmwf.int:9090"
+    queue:
+      type: fifo
+
+  fdb_worker:
+    type: http_pull
+    capability: fdb
+    queue:
+      type: fifo
+
+
+  
 
 
 routes:

@@ -1,15 +1,13 @@
-use std::sync::{Arc, OnceLock};
+    use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use futures::{future::BoxFuture, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::actions::{ActionError, TargetAction, TargetResult};
-use crate::dispatcher::{
-    Dispatcher, DispatcherKind, ScheduledDispatcher, SemaphoreDispatcher, ThreadPoolDispatcher,
-};
+use crate::dispatcher::{Dispatcher, ExecutorKind};
 use crate::job::Job;
-use crate::queue::{CostWeightedQueue, FifoQueue, QueueKind};
+use crate::queue::QueueKind;
 use crate::result::JobResult;
 
 // ================================
@@ -18,7 +16,7 @@ use crate::result::JobResult;
 
 struct HttpRuntime {
     client: reqwest::Client,
-    dispatcher: Option<Arc<dyn Dispatcher>>,
+    dispatcher: Option<Dispatcher>,
 }
 
 // ================================
@@ -30,7 +28,7 @@ struct HttpRuntime {
 /// Optional scheduling:
 ///   `queue`       — "fifo" | "cost_weighted"  — orders waiting jobs before dispatch
 ///   `concurrency` — integer                   — max simultaneous in-flight requests
-///   `dispatcher`  — "semaphore" (default) | "thread_pool"  — execution policy
+///   `executor`    — "semaphore" (default) | "thread_pool"  — execution policy
 ///
 /// Response code mapping:
 ///   2xx → Complete(Success)  — streams body with content-type and size from headers
@@ -44,7 +42,7 @@ pub struct HttpTarget {
     #[serde(default)]
     pub queue: Option<QueueKind>,
     #[serde(default)]
-    pub dispatcher: Option<DispatcherKind>,
+    pub executor: Option<ExecutorKind>,
     #[serde(skip)]
     runtime: OnceLock<HttpRuntime>,
 }
@@ -55,37 +53,18 @@ impl HttpTarget {
             url,
             concurrency: None,
             queue: None,
-            dispatcher: None,
+            executor: None,
             runtime: OnceLock::new(),
         }
     }
 
     fn runtime(&self) -> &HttpRuntime {
         self.runtime.get_or_init(|| {
-            // Build the inner execution dispatcher if a concurrency limit is set.
-            let inner: Option<Arc<dyn Dispatcher>> =
-                self.concurrency.map(|n| match self.dispatcher.as_ref().unwrap_or(&DispatcherKind::Semaphore) {
-                    DispatcherKind::Semaphore => Arc::new(SemaphoreDispatcher::new(n)) as Arc<dyn Dispatcher>,
-                    DispatcherKind::ThreadPool => Arc::new(ThreadPoolDispatcher::new(n)) as Arc<dyn Dispatcher>,
-                });
-
-            // If a queue ordering is requested, wrap the inner dispatcher with a
-            // ScheduledDispatcher. The scheduled dispatcher owns the queue and is
-            // the only entity that calls dequeue.
-            let dispatcher: Option<Arc<dyn Dispatcher>> = match &self.queue {
-                None => inner,
-                Some(kind) => {
-                    let queue = match kind {
-                        QueueKind::Fifo => Arc::new(FifoQueue::new()) as Arc<dyn crate::queue::Queue>,
-                        QueueKind::CostWeighted => Arc::new(CostWeightedQueue::new()) as Arc<dyn crate::queue::Queue>,
-                    };
-                    let inner = inner.unwrap_or_else(|| {
-                        Arc::new(SemaphoreDispatcher::new(tokio::sync::Semaphore::MAX_PERMITS))
-                    });
-                    Some(Arc::new(ScheduledDispatcher::new(queue, inner)) as Arc<dyn Dispatcher>)
-                }
-            };
-
+            let dispatcher = Dispatcher::from_config(
+                self.queue.as_ref(),
+                self.executor.as_ref(),
+                self.concurrency,
+            );
             HttpRuntime { client: reqwest::Client::new(), dispatcher }
         })
     }
@@ -97,7 +76,7 @@ impl std::fmt::Debug for HttpTarget {
             .field("url", &self.url)
             .field("concurrency", &self.concurrency)
             .field("queue", &self.queue)
-            .field("dispatcher", &self.dispatcher)
+            .field("executor", &self.executor)
             .finish_non_exhaustive()
     }
 }
@@ -157,10 +136,9 @@ impl TargetAction for HttpTarget {
         let work: BoxFuture<'static, Result<TargetResult, ActionError>> =
             Box::pin(execute(rt.client.clone(), self.url.clone(), job.request.clone()));
 
-        if let Some(dispatcher) = &rt.dispatcher {
-            dispatcher.dispatch(job, work).await
-        } else {
-            work.await
+        match &rt.dispatcher {
+            Some(d) => d.dispatch(job, work).await,
+            None => work.await,
         }
     }
 }

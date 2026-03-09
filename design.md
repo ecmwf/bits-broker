@@ -81,13 +81,15 @@ targets:
   mars_retrieval:
     type: http
     url: "http://mars.ecmwf.int:8080"
-    queue: cost_weighted   # dispatcher config — see Dispatcher section
-    concurrency: 8
+    dispatcher:
+      queue: cost_weighted   # dispatcher config — see Dispatcher section
+      concurrency: 8
 
   fdb_workers:
     type: remote           # noop; work is done by external workers
-    queue: cost_weighted
-    concurrency: 50
+    dispatcher:
+      queue: cost_weighted
+      concurrency: 50
 
 routes:
   ecmwf_data:
@@ -108,11 +110,11 @@ routes:
 - Named entries in `checks:`, `transforms:`, and `targets:` are resolved at parse time. The
   `check::`, `transform::`, and `target::` prefixes in routes are meaningful — they identify
   which registry to look up. This makes the type of each route step visible at a glance.
-- `type:` is the reserved key within each registry entry. All other keys at the same level are
-  either config for that action or dispatcher config (`queue`, `executor`, `concurrency`).
+- `type:` is the reserved key within each registry entry. The optional `dispatcher:` key holds
+  dispatcher config (`queue`, `executor`, `concurrency`); all other keys are config for the action.
 - Dispatcher config (`queue`, `executor`, `concurrency`) is a **route-step concern** — it sits
-  alongside `type:` in a registry entry, or as sibling keys for inline step definitions. See the
-  Dispatcher section below.
+  under a `dispatcher:` key in a registry entry, or as a sibling `dispatcher:` key for inline
+  step definitions. See the Dispatcher section below.
 - The reserved string `"persist"` is a built-in pipeline step, not a user-defined entry.
 - YAML anchors are deliberately not used — the named registries are an explicit feature of the
   schema, not a YAML trick. Named entries also ensure shared resources are the same instance in memory.
@@ -162,26 +164,28 @@ concerns: a **queue** that controls *which* job runs next, and an **executor** t
 
 ### Attaching a dispatcher to a step
 
-For **named registry entries**, dispatcher fields sit alongside `type:` in the entry:
+For **named registry entries**, dispatcher fields are nested under a `dispatcher:` key:
 
 ```yaml
 targets:
   mars_retrieval:
     type: http
     url: "http://mars.ecmwf.int:8080"
-    queue: cost_weighted
-    concurrency: 8
+    dispatcher:
+      queue: cost_weighted
+      concurrency: 8
 ```
 
-For **inline steps**, they are sibling keys in the mapping:
+For **inline steps**, `dispatcher:` is a sibling key in the action mapping:
 
 ```yaml
 routes:
   default:
     - target::http:
         url: "http://mars.ecmwf.int:8080"
-      queue: cost_weighted
-      concurrency: 8
+      dispatcher:
+        queue: cost_weighted
+        concurrency: 8
 ```
 
 Dispatcher config is valid on any step type — Check, Transform, or Target:
@@ -191,7 +195,8 @@ transforms:
   expand:
     type: metkit_expansion
     expand_parameters: true
-    concurrency: 4            # limit concurrent expansion calls
+    dispatcher:
+      concurrency: 4            # limit concurrent expansion calls
 ```
 
 `queue` accepts `fifo` or `cost_weighted`. `executor` accepts `semaphore`, `thread_pool`, or
@@ -208,8 +213,9 @@ is returned to the client.
 targets:
   fdb_workers:
     type: remote
-    queue: cost_weighted
-    concurrency: 50
+    dispatcher:
+      queue: cost_weighted
+      concurrency: 50
 ```
 
 `remote` always implies `executor: remote_pool` — it is auto-inserted if not specified. Any

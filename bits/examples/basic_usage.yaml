@@ -2,7 +2,7 @@
 #
 # Demonstrates:
 #   - Named registries for reusable checks, transforms, and targets
-#   - Dispatcher config (queue, concurrency) on target registry entries
+#   - Dispatcher config (queue, concurrency) nested under `dispatcher:` in registry entries
 #   - Switch for conditional branching
 #   - Inline actions for one-off steps
 #   - The persist built-in for durable jobs
@@ -32,14 +32,16 @@ targets:
   mars_od:
     type: http
     url: "http://mars.ecmwf.int:8080/retrieve"
-    queue: cost_weighted
-    concurrency: 10
+    dispatcher:
+      queue: cost_weighted
+      concurrency: 10
 
   dss_od:
     type: http
     url: "http://dss.ecmwf.int:9090/retrieve"
-    queue: fifo
-    concurrency: 8
+    dispatcher:
+      queue: fifo
+      concurrency: 8
 
 routes:
 

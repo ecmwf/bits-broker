@@ -1,7 +1,7 @@
 # Example BITS-ECMWF routing configuration.
 #
 # Uses ECMWF-specific action types registered by the bits-ecmwf crate.
-# Dispatcher config (queue, concurrency) lives in registry entries alongside type:.
+# Dispatcher config (queue, concurrency) lives nested under `dispatcher:` in registry entries.
 
 checks:
 
@@ -28,14 +28,16 @@ targets:
   mars_od:
     type: mars_destination
     endpoint: "mars.ecmwf.int:8080"
-    queue: cost_weighted
-    concurrency: 10
+    dispatcher:
+      queue: cost_weighted
+      concurrency: 10
 
   dss_od:
     type: dss_destination
     endpoint: "dss.ecmwf.int:9090"
-    queue: fifo
-    concurrency: 8
+    dispatcher:
+      queue: fifo
+      concurrency: 8
 
 routes:
 

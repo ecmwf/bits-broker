@@ -1,7 +1,7 @@
 # Example ECMWF routing config demonstrating the full dispatcher architecture.
 #
-# Dispatcher config (queue, executor, concurrency) lives inside the registry
-# entry alongside `type:`, not inside the action's own config.
+# Dispatcher config (queue, executor, concurrency) lives inside a `dispatcher:`
+# key within the registry entry, or as a sibling `dispatcher:` key for inline steps.
 #
 # queue:
 #   fifo          — first-in, first-out ordering
@@ -34,26 +34,39 @@ transforms:
   expand:
     type: metkit_expansion
     expand_parameters: true
-    concurrency: 16           # limit concurrent calls to the expansion service
+    dispatcher:
+      concurrency: 16           # limit concurrent calls to the expansion service
 
 targets:
 
   mars_od:
     type: http
     url: "http://mars.ecmwf.int:8080/retrieve"
-    queue: cost_weighted      # cheap jobs first
-    concurrency: 10
+    dispatcher:
+      queue: cost_weighted      # cheap jobs first
+      executor:
+        type: thread_pool     # run each job on a dedicated thread to avoid blocking the dispatcher
+        concurrency: 10
+
 
   dss_od:
     type: http
     url: "http://dss.ecmwf.int:9090/retrieve"
-    queue: fifo
-    concurrency: 8
+    dispatcher:
+      queue: fifo
+      executor:
+        type: semaphore
+        concurrency: 8
 
   fdb_worker:
     type: remote              # noop — work is done by external FDB workers
-    queue: cost_weighted
-    concurrency: 50           # max jobs waiting for a worker to claim them
+    dispatcher:
+      queue: cost_weighted
+      executor:
+        type: remote_pool
+        remote_pool:
+          bind: "0.0.0:9001"
+          heartbeat_timeout_secs: 60
 
 
 routes:
@@ -61,6 +74,13 @@ routes:
   operational_forecast:
     - transform::expand
     - check::valid_data
+    - transform::uses_tapes_or_not
+    - transform::tape_cost_estimation
+      dispatcher:
+        queue: cost_weighted
+        executor:
+          type: thread_pool
+          concurrency: 20
     - persist
     - target::mars_od
 
@@ -70,6 +90,11 @@ routes:
         era5_privileged:
           - check::era5_data
           - check::era5_license
+            dispatcher:
+              queue: fifo
+              executor:
+                type: semaphore
+                concurrency: 400
           - persist
           - target::dss_od
         era5_public:

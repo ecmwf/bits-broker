@@ -50,8 +50,9 @@ targets:
   backend:
     type: http
     url: "http://my-service/api"
-    queue: cost_weighted   # order cheap jobs first
-    concurrency: 8         # max simultaneous requests
+    dispatcher:
+      queue: cost_weighted   # order cheap jobs first
+      concurrency: 8         # max simultaneous requests
 
 routes:
   default:
@@ -81,7 +82,7 @@ let outcome = bits.poll(&handle.id, Some(Duration::from_secs(30))).await;
 
 ## 📐 Dispatcher Config
 
-Any step in a pipeline can be given a dispatcher by adding `queue`, `executor`, and/or `concurrency` alongside the action. For named registry entries these sit next to `type:`; for inline steps they are sibling keys:
+Any step in a pipeline can be given a dispatcher via a `dispatcher:` key. For named registry entries it sits alongside `type:`; for inline steps it is a sibling key of the action mapping:
 
 ```yaml
 # Named registry entry
@@ -89,19 +90,22 @@ targets:
   mars:
     type: http
     url: "http://mars/api"
-    queue: cost_weighted
-    concurrency: 10
+    dispatcher:
+      queue: cost_weighted
+      concurrency: 10
 
 # Inline step
 routes:
   default:
     - transform::metkit_expansion:
         expand_parameters: true
-      concurrency: 4
+      dispatcher:
+        concurrency: 4
     - target::http:
         url: "http://mars/api"
-      queue: cost_weighted
-      concurrency: 10
+      dispatcher:
+        queue: cost_weighted
+        concurrency: 10
 ```
 
 | Field | Values | Default |

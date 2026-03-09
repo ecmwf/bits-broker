@@ -59,8 +59,6 @@ pub enum Action {
     Transform(Arc<dyn TransformAction>, Option<crate::dispatcher::Dispatcher<TransformResult>>),
     Target(Arc<dyn TargetAction>, Option<crate::dispatcher::Dispatcher<TargetResult>>),
     Switch(crate::routing::switch::Switch),
-    /// Mark the job as persistent from this point forward.
-    Persist,
 }
 
 impl std::fmt::Debug for Action {
@@ -70,7 +68,6 @@ impl std::fmt::Debug for Action {
             Action::Transform(..) => write!(f, "Action::Transform(..)"),
             Action::Target(..) => write!(f, "Action::Target(..)"),
             Action::Switch(_) => write!(f, "Action::Switch(..)"),
-            Action::Persist => write!(f, "Action::Persist"),
         }
     }
 }

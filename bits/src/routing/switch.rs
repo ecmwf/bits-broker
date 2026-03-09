@@ -134,9 +134,6 @@ impl TargetAction for Switch {
                             TargetResult::Reject { .. } => continue 'route,
                         }
                     },
-                    Action::Persist => {
-                        current_job.to_mut().persistent = true;
-                    }
                 }
             }
         }

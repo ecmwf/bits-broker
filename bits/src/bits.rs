@@ -3,10 +3,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use futures::TryStreamExt;
 use tracing::Instrument;
 
 use crate::actions::{TargetAction, TargetResult};
 use crate::config::parse_config;
+use crate::db::{ClaimResult, PersistenceStore};
 use crate::job::Job;
 use crate::result::JobResult;
 use crate::routing::switch::Switch;
@@ -49,6 +51,8 @@ pub enum PollOutcome {
     Pending { id: String },
     /// No job found with this ID (expired or never existed).
     NotFound,
+    /// Job owner was unavailable and no durable record exists.
+    JobLost,
 }
 
 // ================================
@@ -66,6 +70,12 @@ pub struct JobHandle {
 pub struct Bits {
     router: Arc<Switch>,
     jobs: Arc<DashMap<String, Arc<Job>>>,
+    broker_id: String,
+    internal_poll_base_url: String,
+    internal_poll_timeout: Duration,
+    job_store: Option<Arc<dyn PersistenceStore>>,
+    lock_ttl: Duration,
+    internal_client: reqwest::Client,
 }
 
 impl Bits {
@@ -75,16 +85,28 @@ impl Bits {
         let bits = Bits {
             router: Arc::new(parsed.router),
             jobs: Arc::new(DashMap::new()),
+            broker_id: parsed.broker_id,
+            internal_poll_base_url: parsed.internal_poll_base_url,
+            internal_poll_timeout: parsed.internal_poll_timeout,
+            job_store: parsed.job_store,
+            lock_ttl: parsed.lock_ttl,
+            internal_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
         };
 
         start_sweeper(bits.jobs.clone(), sweep_interval);
+        bits.start_broker_lease_heartbeat(parsed.broker_lease_ttl);
 
         Ok(bits)
     }
 
     /// Submit a job for async processing. Returns immediately with a handle; the job runs in the background.
     /// Use [`Bits::poll`] to retrieve the result.
-    pub fn submit(&self, job: Job) -> JobHandle {
+    pub fn submit(&self, mut job: Job) -> JobHandle {
+        if owner_from_job_id(&job.id).is_none() {
+            job.id = self.new_job_id();
+        }
         let job_id = job.id.clone();
 
         // Give the client a short window to make their first poll() call.
@@ -137,8 +159,62 @@ impl Bits {
     /// Waits up to `timeout` for the result, or indefinitely if `None`.
     /// Returns `Pending` on timeout (caller should reconnect) or `NotFound` if the job has gone.
     pub async fn poll(&self, id: &str, timeout: Option<Duration>) -> PollOutcome {
-        let Some(job) = self.jobs.get(id).map(|r| r.clone()) else {
+        if let Some(outcome) = self.poll_local(id, timeout).await {
+            return outcome;
+        }
+
+        let Some(owner) = owner_from_job_id(id) else {
             return PollOutcome::NotFound;
+        };
+
+        if owner != self.broker_id {
+            if let Some(outcome) = self.try_proxy(owner, id, timeout).await {
+                return outcome;
+            }
+        }
+
+        let Some(store) = &self.job_store else {
+            return PollOutcome::NotFound;
+        };
+
+        let claim_result = if owner == self.broker_id {
+            store.try_claim_expired(id, &self.broker_id, self.lock_ttl).await
+        } else {
+            store.force_claim(id, &self.broker_id, self.lock_ttl).await
+        };
+        match claim_result {
+            Ok(ClaimResult::Claimed(record)) => {
+                self.submit(Job::restore(record));
+                PollOutcome::Pending { id: id.to_string() }
+            }
+            Ok(ClaimResult::Active { owner_broker_id }) => {
+                if owner_broker_id == self.broker_id {
+                    self.poll_local(id, timeout)
+                        .await
+                        .unwrap_or(PollOutcome::Pending { id: id.to_string() })
+                } else {
+                    self.try_proxy(&owner_broker_id, id, timeout)
+                        .await
+                        .unwrap_or(PollOutcome::Pending { id: id.to_string() })
+                }
+            }
+            Ok(ClaimResult::NotFound) => {
+                if owner == self.broker_id {
+                    PollOutcome::NotFound
+                } else {
+                    PollOutcome::JobLost
+                }
+            }
+            Err(err) => {
+                tracing::warn!(job.id = %id, error = %err, "claim failed");
+                PollOutcome::Pending { id: id.to_string() }
+            }
+        }
+    }
+
+    async fn poll_local(&self, id: &str, timeout: Option<Duration>) -> Option<PollOutcome> {
+        let Some(job) = self.jobs.get(id).map(|r| r.clone()) else {
+            return None;
         };
 
         // Mark client as connected for the duration of this call.
@@ -153,7 +229,7 @@ impl Bits {
         // Fast path: result already available.
         if let Some(result) = job.result.lock().unwrap().take() {
             self.jobs.remove(id);
-            return PollOutcome::Ready(result);
+            return Some(PollOutcome::Ready(result));
         }
 
         let outcome = match timeout {
@@ -183,7 +259,130 @@ impl Bits {
         // Not reached if this future is dropped (client disconnected mid-poll).
         *job.reconnect_deadline.lock().unwrap() = Instant::now() + RECONNECT_BUFFER;
 
-        outcome
+        Some(outcome)
+    }
+
+    fn new_job_id(&self) -> String {
+        format!("{}~{}", self.broker_id, uuid::Uuid::new_v4())
+    }
+
+    async fn try_proxy(&self, owner_broker_id: &str, id: &str, timeout: Option<Duration>) -> Option<PollOutcome> {
+        let store = self.job_store.as_ref()?;
+        let lease = match store.get_broker_lease(owner_broker_id).await {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(owner = %owner_broker_id, error = %err, "broker lease lookup failed");
+                return None;
+            }
+        };
+        if lease.lease_until <= chrono::Utc::now() {
+            return None;
+        }
+
+        let timeout = timeout.unwrap_or(self.internal_poll_timeout);
+        let base = lease.internal_poll_base_url.trim_end_matches('/');
+        let url = format!("{base}/{id}");
+        let response = self
+            .internal_client
+            .get(url)
+            .timeout(timeout)
+            .send()
+            .await
+            .ok()?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::OK {
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let size = response.content_length().map(|n| n as i64).unwrap_or(-1);
+            let stream = Box::new(
+                response
+                    .bytes_stream()
+                    .map_err(|e| std::io::Error::other(e.to_string())),
+            );
+            return Some(PollOutcome::Ready(JobResult::Success {
+                content_type,
+                size,
+                stream,
+            }));
+        }
+
+        if status == reqwest::StatusCode::SEE_OTHER || status == reqwest::StatusCode::TEMPORARY_REDIRECT {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            if location.contains(id) {
+                return Some(PollOutcome::Pending { id: id.to_string() });
+            }
+            return Some(PollOutcome::Ready(JobResult::Redirect {
+                location,
+                message: "proxied redirect".into(),
+            }));
+        }
+
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Some(PollOutcome::NotFound);
+        }
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            return Some(PollOutcome::Ready(JobResult::Error {
+                message: response.text().await.unwrap_or_default(),
+            }));
+        }
+        if status == reqwest::StatusCode::GONE {
+            return Some(PollOutcome::Ready(JobResult::Cancelled));
+        }
+        if status.is_server_error() {
+            return Some(PollOutcome::Ready(JobResult::Failed {
+                reason: response.text().await.unwrap_or_else(|_| format!("upstream status {status}")),
+            }));
+        }
+
+        None
+    }
+
+    fn start_broker_lease_heartbeat(&self, broker_lease_ttl: Duration) {
+        let Some(store) = &self.job_store else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                broker_id = %self.broker_id,
+                "no runtime available; skipping broker lease heartbeat"
+            );
+            return;
+        };
+        let store = Arc::clone(store);
+        let broker_id = self.broker_id.clone();
+        let base_url = self.internal_poll_base_url.clone();
+        handle.spawn(async move {
+            let tick = broker_lease_ttl.div_f64(2.0).max(Duration::from_millis(100));
+            loop {
+                if let Err(err) = store
+                    .upsert_broker_lease(&broker_id, &base_url, broker_lease_ttl)
+                    .await
+                {
+                    tracing::warn!(broker_id = %broker_id, error = %err, "broker lease upsert failed");
+                }
+                tokio::time::sleep(tick).await;
+            }
+        });
+    }
+}
+
+fn owner_from_job_id(job_id: &str) -> Option<&str> {
+    let (owner, _suffix) = job_id.split_once('~')?;
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner)
     }
 }
 

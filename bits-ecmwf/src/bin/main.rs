@@ -60,6 +60,7 @@ async fn poll_by_id(id: &str, state: &AppState) -> Response {
         )
             .into_response(),
         PollOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
+        PollOutcome::JobLost => StatusCode::GONE.into_response(),
     }
 }
 

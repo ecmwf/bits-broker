@@ -1,244 +1,165 @@
-# Plan: TiKV-backed Job Persistence
+# Plan: Sticky-First Routing + Internal Owner Proxy + DB Leases
 
 ## Context
 
-Long-running dispatched jobs are ephemeral today — if a broker crashes, in-flight jobs are lost and clients get no result. We need persistence so that after a broker failure (or TTL expiry), any surviving broker can reclaim the job from the database and re-run it, preserving the original submission time so age-priority queues (CostWeighted) still promote recovered jobs correctly.
+BITS is a library, not a service binary, so correctness cannot depend on a specific ingress layout. Ingress stickiness (hash on `Authorization`) is treated as a performance optimization only. The library itself must still work when a poll lands on a non-owner broker due to scaling, rollouts, or hash-ring changes.
 
-Decisions:
-- **Persist at dispatcher level** (not pipeline step): `persistent: true` on a dispatcher config. Removes the built-in `Persist` action entirely.
-- **Result delivery is in-memory only**: no result stored in DB; client must poll while broker is live.
-- **Shared LB topology**: any broker can answer a poll; poll-miss triggers DB lookup + optional reclaim.
-- **Recovery = full re-run** from `original_request`, preserving `created_at`.
+Goal:
+- long-running jobs are recoverable after broker failure,
+- wrong-broker polls are resolved internally,
+- large payloads are usually still direct owner->client because sticky routing is expected most of the time.
 
----
+## Decisions
 
-## Deployment Topology
-
-**StatefulSet** (not Deployment):
-- Pods have stable internal DNS: `broker-0.bits.svc.cluster.local`, etc.
-- `broker_id` = `POD_NAME` env var (k8s injects automatically for StatefulSets)
-- LB is **pure round-robin** nginx — no special hashing needed
-
-**Job ID format: `{broker_id}/{uuid}`**
-- Example: `broker-2/550e8400-e29b-41d4-a716-446655440000`
-- The owning broker is self-describing in every job ID
-- URL-safe; `GET /poll/broker-2/550e8400-...` is a natural URL structure
-- Clients don't need sticky sessions or routing hints — they just pass the opaque job ID
-
-**Poll routing (any broker can receive any poll)**:
-1. Parse `broker_id` prefix from job_id
-2. If prefix == self → serve from local job_map
-3. If prefix != self → **proxy internally** to `{prefix}.{svc_domain}/poll/{job_id}`
-4. If proxy fails (pod dead):
-   - Persistent job → DB claim (force) + re-run → Pending
-   - Non-persistent job → `JobLost` error (job was on dead broker, no DB record)
-
-## Architecture Overview
-
-```
-Dispatcher::dispatch() [persistent=true]
-  ├─ tokio::spawn: store.upsert(record)       // Write lock to DB before enqueue
-  ├─ queue.enqueue(job)
-  └─ return future that:
-       ├─ spawns heartbeat task (renew lock every ttl/2)
-       ├─ awaits reply_rx
-       ├─ aborts heartbeat
-       └─ tokio::spawn: store.delete(job_id)  // Clean up on completion
-
-Bits::poll(job_id) [job not in local job_map]
-  ├─ Parse broker prefix from job_id
-  ├─ If prefix == self.broker_id:
-  │    check DB → Claimed → restore_and_submit → Pending
-  │              → NotFound → NotFound
-  └─ If prefix != self.broker_id:
-       proxy to {prefix}.{svc_domain}/poll/{job_id}
-         ├─ Success  → return proxied result
-         └─ Failure (pod dead):
-              check DB → Claimed → restore_and_submit → Pending
-                       → Active  → proxy to DB owner → return result
-                       → NotFound:
-                           persistent  → force_claim + restore → Pending
-                           ephemeral   → JobLost
-```
+- Job IDs are owner-aware: `{broker_id}~{uuid}`.
+- `persist` pipeline action is removed; persistence is dispatcher-level (`dispatcher.persistent: true`).
+- Wrong-owner poll handling is internal proxying in BITS (no client redirect required for this hop).
+- Broker endpoint resolution is DB-backed (broker lease records), not hard-coded DNS assumptions.
+- TiKV backend is behind traits so storage can be swapped later.
 
 ---
 
-## DB Module (`bits/src/db/`)
+## High-level Flow
 
-### `mod.rs` — trait + types
+### Submit
+
+1. Broker assigns owner-aware job id if caller did not already set one.
+2. Job runs as before in-memory.
+3. If action dispatcher has `persistent: true`, dispatcher persists job record before queueing and maintains lock heartbeat while running.
+
+### Poll
+
+1. If job is in local map: serve local `Ready`/`Pending` as before.
+2. On local miss:
+   - Parse owner from `job_id`.
+   - If owner != self: resolve owner endpoint from broker lease table and proxy poll internally.
+   - If proxy fails or owner lease is expired/missing: attempt DB claim/recovery path.
+3. Recovery path:
+   - Persistent record exists and claim succeeds: restore from `original_request`, preserve `created_at`, resubmit, return `Pending`.
+   - No durable record: return `JobLost`.
+
+### Broker lease lifecycle
+
+1. On startup/runtime, broker periodically upserts lease (`broker_id -> internal_poll_base_url`, `lease_until`).
+2. Renewal interval is `broker_lease_ttl / 2`.
+3. Lease expiry is treated as owner unavailable.
+
+---
+
+## DB abstraction (`bits/src/db/`)
+
+### Traits
 
 ```rust
-pub struct PersistentJobRecord {
-    pub job_id: String,
-    pub broker_id: String,
-    pub locked_until: DateTime<Utc>,
-    pub original_request: Value,
-    pub user: Value,
-    pub metadata: Value,
-    pub created_at: DateTime<Utc>,
-}
-
-pub enum ClaimResult {
-    NotFound,
-    Active,                          // Valid lock held by another broker
-    Claimed(PersistentJobRecord),    // Was expired; now owned by caller
+#[async_trait]
+pub trait JobStore: Send + Sync {
+    async fn upsert_job(&self, record: PersistentJobRecord) -> Result<(), DbError>;
+    async fn renew_job_lock(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<(), DbError>;
+    async fn delete_job(&self, job_id: &str) -> Result<(), DbError>;
+    async fn try_claim_expired(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError>;
+    async fn force_claim(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError>;
 }
 
 #[async_trait]
-pub trait JobStore: Send + Sync {
-    async fn upsert(&self, record: PersistentJobRecord) -> Result<(), DbError>;
-    async fn renew_lock(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<(), DbError>;
-    async fn delete(&self, job_id: &str) -> Result<(), DbError>;
-    async fn try_claim_expired(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError>;
+pub trait BrokerLeaseStore: Send + Sync {
+    async fn upsert_broker_lease(
+        &self,
+        broker_id: &str,
+        internal_poll_base_url: &str,
+        ttl: Duration,
+    ) -> Result<(), DbError>;
+    async fn get_broker_lease(&self, broker_id: &str) -> Result<Option<BrokerLeaseRecord>, DbError>;
+    async fn delete_broker_lease(&self, broker_id: &str) -> Result<(), DbError>;
 }
+
+pub trait PersistenceStore: JobStore + BrokerLeaseStore {}
 ```
 
-### `tikv.rs` — TiKV transactional client
+### Logical separation in TiKV
 
-- Use `tikv-client` crate with the **transactional API** for CAS semantics on lock claims.
-- Key: `job:{job_id}` (bytes)
-- Value: JSON-encoded `PersistentJobRecord`
-- `try_claim_expired`: begin txn → read → if missing=NotFound, if `locked_until > now`=Active, else update broker_id+locked_until → commit. Retry once on conflict.
+- Jobs namespace: `jobs/{job_id}`
+- Broker leases namespace: `brokers/{broker_id}`
 
-### `memory.rs` — in-memory store for tests
+This is table-like separation while staying in a single TiKV cluster.
 
-- `DashMap<String, PersistentJobRecord>` with Mutex for CAS simulation.
+### Backends
 
----
-
-## Changes by File
-
-### `bits/src/bits.rs`
-- Add `broker_id: String`, `job_store: Option<Arc<dyn JobStore>>`, `internal_client: reqwest::Client`, `svc_domain: String` to `Bits` struct.
-- Job IDs generated as `{broker_id}/{uuid}` (new `fn new_job_id(&self) -> String`).
-- `poll()` on map miss: parse broker prefix from job_id → if self, check DB directly; if other, proxy first then fall back to DB (see Architecture flow above).
-- New helper `fn restore_and_submit(&self, record: PersistentJobRecord)`: rebuilds `Job::restore(record)` → `self.submit(job)`.
-- `fn proxy_poll(&self, broker_id: &str, job_id: &str, timeout: Duration) -> PollOutcome`: internal HTTP call to `http://{broker_id}.{svc_domain}/poll/{job_id}?timeout_ms=N`.
-
-### `bits/src/config.rs`
-- Add `BrokerConfig` fields: `broker_id: Option<String>`, `tikv: Option<TiKVConfig>`.
-- `TiKVConfig { endpoints: Vec<String>, lock_ttl_secs: f64 }`.
-- `parse_dispatcher_fields()`: extract `persistent: bool` and optional `lock_ttl_secs`.
-- `Dispatcher::from_config()` signature gains `job_store: Option<Arc<dyn JobStore>>`, `broker_id: String`, `lock_ttl: Duration` parameters.
-- Remove `Action::Persist` variant (and `persist` pipeline step parsing).
-
-### `bits/src/dispatcher/mod.rs`
-- Add fields to `Dispatcher<T>`: `job_store: Option<Arc<dyn JobStore>>`, `broker_id: String`, `lock_ttl: Duration`.
-- In `dispatch()`:
-  - If `job_store` is Some: spawn DB upsert, then inside returned future spawn heartbeat + delete on completion (see architecture above).
-
-### `bits/src/job.rs`
-- Add `Job::restore(record: PersistentJobRecord) -> Job`:
-  - Sets `id = record.job_id`, `original_request = record.original_request.clone()`, `request = record.original_request`, `user`, `metadata`, `created_at = record.created_at` (preserved!), `persistent = true`.
-  - Fresh `Arc<AtomicBool>`, `Arc<Mutex<Instant>>`, etc.
-
-### `bits/src/actions/mod.rs`
-- Remove `Action::Persist` variant.
-- Remove corresponding pipeline execution arm.
-
-### `Cargo.toml` (`bits/Cargo.toml`)
-- Add `tikv-client = "0.3"` (check latest version).
+- `memory.rs`: in-memory implementation for tests.
+- `tikv.rs`: TiKV transactional implementation (compiled behind `bits` feature `tikv`).
 
 ---
 
-## Config Examples
+## Config model
 
-### Abstract (`design_config.yaml`)
+### Bits-level (`bits:`)
 
-```yaml
-bits:
-  broker_id: "${POD_NAME}"                           # injected by k8s StatefulSet
-  svc_domain: bits.default.svc.cluster.local         # internal proxy DNS suffix
-  tikv:
-    endpoints: ["tikv-pd.default.svc.cluster.local:2379"]
-    lock_ttl_secs: 300
+- `broker_id` (optional; defaults to generated local ID)
+- `internal_poll_base_url` (optional; default `http://127.0.0.1:8080/job`)
+- `internal_poll_timeout_ms` (optional)
+- `job_cleanup_interval_ms` (optional)
+- `tikv` (optional):
+  - `endpoints: [..]`
+  - `lock_ttl_secs`
+  - `broker_lease_ttl_secs`
 
-targets:
-  mars_od:
-    type: http
-    url: "http://mars.ecmwf.int:8080/retrieve"
-    queue: cost_weighted
-    concurrency: 10
-    persistent: true                                 # replaces `persist` pipeline step
+### Dispatcher-level (`dispatcher:`)
 
-  dss_od:
-    type: http
-    url: "http://dss.ecmwf.int:9090/retrieve"
-    queue: fifo
-    concurrency: 8
-    persistent: true
-
-  fdb_worker:
-    type: remote
-    executor: remote_pool                            # explicit (was implicit)
-    queue: cost_weighted
-    concurrency: 50
-    persistent: true
-
-routes:
-  operational_forecast:
-    - transform::expand
-    - check::valid_data
-    - target::mars_od                                # `persist` step removed
-
-  era5_reanalysis:
-    - transform::expand
-    - switch:
-        era5_privileged:
-          - check::era5_data
-          - check::era5_license
-          - target::dss_od                          # `persist` step removed
-        era5_public:
-          - check::era5_data
-          - target::dss_od
-```
-
-### ECMWF (`bits-ecmwf/examples/basic_usage.yaml`)
-
-Same pattern: add `bits:` section, add `persistent: true` to `mars_od` and `dss_od`, remove `persist` pipeline steps.
+- Existing queue/executor/concurrency fields continue to work.
+- New persistence fields:
+  - `persistent: bool`
+  - `lock_ttl_secs: float` (optional override)
 
 ---
 
-## Critical Files
+## File-level implementation summary
 
-| File | Change |
-|------|--------|
-| `bits/src/db/mod.rs` | **NEW** — trait + types |
-| `bits/src/db/tikv.rs` | **NEW** — TiKV impl |
-| `bits/src/db/memory.rs` | **NEW** — test impl |
-| `bits/src/bits.rs` | Add broker_id, job_store; poll() DB fallback |
-| `bits/src/config.rs` | Parse tikv/broker/persistent fields |
-| `bits/src/dispatcher/mod.rs` | Inject job_store, heartbeat, cleanup |
-| `bits/src/job.rs` | Add `Job::restore()` |
-| `bits/src/actions/mod.rs` | Remove `Action::Persist` |
-| `bits/Cargo.toml` | Add tikv-client |
-
----
-
-## Internal Proxy Detail
-
-For any poll request where job_id's broker prefix != self:
-1. Make `GET http://{prefix}.{svc_domain}/poll/{job_id}?timeout_ms=N` — same timeout as original request minus overhead
-2. On success: stream result back to original client
-3. On failure (pod dead, connection refused):
-   - If `job_store` is Some: `try_claim_expired` (force=true if needed) → restore + re-run
-   - If no job_store: return `PollOutcome::JobLost`
-4. `svc_domain` configurable in `BitsConfig` (default: `bits.default.svc.cluster.local`)
-
-## Open Questions / Noted Risks
-
-1. **`Action::Persist` removal**: Any existing config files or tests using `persist:` pipeline step will break. Audit before removing.
-2. **Broker-id source**: For StatefulSet, use `POD_NAME` env var; for local dev/test, auto-generate UUID at startup and log it.
-3. **TiKV not configured**: All `persistent: true` dispatchers must fail at startup (not silently) if no TiKV config is provided.
-4. **Heartbeat abort on early cancel**: If the job is cancelled before the reply arrives, the returned future may be dropped — ensure heartbeat handle is aborted via a `Drop` guard or `tokio::select!`.
-5. **Force-claim on proxy failure**: When the internal proxy fails (upstream dead), we need to claim even if `locked_until` hasn't expired yet. The `try_claim_expired` API needs a `force: bool` or a separate `force_claim()` method.
-6. **Non-persistent job on dead broker**: returns `JobLost` (new `PollOutcome` variant). Client must resubmit. This is acceptable — the broker that owned the job is gone.
+- `bits/src/db/mod.rs`
+  - Add persistence traits/types/errors.
+- `bits/src/db/memory.rs`
+  - Add in-memory implementation + unit tests.
+- `bits/src/db/tikv.rs`
+  - Add TiKV implementation with key prefix separation.
+- `bits/src/config.rs`
+  - Parse new `bits` and dispatcher persistence fields.
+  - Enforce `persistent: true` requires configured store.
+  - Reject legacy `persist` pipeline step.
+- `bits/src/dispatcher/mod.rs`
+  - Inject store, `broker_id`, lock TTL, and persistent flag.
+  - Upsert before enqueue for persistent actions.
+  - Heartbeat renew while awaiting completion.
+  - Delete persisted record on completion.
+- `bits/src/job.rs`
+  - Add `Job::new_with_id` and `Job::restore`.
+- `bits/src/bits.rs`
+  - Add broker identity + store/client fields.
+  - Generate owner-aware IDs.
+  - Add wrong-owner proxy and claim/recover on miss.
+  - Add broker lease heartbeat.
+  - Add `PollOutcome::JobLost`.
+- `bits/src/actions/mod.rs`, `bits/src/routing/switch.rs`
+  - Remove `Action::Persist` variant and execution path.
+- `bits/Cargo.toml`
+  - Add optional `tikv-client` dependency behind feature `tikv`.
 
 ---
 
 ## Verification
 
-1. **Unit tests** (`db/memory.rs`): upsert → get, upsert → renew, upsert → delete, try_claim while valid (→ Active), try_claim after expiry (→ Claimed), concurrent claim race (only one winner).
-2. **Integration test**: submit job to persistent dispatcher → kill broker process → start new broker → poll → confirm job is reclaimed and re-run → result delivered.
-3. **Age preservation test**: submit two jobs; let first expire and be reclaimed; confirm reclaimed job has older `created_at` and is dequeued first by CostWeightedQueue.
-4. Run existing test suite: `cargo test` — all tests should still pass (memory store injected in tests).
+1. Unit tests for memory store:
+   - upsert/renew/delete,
+   - active vs expired claim,
+   - force-claim,
+   - broker lease lifecycle.
+2. Existing workspace tests continue to pass (`cargo test`).
+3. Integration follow-up (to add):
+   - two brokers, poll on wrong broker proxies to owner,
+   - owner lease missing/expired triggers recovery for persistent jobs,
+   - non-persistent owner miss returns `JobLost`.
+
+---
+
+## Operational notes
+
+- Ingress sticky hash on auth header remains recommended for performance.
+- Correctness does not depend on sticky routing because BITS handles wrong-owner polls.
+- If `bits.tikv` is configured but the crate is built without feature `tikv`, startup fails fast with config error.

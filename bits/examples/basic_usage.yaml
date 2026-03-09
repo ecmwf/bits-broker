@@ -5,7 +5,7 @@
 #   - Dispatcher config (queue, concurrency) nested under `dispatcher:` in registry entries
 #   - Switch for conditional branching
 #   - Inline actions for one-off steps
-#   - The persist built-in for durable jobs
+#   - Optional dispatcher persistence for durable jobs
 
 checks:
 
@@ -48,7 +48,6 @@ routes:
   operational_forecast:
     - transform::expand
     - check::valid_data
-    - persist
     - target::mars_od
 
   era5_reanalysis:
@@ -57,7 +56,6 @@ routes:
         era5_privileged:
           - check::era5_data
           - check::era5_license
-          - persist
           - target::dss_od
         era5_public:
           - check::era5_data

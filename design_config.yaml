@@ -47,6 +47,7 @@ targets:
       executor:
         type: thread_pool     # run each job on a dedicated thread to avoid blocking the dispatcher
         concurrency: 10
+      persistent: true
 
 
   dss_od:
@@ -57,6 +58,7 @@ targets:
       executor:
         type: semaphore
         concurrency: 8
+      persistent: true
 
   fdb_worker:
     type: remote              # noop — work is done by external FDB workers
@@ -75,13 +77,12 @@ routes:
     - transform::expand
     - check::valid_data
     - transform::uses_tapes_or_not
-    - transform::tape_cost_estimation
+    - transform::tape_cost_estimation: ~
       dispatcher:
         queue: cost_weighted
         executor:
           type: thread_pool
           concurrency: 20
-    - persist
     - target::mars_od
 
   era5_reanalysis:
@@ -89,13 +90,12 @@ routes:
     - switch:
         era5_privileged:
           - check::era5_data
-          - check::era5_license
+          - check::era5_license: ~
             dispatcher:
               queue: fifo
               executor:
                 type: semaphore
                 concurrency: 400
-          - persist
           - target::dss_od
         era5_public:
           - check::era5_data

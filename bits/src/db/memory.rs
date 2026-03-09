@@ -1,0 +1,236 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+
+use crate::db::{
+    BrokerLeaseRecord, BrokerLeaseStore, ClaimResult, DbError, JobStore, PersistentJobRecord,
+};
+
+pub struct MemoryStore {
+    jobs: Mutex<HashMap<String, PersistentJobRecord>>,
+    brokers: Mutex<HashMap<String, BrokerLeaseRecord>>,
+}
+
+impl MemoryStore {
+    pub fn new() -> Self {
+        Self {
+            jobs: Mutex::new(HashMap::new()),
+            brokers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn next_lock_deadline(ttl: Duration) -> DateTime<Utc> {
+        Utc::now() + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(60))
+    }
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl JobStore for MemoryStore {
+    async fn upsert_job(&self, record: PersistentJobRecord) -> Result<(), DbError> {
+        self.jobs.lock().unwrap().insert(record.job_id.clone(), record);
+        Ok(())
+    }
+
+    async fn renew_job_lock(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<(), DbError> {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(record) = jobs.get_mut(job_id) {
+            if record.broker_id != broker_id {
+                return Err(DbError::Conflict(format!(
+                    "job '{job_id}' owned by '{}'",
+                    record.broker_id
+                )));
+            }
+            record.locked_until = Self::next_lock_deadline(ttl);
+        }
+        Ok(())
+    }
+
+    async fn delete_job(&self, job_id: &str) -> Result<(), DbError> {
+        self.jobs.lock().unwrap().remove(job_id);
+        Ok(())
+    }
+
+    async fn try_claim_expired(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let Some(record) = jobs.get_mut(job_id) else {
+            return Ok(ClaimResult::NotFound);
+        };
+        if record.locked_until > Utc::now() && record.broker_id != broker_id {
+            return Ok(ClaimResult::Active {
+                owner_broker_id: record.broker_id.clone(),
+            });
+        }
+        record.broker_id = broker_id.to_string();
+        record.locked_until = Self::next_lock_deadline(ttl);
+        Ok(ClaimResult::Claimed(record.clone()))
+    }
+
+    async fn force_claim(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let Some(record) = jobs.get_mut(job_id) else {
+            return Ok(ClaimResult::NotFound);
+        };
+        record.broker_id = broker_id.to_string();
+        record.locked_until = Self::next_lock_deadline(ttl);
+        Ok(ClaimResult::Claimed(record.clone()))
+    }
+}
+
+#[async_trait]
+impl BrokerLeaseStore for MemoryStore {
+    async fn upsert_broker_lease(
+        &self,
+        broker_id: &str,
+        internal_poll_base_url: &str,
+        ttl: Duration,
+    ) -> Result<(), DbError> {
+        let now = Utc::now();
+        self.brokers.lock().unwrap().insert(
+            broker_id.to_string(),
+            BrokerLeaseRecord {
+                broker_id: broker_id.to_string(),
+                internal_poll_base_url: internal_poll_base_url.to_string(),
+                lease_until: now + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(60)),
+                updated_at: now,
+            },
+        );
+        Ok(())
+    }
+
+    async fn get_broker_lease(&self, broker_id: &str) -> Result<Option<BrokerLeaseRecord>, DbError> {
+        let lease = self.brokers.lock().unwrap().get(broker_id).cloned();
+        Ok(lease)
+    }
+
+    async fn delete_broker_lease(&self, broker_id: &str) -> Result<(), DbError> {
+        self.brokers.lock().unwrap().remove(broker_id);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::{Duration as ChronoDuration, Utc};
+    use serde_json::json;
+
+    use super::*;
+
+    fn sample_job(job_id: &str, broker_id: &str, lock_offset_secs: i64) -> PersistentJobRecord {
+        PersistentJobRecord {
+            job_id: job_id.to_string(),
+            broker_id: broker_id.to_string(),
+            locked_until: Utc::now() + ChronoDuration::seconds(lock_offset_secs),
+            original_request: json!({"foo": "bar"}),
+            user: json!({"name": "alice"}),
+            metadata: json!({"cost": 1}),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_renew_delete_job() {
+        let store = MemoryStore::new();
+        let job = sample_job("broker-1~1", "broker-1", -30);
+        store.upsert_job(job.clone()).await.unwrap();
+
+        match store
+            .try_claim_expired("broker-1~1", "broker-2", Duration::from_secs(60))
+            .await
+            .unwrap()
+        {
+            ClaimResult::Claimed(record) => assert_eq!(record.broker_id, "broker-2"),
+            other => panic!("expected claimed, got {other:?}"),
+        }
+
+        store
+            .renew_job_lock("broker-1~1", "broker-2", Duration::from_secs(120))
+            .await
+            .unwrap();
+
+        store.delete_job("broker-1~1").await.unwrap();
+        assert!(matches!(
+            store
+                .try_claim_expired("broker-1~1", "broker-3", Duration::from_secs(60))
+                .await
+                .unwrap(),
+            ClaimResult::NotFound
+        ));
+    }
+
+    #[tokio::test]
+    async fn try_claim_active_and_expired() {
+        let store = MemoryStore::new();
+        store
+            .upsert_job(sample_job("broker-1~2", "broker-1", 300))
+            .await
+            .unwrap();
+        store
+            .upsert_job(sample_job("broker-1~3", "broker-1", -1))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            store
+                .try_claim_expired("broker-1~2", "broker-2", Duration::from_secs(60))
+                .await
+                .unwrap(),
+            ClaimResult::Active { .. }
+        ));
+
+        assert!(matches!(
+            store
+                .try_claim_expired("broker-1~3", "broker-2", Duration::from_secs(60))
+                .await
+                .unwrap(),
+            ClaimResult::Claimed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn force_claim_overrides_active_lock() {
+        let store = MemoryStore::new();
+        store
+            .upsert_job(sample_job("broker-1~4", "broker-1", 600))
+            .await
+            .unwrap();
+
+        let result = store
+            .force_claim("broker-1~4", "broker-9", Duration::from_secs(60))
+            .await
+            .unwrap();
+        match result {
+            ClaimResult::Claimed(record) => assert_eq!(record.broker_id, "broker-9"),
+            other => panic!("expected claimed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn broker_lease_lifecycle() {
+        let store = MemoryStore::new();
+        store
+            .upsert_broker_lease(
+                "broker-2",
+                "http://broker-2.bits-headless.default.svc.cluster.local:3000",
+                Duration::from_secs(300),
+            )
+            .await
+            .unwrap();
+
+        let lease = store.get_broker_lease("broker-2").await.unwrap().unwrap();
+        assert_eq!(lease.broker_id, "broker-2");
+
+        store.delete_broker_lease("broker-2").await.unwrap();
+        assert!(store.get_broker_lease("broker-2").await.unwrap().is_none());
+    }
+}

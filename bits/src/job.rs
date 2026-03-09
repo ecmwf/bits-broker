@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Notify;
 
+use crate::db::PersistentJobRecord;
 use crate::result::JobResult;
 
 fn default_cancelled() -> Arc<AtomicBool> {
@@ -21,7 +22,6 @@ fn default_reconnect_deadline() -> Arc<Mutex<Instant>> {
     // Initialise to now (already expired) — no client assumed on deserialisation.
     Arc::new(Mutex::new(Instant::now()))
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Job {
@@ -54,14 +54,35 @@ pub struct Job {
 
 impl Job {
     pub fn new(request: Value) -> Self {
+        Self::new_with_id(uuid::Uuid::new_v4().to_string(), request)
+    }
+
+    pub fn new_with_id(id: String, request: Value) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id,
             original_request: request.clone(),
             request,
             user: serde_json::json!({}),
             created_at: Utc::now(),
             metadata: serde_json::json!({}),
             persistent: false,
+            cancelled: default_cancelled(),
+            client_connected: default_client_connected(),
+            reconnect_deadline: default_reconnect_deadline(),
+            result: Mutex::new(None),
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn restore(record: PersistentJobRecord) -> Self {
+        Self {
+            id: record.job_id,
+            original_request: record.original_request.clone(),
+            request: record.original_request,
+            user: record.user,
+            created_at: record.created_at,
+            metadata: record.metadata,
+            persistent: true,
             cancelled: default_cancelled(),
             client_connected: default_client_connected(),
             reconnect_deadline: default_reconnect_deadline(),

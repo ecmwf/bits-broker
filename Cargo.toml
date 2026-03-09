@@ -1,3 +1,3 @@
 [workspace]
-members = ["bits", "bits-ecmwf"]
+members = ["bits", "bits-ecmwf", "bits-py"]
 resolver = "2"

@@ -1,0 +1,9 @@
+[book]
+authors = ["BITS contributors"]
+language = "en"
+multilingual = false
+src = "src"
+title = "BITS Documentation"
+
+[build]
+build-dir = "book"

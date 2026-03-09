@@ -78,6 +78,23 @@ let handle = bits.submit(Job::new(json!({"class": "od"})));
 let outcome = bits.poll(&handle.id, Some(Duration::from_secs(30))).await;
 ```
 
+### Async Python interface
+
+An asyncio-native Python extension is available in the `bits-py` crate.
+
+Build and install it into your current Python environment:
+
+```bash
+pip install maturin aiohttp
+maturin develop --manifest-path bits-py/Cargo.toml
+```
+
+Run the Python HTTP server example:
+
+```bash
+python bits/examples/python_http_server.py
+```
+
 ---
 
 ## 📐 Dispatcher Config

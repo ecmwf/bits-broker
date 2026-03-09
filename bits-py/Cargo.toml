@@ -1,0 +1,18 @@
+[package]
+name = "bits-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bits_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+bits = { path = "../bits" }
+bytes = "1"
+futures = "0.3"
+pyo3 = { version = "0.28.2", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
+pythonize = "0.28.0"
+serde_json = "1"
+tokio = { version = "1.46.1", features = ["rt-multi-thread"] }

@@ -75,7 +75,7 @@ async fn execute(
         let stream = Box::new(
             response
                 .bytes_stream()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+                .map_err(std::io::Error::other),
         );
 
         Ok(TargetResult::Complete(JobResult::Success { content_type, size, stream }))

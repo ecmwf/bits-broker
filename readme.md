@@ -29,7 +29,7 @@
 
 - 🔀 **Push and pull targets** — push jobs directly to a target via HTTP, or use `target::remote` to hand off to an external worker pool.
 
-- 💾 **Persistence and recovery** — persistent jobs survive broker termination. Jobs are rebalanced to live instances.
+- 💾 **Persistence and recovery** — long-running jobs can be persisted after a configurable in-flight threshold, then reclaimed by live brokers after owner lease expiry.
 
 - 🔌 **Pluggable actions** — additional actions can be created in Rust or Python.
 
@@ -41,6 +41,11 @@
 Define your routing policy in YAML:
 
 ```yaml
+bits:
+  persist_after_ms: 10000
+  poll_timeout_ms: 30000
+  persist_guard_ms: 1000
+
 checks:
   is_privileged:
     type: has_role
@@ -85,15 +90,74 @@ An asyncio-native Python extension is available in the `bits-py` crate.
 Build and install it into your current Python environment:
 
 ```bash
-pip install maturin aiohttp
+pip install maturin
 maturin develop --manifest-path bits-py/Cargo.toml
 ```
 
-Run the Python HTTP server example:
+**Submitting jobs from Python:**
 
-```bash
-python bits/examples/python_http_server.py
+```python
+import asyncio
+from bits_py import Bits
+
+async def main():
+    bits = await Bits.from_config(open("config.yaml").read())
+    job_id = await bits.submit({"dataset": "era5", "year": 2020})
+    outcome = await bits.poll(job_id, timeout_secs=30.0)
+    print(outcome)
+
+asyncio.run(main())
 ```
+
+**Writing custom actions in Python:**
+
+Register Python action classes before loading the config. Subclass the
+appropriate ABC and implement the async method:
+
+```python
+from bits_py import (
+    Bits, CheckAction, TargetAction,
+    Pass, Reject, Success,
+    register_action,
+)
+
+class HasRole(CheckAction):
+    def __init__(self, role: str):
+        self.role = role
+
+    async def evaluate(self, job) -> Pass | Reject:
+        roles = (job.user or {}).get("roles", [])
+        return Pass() if self.role in roles else Reject(f"missing role: {self.role}")
+
+class EchoTarget(TargetAction):
+    async def dispatch(self, job) -> Success:
+        return Success.json({"echo": job.request})
+
+# Register before from_config
+register_action("has_role_py", HasRole)
+register_action("echo", EchoTarget)
+
+config = """
+checks:
+  gate:
+    type: has_role_py
+    role: admin
+targets:
+  echo:
+    type: echo
+routes:
+  default:
+    - check::gate
+    - target::echo
+"""
+
+async def main():
+    bits = await Bits.from_config(config)
+    job_id = await bits.submit({})
+    print(await bits.poll(job_id, timeout_secs=5.0))
+```
+
+See [Writing Custom Actions](docs/src/custom-actions.md) for the full Python API reference.
 
 ---
 

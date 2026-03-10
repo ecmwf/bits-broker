@@ -1,9 +1,10 @@
 # Operational Notes
 
-- Prefer sticky ingress for efficiency, but rely on BITS recovery for correctness.
-- Tune lock TTL and broker lease TTL to your failure-detection and recovery targets.
+- Sticky ingress improves owner-hit rate for poll traffic.
+- Tune broker lease TTL to your failure-detection and recovery targets.
+- Choose `persist_after_ms` so durable writes happen before expected poll timeout windows.
 - Persistent jobs require a configured persistence store.
 - If TiKV config is present but the crate is built without the `tikv` feature, startup should
   fail fast with a configuration error.
 
-For implementation status and detailed verification scenarios, see `PERSISTENCE.md`.
+For implementation status and detailed verification scenarios, see the persistence sections in this documentation.

@@ -8,7 +8,7 @@ use tracing::Instrument;
 
 use crate::actions::{TargetAction, TargetResult};
 use crate::config::parse_config;
-use crate::db::{BrokerLeaseRecord, ClaimResult, PersistenceStore, PersistentJobRecord};
+use crate::db::{BrokerLeaseRecord, ClaimResult, DbError, PersistenceStore, PersistentJobRecord};
 use crate::job::Job;
 use crate::result::JobResult;
 use crate::routing::switch::Switch;
@@ -150,20 +150,20 @@ impl Bits {
                     tokio::select! {
                         result = &mut dispatch_fut => result,
                         _ = tokio::time::sleep(delay) => {
-                            if let Some(store) = &store {
-                                if job.result.lock().unwrap().is_none() {
-                                    let record = PersistentJobRecord {
-                                        job_id: job.id.clone(),
-                                        broker_id: broker_id.clone(),
-                                        original_request: job.original_request.clone(),
-                                        user: job.user.clone(),
-                                        metadata: job.metadata.clone(),
-                                        created_at: job.created_at,
-                                    };
-                                    match store.upsert_job(record).await {
-                                        Ok(_) => persisted = true,
-                                        Err(err) => tracing::warn!(job.id = %job.id, error = %err, "delayed persist failed"),
-                                    }
+                            if let Some(store) = &store
+                                && job.result.lock().unwrap().is_none()
+                            {
+                                let record = PersistentJobRecord {
+                                    job_id: job.id.clone(),
+                                    broker_id: broker_id.clone(),
+                                    original_request: job.original_request.clone(),
+                                    user: job.user.clone(),
+                                    metadata: job.metadata.clone(),
+                                    created_at: job.created_at,
+                                };
+                                match store.upsert_job(record).await {
+                                    Ok(_) => persisted = true,
+                                    Err(err) => tracing::warn!(job.id = %job.id, error = %err, "delayed persist failed"),
                                 }
                             }
                             (&mut dispatch_fut).await
@@ -186,10 +186,10 @@ impl Bits {
                 *job.result.lock().unwrap() = Some(result);
                 job.notify.notify_waiters();
 
-                if persisted {
-                    if let Some(store) = &store {
-                        let _ = store.delete_job(&job.id).await;
-                    }
+                if persisted
+                    && let Some(store) = &store
+                {
+                    let _ = store.delete_job(&job.id).await;
                 }
             }
             .instrument(span),
@@ -232,12 +232,23 @@ impl Bits {
             return PollOutcome::NotFound;
         };
 
-        match store.claim_if_owner(id, owner, &self.broker_id).await {
+        // We only reach claim once the observed owner lease is missing/expired.
+        // The claim result then determines whether we recover locally, retry proxying,
+        // or surface terminal/liveness outcomes to the caller.
+        match self.claim_with_backoff(store, id, owner, timeout).await {
             Ok(ClaimResult::Claimed(record)) => {
+                // This broker won ownership and can recover from durable state.
+                // Re-submit restored work, then immediately continue as a local poll
+                // so this request can long-poll instead of forcing an instant reconnect.
                 self.submit_with_state(Job::restore(record), true);
-                PollOutcome::Pending { id: id.to_string() }
+                self
+                    .poll_local(id, timeout)
+                    .await
+                    .unwrap_or(PollOutcome::Pending { id: id.to_string() })
             }
             Ok(ClaimResult::Active { owner_broker_id }) => match self.lookup_owner_lease(&owner_broker_id).await {
+                // Ownership moved concurrently to another live broker.
+                // Proxy to that owner when reachable, otherwise keep client in pending loop.
                 LeaseLookup::Active(lease) => self
                     .try_proxy_with_lease(&lease, id, timeout)
                     .await
@@ -246,18 +257,64 @@ impl Bits {
                     PollOutcome::Pending { id: id.to_string() }
                 }
             },
+            // No durable record exists for this id anymore.
             Ok(ClaimResult::NotFound) => PollOutcome::JobLost,
-            Err(err) => {
-                tracing::warn!(job.id = %id, error = %err, "claim failed");
+            Err(DbError::Conflict(message)) => {
+                // Rare optimistic-claim race. Keep response in pending loop so the
+                // next poll can observe the winning owner.
+                tracing::warn!(job.id = %id, error = %message, "claim conflict");
+                PollOutcome::Pending { id: id.to_string() }
+            }
+            Err(DbError::Backend(message)) => {
+                // Backend remained unavailable after in-poll backoff retries.
+                // Return pending so client retries on the next poll interval.
+                tracing::warn!(job.id = %id, error = %message, "claim backend unavailable after retries");
                 PollOutcome::Pending { id: id.to_string() }
             }
         }
     }
 
+    async fn claim_with_backoff(
+        &self,
+        store: &Arc<dyn PersistenceStore>,
+        id: &str,
+        expected_owner: &str,
+        timeout: Option<Duration>,
+    ) -> Result<ClaimResult, DbError> {
+        let budget = timeout
+            .unwrap_or(Duration::from_secs(2))
+            .min(Duration::from_secs(2));
+        let deadline = Instant::now() + budget;
+        let mut delay = Duration::from_millis(100);
+
+        loop {
+            match store.claim_if_owner(id, expected_owner, &self.broker_id).await {
+                Ok(result) => return Ok(result),
+                Err(DbError::Conflict(message)) => return Err(DbError::Conflict(message)),
+                Err(DbError::Backend(message)) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(DbError::Backend(message));
+                    }
+                    let remaining = deadline.saturating_duration_since(now);
+                    let sleep_for = delay.min(remaining);
+                    if sleep_for.is_zero() {
+                        return Err(DbError::Backend(message));
+                    }
+                    tracing::warn!(
+                        job.id = %id,
+                        backoff_ms = sleep_for.as_millis(),
+                        "claim backend error; retrying"
+                    );
+                    tokio::time::sleep(sleep_for).await;
+                    delay = delay.saturating_mul(2).min(Duration::from_secs(1));
+                }
+            }
+        }
+    }
+
     async fn poll_local(&self, id: &str, timeout: Option<Duration>) -> Option<PollOutcome> {
-        let Some(job) = self.jobs.get(id).map(|r| r.clone()) else {
-            return None;
-        };
+        let job = self.jobs.get(id).map(|r| r.clone())?;
 
         let _guard = ConnectedGuard::new(job.client_connected.clone());
 

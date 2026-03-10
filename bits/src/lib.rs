@@ -13,4 +13,4 @@ pub use db::*;
 pub use job::Job;
 pub use result::JobResult;
 pub use actions::*;
-pub use routing::registry::{create_action, list_actions};
+pub use routing::registry::{create_action, list_actions, register_runtime_action, RuntimeActionFactory};

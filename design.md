@@ -9,7 +9,7 @@ across distributed infrastructure based on job attributes, user quotas, and reso
 
 ## Features
 
-- **Fast and slow requests, one broker** — ephemeral jobs flow through the pipeline in-memory with no overhead; long-lived jobs opt into persistence with a single `persist` step.
+- **Fast and slow requests, one broker** — ephemeral jobs flow through the pipeline in-memory with no overhead; long-lived jobs persist after a configurable in-flight threshold.
 
 - **Horizontal scalability with consistency** — multiple broker instances share quota of shared resources safely and efficiently.
 
@@ -35,7 +35,7 @@ A `Job` is the unit of work. It carries:
   through the pipeline.
 - `metadata` — mutable annotations added by `transform` actions during routing
 - `user` — identity of the submitting user
-- `persistent` — flag set by the `persist` action; when true, the job is synced to the DB
+- runtime lifecycle state for cancellation, polling, and result delivery
 
 ### Pipeline
 
@@ -93,7 +93,6 @@ targets:
 
 routes:
   ecmwf_data:
-    - persist                   # built-in: mark job as persistent and write to DB
     - transform::expand         # evaluate the cost of the request
     - switch:                   # try privileged path first, fall back to public
         privileged:
@@ -115,7 +114,7 @@ routes:
 - Dispatcher config (`queue`, `executor`, `concurrency`) is a **route-step concern** — it sits
   under a `dispatcher:` key in a registry entry, or as a sibling `dispatcher:` key for inline
   step definitions. See the Dispatcher section below.
-- The reserved string `"persist"` is a built-in pipeline step, not a user-defined entry.
+- Persistence is configured at `bits` top level (`persist_after_ms`, `poll_timeout_ms`, `persist_guard_ms`).
 - YAML anchors are deliberately not used — the named registries are an explicit feature of the
   schema, not a YAML trick. Named entries also ensure shared resources are the same instance in memory.
 - Inline actions (e.g. `check::has_role:` directly in a pipeline) bypass the registry entirely and
@@ -226,46 +225,24 @@ rejected at config parse time.
 
 ## Persistence
 
-Jobs are either **ephemeral** (in-memory only, lost on broker crash) or **persistent** (synced
-to a database). The distinction is made in the pipeline, not at submission time.
+BITS supports threshold persistence for long-running work.
 
-### The `persist` action
+- Jobs start in-memory immediately.
+- If `bits.persist_after_ms` is configured and a job remains in-flight past that threshold, BITS
+  writes a durable record (`job_id`, owner `broker_id`, `original_request`, `user`, `metadata`,
+  `created_at`).
+- On terminal completion, the durable record is deleted.
 
-`persist` is a built-in pipeline step that sets `job.persistent = true` and writes the job to
-the DB. It can appear at any point in the pipeline, making persistence conditional on what came
-before it. A job that is rejected before reaching `persist` is never written to the DB.
+Recovery flow:
 
-The DB record stores:
+1. Poll lands on any broker.
+2. Broker checks local state first.
+3. On local miss, broker parses owner from `job_id` and resolves owner endpoint via broker lease records.
+4. If owner lease is active, broker proxies poll to owner.
+5. If owner lease is missing/expired, broker attempts ownership-aware claim and, on success,
+   restores from `original_request` and resubmits.
 
-```
-job_id
-original_request    — written once at persist; mirrors job.original_request, never updated
-checkpoint_state    — current job state (request + metadata), updated at each dispatcher entry
-checkpoint_name     — name of the last dispatcher entered; null means start from original_request
-status              — registered | queued | in_flight | done | failed
-```
-
-### `Job::sync()`
-
-`sync()` is a no-op for ephemeral jobs and a DB upsert for persistent ones. It is called
-automatically by the pipeline executor at structural checkpoints — not by action authors.
-
-### Recovery
-
-When a broker restarts, it loads persistent jobs from the DB and recovers based on status:
-
-| checkpoint_name | action |
-|---|---|
-| null | Re-run from `original_request` (persist action and all transforms will re-execute) |
-| matches a dispatcher in the current pipeline | Re-insert into that dispatcher with `checkpoint_state` |
-| does not match any dispatcher | Re-run from `original_request` |
-
-If a pipeline is reconfigured and a checkpoint name no longer exists, the job restarts from the
-beginning. This is acceptable for redeployment scenarios — all pre-dispatcher actions are pure and
-safe to replay.
-
-**Dispatcher actions must be idempotent** — if a worker dies mid-execution, the job times back to
-`queued` state and will be retried.
+Reclaim is strictly lease-gated: proxy failure with an active owner lease does not trigger claim.
 
 ---
 
@@ -294,8 +271,8 @@ Multiple broker instances each hold a shard of the dispatcher:
 
 - Brokers **lease resource quotas** from a central Postgres DB atomically. Local quota
   reservations avoid per-job DB queries. On broker crash, unreleased reservations expire by TTL.
-- **Persistent job ownership** uses a `claimed_by` + heartbeat column. Orphaned jobs (missed
-  heartbeat) are reclaimed by other brokers via a simple `UPDATE ... WHERE claimed_by = $dead`.
+- **Persistent job ownership** uses owner-aware durable records plus broker lease TTL. Reclaim is
+  allowed only after owner lease expiry/missing and uses ownership-aware claim semantics.
 - **Ephemeral jobs** are lost on broker crash — this is acceptable by design.
 - **Database loss** causes brokers to stop accepting new jobs. In-flight ephemeral jobs may
   continue; persistent jobs cannot be safely committed.
@@ -308,6 +285,5 @@ Multiple broker instances each hold a shard of the dispatcher:
 - Remote pool runtime — full HTTP long-poll worker API, job handoff, and result callback
   (`executor: remote_pool` is stubbed and returns an error)
 - HTTP server (`src/api/` is a stub)
-- Persistence / DB integration
 - Resource quota tracking and broker negotiation
 - User statistics

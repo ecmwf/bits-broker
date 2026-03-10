@@ -1,6 +1,6 @@
 # Broker Leases
 
-Broker endpoints are resolved through lease records, not fixed DNS assumptions.
+Broker endpoints are resolved from broker lease records.
 
 Each broker periodically upserts:
 

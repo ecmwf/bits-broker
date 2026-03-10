@@ -180,7 +180,7 @@ async fn handle_complete(
 /// On construction this spawns an axum HTTP server with three endpoints:
 ///
 /// - `GET  /work?timeout_ms=N`   — long-poll; blocks until a job is available,
-///                                  returns job JSON, or 204 on timeout.
+///   returns job JSON, or 204 on timeout.
 /// - `POST /heartbeat/{job_id}`  — worker keepalive; resets the heartbeat timer.
 /// - `POST /complete/{job_id}`   — worker posts the result:
 ///   ```json

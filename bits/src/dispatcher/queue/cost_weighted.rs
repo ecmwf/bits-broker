@@ -27,7 +27,7 @@ impl std::fmt::Debug for CostWeightedQueue {
 }
 
 enum WorkerCmd {
-    Enqueue { cost: u64, seq: u64, job: Job },
+    Enqueue { cost: u64, seq: u64, job: Box<Job> },
     Dequeue(oneshot::Sender<Job>),
 }
 
@@ -80,7 +80,7 @@ async fn worker(mut rx: mpsc::UnboundedReceiver<WorkerCmd>) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
             WorkerCmd::Enqueue { cost, seq, job } => {
-                heap.push(Entry { cost, seq, job });
+                heap.push(Entry { cost, seq, job: *job });
             }
             WorkerCmd::Dequeue(reply) => {
                 waiters.push_back(reply);
@@ -106,7 +106,11 @@ impl Queue for CostWeightedQueue {
             .as_u64()
             .unwrap_or(0);
         let seq = self.seq.fetch_add(1, AtomicOrdering::Relaxed);
-        let _ = self.tx.send(WorkerCmd::Enqueue { cost, seq, job });
+        let _ = self.tx.send(WorkerCmd::Enqueue {
+            cost,
+            seq,
+            job: Box::new(job),
+        });
     }
 
     async fn dequeue(&self) -> Option<Job> {

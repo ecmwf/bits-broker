@@ -1,13 +1,9 @@
-# Sticky Routing and Correctness
+# Sticky Routing
 
 Ingress stickiness (for example hashing on `Authorization`) is recommended for performance,
 because most polls then return directly from the owning broker.
 
-However, correctness does not depend on stickiness:
+BITS handles wrong-broker polls by internal proxying using broker lease records.
 
-- scale changes can move clients between instances
-- rollouts can drain or replace owners
-- load balancer behavior can shift routing at any time
-
-BITS handles wrong-broker polls internally and recovers when ownership is unavailable, so
-clients do not need routing-level correctness assumptions.
+When a lease is missing or expired, the broker can claim and recover persistent jobs from durable
+storage.

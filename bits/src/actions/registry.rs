@@ -8,7 +8,7 @@ pub use crate::routing::registry::{create_action, list_actions, ActionRegistrati
 ///   register_action!(target,    "mars_destination",  MarsDestination);
 #[macro_export]
 macro_rules! register_action {
-    (check, $name:expr, $action_type:ty) => {
+    (check, $name:expr_2021, $action_type:ty) => {
         inventory::submit! {
             $crate::routing::registry::ActionRegistration {
                 name: $name,
@@ -20,7 +20,7 @@ macro_rules! register_action {
             }
         }
     };
-    (transform, $name:expr, $action_type:ty) => {
+    (transform, $name:expr_2021, $action_type:ty) => {
         inventory::submit! {
             $crate::routing::registry::ActionRegistration {
                 name: $name,
@@ -32,7 +32,7 @@ macro_rules! register_action {
             }
         }
     };
-    (target, $name:expr, $action_type:ty) => {
+    (target, $name:expr_2021, $action_type:ty) => {
         inventory::submit! {
             $crate::routing::registry::ActionRegistration {
                 name: $name,

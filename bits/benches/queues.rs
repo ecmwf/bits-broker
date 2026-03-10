@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bits::job::Job;
-use bits::queue::{CostWeightedQueue, FifoQueue, Queue};
+use bits::dispatcher::{CostWeightedQueue, FifoQueue, Queue};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 fn job() -> Job {
@@ -104,33 +104,39 @@ fn bench_concurrent_fan_out(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("fifo", n), &n, |b, &n| {
             let fifo = fifo.clone();
-            b.to_async(&rt).iter(|| async move {
-                let producers: Vec<_> = (0..n).map(|_| {
-                    let q = fifo.clone();
-                    async move { q.enqueue(job()); }
-                }).collect();
-                let consumers: Vec<_> = (0..n).map(|_| {
-                    let q = fifo.clone();
-                    async move { let _ = q.dequeue().await; }
-                }).collect();
-                futures::future::join_all(producers).await;
-                futures::future::join_all(consumers).await;
+            b.to_async(&rt).iter(|| {
+                let fifo = fifo.clone();
+                async move {
+                    let producers: Vec<_> = (0..n).map(|_| {
+                        let q = fifo.clone();
+                        async move { q.enqueue(job()); }
+                    }).collect();
+                    let consumers: Vec<_> = (0..n).map(|_| {
+                        let q = fifo.clone();
+                        async move { let _ = q.dequeue().await; }
+                    }).collect();
+                    futures::future::join_all(producers).await;
+                    futures::future::join_all(consumers).await;
+                }
             });
         });
 
         group.bench_with_input(BenchmarkId::new("cost_weighted", n), &n, |b, &n| {
             let cost = cost.clone();
-            b.to_async(&rt).iter(|| async move {
-                let producers: Vec<_> = (0..n).map(|i| {
-                    let q = cost.clone();
-                    async move { q.enqueue(job_with_cost(i as u64)); }
-                }).collect();
-                let consumers: Vec<_> = (0..n).map(|_| {
-                    let q = cost.clone();
-                    async move { let _ = q.dequeue().await; }
-                }).collect();
-                futures::future::join_all(producers).await;
-                futures::future::join_all(consumers).await;
+            b.to_async(&rt).iter(|| {
+                let cost = cost.clone();
+                async move {
+                    let producers: Vec<_> = (0..n).map(|i| {
+                        let q = cost.clone();
+                        async move { q.enqueue(job_with_cost(i as u64)); }
+                    }).collect();
+                    let consumers: Vec<_> = (0..n).map(|_| {
+                        let q = cost.clone();
+                        async move { let _ = q.dequeue().await; }
+                    }).collect();
+                    futures::future::join_all(producers).await;
+                    futures::future::join_all(consumers).await;
+                }
             });
         });
     }

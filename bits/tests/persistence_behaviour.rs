@@ -3,6 +3,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -12,7 +13,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use bits::actions::{Action, ActionError, TargetAction, TargetResult};
-use bits::db::{memory::MemoryStore, BrokerLeaseStore, ClaimResult, JobStore, PersistenceStore};
+use bits::db::{
+    memory::MemoryStore, BrokerLeaseStore, BrokerLeaseRecord, ClaimResult, DbError, JobStore,
+    PersistenceStore,
+};
 use bits::routing::{Route, switch::Switch};
 use bits::{Bits, Job, JobResult, PollOutcome, PersistentJobRecord};
 use serde_json::json;
@@ -105,6 +109,66 @@ async fn start_owner_stub(status: StatusCode) -> String {
         .with_state(OwnerState { status });
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://{addr}/job")
+}
+
+struct BackendFailingStore {
+    attempts: AtomicUsize,
+}
+
+impl BackendFailingStore {
+    fn new() -> Self {
+        Self {
+            attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl JobStore for BackendFailingStore {
+    async fn upsert_job(&self, _record: PersistentJobRecord) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn delete_job(&self, _job_id: &str) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn claim_if_owner(
+        &self,
+        _job_id: &str,
+        _expected_owner_broker_id: &str,
+        _claimant_broker_id: &str,
+    ) -> Result<ClaimResult, DbError> {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+        Err(DbError::Backend("simulated backend outage".into()))
+    }
+}
+
+#[async_trait]
+impl BrokerLeaseStore for BackendFailingStore {
+    async fn upsert_broker_lease(
+        &self,
+        _broker_id: &str,
+        _internal_poll_base_url: &str,
+        _ttl: Duration,
+    ) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn get_broker_lease(
+        &self,
+        _broker_id: &str,
+    ) -> Result<Option<BrokerLeaseRecord>, DbError> {
+        Ok(None)
+    }
+
+    async fn delete_broker_lease(&self, _broker_id: &str) -> Result<(), DbError> {
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -232,4 +296,33 @@ routes:
         .expect("expected invalid config to fail")
         .to_string();
     assert!(err.contains("persist_after_ms + bits.persist_guard_ms"));
+}
+
+#[tokio::test]
+async fn backend_claim_errors_backoff_within_single_poll() {
+    let store = Arc::new(BackendFailingStore::new());
+    let router = Switch::new(vec![Route::new("default".into(), vec![])]);
+    let bits = Bits::from_router_for_tests(
+        router,
+        "claimer-backoff".to_string(),
+        "http://127.0.0.1:9/job".to_string(),
+        Duration::from_millis(30),
+        None,
+        Some(store.clone() as Arc<dyn PersistenceStore>),
+        Duration::from_secs(5),
+    );
+
+    let owner = "expired-owner";
+    let job_id = format!("{owner}~{}", uuid::Uuid::new_v4());
+    let started = Instant::now();
+    let outcome = bits.poll(&job_id, Some(Duration::from_millis(220))).await;
+    let elapsed = started.elapsed();
+
+    assert!(matches!(outcome, PollOutcome::Pending { .. }));
+    assert!(elapsed >= Duration::from_millis(90), "expected backoff delay, got {elapsed:?}");
+    assert!(
+        store.attempts() >= 2,
+        "expected multiple claim attempts, got {}",
+        store.attempts()
+    );
 }

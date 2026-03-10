@@ -91,7 +91,7 @@ impl TargetAction for Switch {
                                 let work: BoxFuture<'static, Result<TransformResult, ActionError>> =
                                     Box::pin(async move {
                                         let mut guard = job_mux2.lock().await;
-                                        t.execute(&mut *guard).await
+                                        t.execute(&mut guard).await
                                     });
                                 let result = d.dispatch(&current_job, work).await?;
                                 if matches!(result, TransformResult::Continue) {

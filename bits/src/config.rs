@@ -108,13 +108,13 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
     let persist_guard = Duration::from_millis(bits_cfg.persist_guard_ms.unwrap_or(1_000));
     let persist_after = bits_cfg.persist_after_ms.map(Duration::from_millis);
 
-    if let Some(persist_after) = persist_after {
-        if persist_after + persist_guard >= poll_timeout {
-            return Err(
-                "bits.persist_after_ms + bits.persist_guard_ms must be less than bits.poll_timeout_ms"
-                    .into(),
-            );
-        }
+    if let Some(persist_after) = persist_after
+        && persist_after + persist_guard >= poll_timeout
+    {
+        return Err(
+            "bits.persist_after_ms + bits.persist_guard_ms must be less than bits.poll_timeout_ms"
+                .into(),
+        );
     }
 
     let (job_store, broker_lease_ttl) = match bits_cfg.tikv {
@@ -241,7 +241,7 @@ fn parse_action(
     }
 }
 
-fn split_ns<'a>(s: &'a str) -> Result<(&'a str, &'a str), Box<dyn std::error::Error>> {
+fn split_ns(s: &str) -> Result<(&str, &str), Box<dyn std::error::Error>> {
     let mut parts = s.splitn(2, "::");
     let ns = parts
         .next()

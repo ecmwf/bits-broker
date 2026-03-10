@@ -38,10 +38,10 @@ where
         if let Some(scope) = ctx.event_scope() {
             for span in scope.from_root() {
                 let ext = span.extensions();
-                if let Some(fields) = ext.get::<FormattedFields<N>>() {
-                    if !fields.is_empty() {
-                        write!(writer, "\x1b[96m[{}]\x1b[0m ", fields)?;
-                    }
+                if let Some(fields) = ext.get::<FormattedFields<N>>()
+                    && !fields.is_empty()
+                {
+                    write!(writer, "\x1b[96m[{}]\x1b[0m ", fields)?;
                 }
             }
         }

@@ -2,24 +2,43 @@
 
 ## Owner-aware job IDs
 
-Jobs use owner-aware identifiers in the form `{broker_id}~{uuid}`.
+Every job ID has the form `{broker_id}~{uuid}`.
 
-This allows any broker receiving a poll request to determine likely ownership without scanning
-all instances.
+The `broker_id` prefix encodes which broker originally accepted the job. This means any broker
+that receives a poll for that job can determine the likely owner from the ID alone — without
+scanning all broker instances or querying a central coordinator.
 
-## Threshold persistence behavior
+## Threshold persistence
 
-With `bits.persist_after_ms` configured:
+When `bits.persist_after_ms` is configured, BITS applies a threshold before writing to the
+persistence store:
 
-1. Job starts immediately in-memory.
-2. If still running at the threshold, the broker writes a durable job record once.
-3. On completion, the durable record is removed.
+1. The job starts in-memory immediately when submitted.
+2. A timer is set for `persist_after_ms`.
+3. If the job is still running when the timer fires, BITS writes one durable record containing:
+   `job_id`, `broker_id` (owner), `original_request`, `user`, `metadata`, and `created_at`.
+4. When the job reaches a terminal state (success, failure, or cancellation), the durable record
+   is deleted.
 
-No per-job lock heartbeat is required; owner liveness comes from broker lease TTL.
+Jobs that complete before the threshold are never written to the store. Jobs that cross the
+threshold are written exactly once. There are no heartbeat writes for individual jobs.
+
+## Liveness without per-job heartbeats
+
+BITS determines owner liveness through **broker leases**, not per-job heartbeats. Each broker
+periodically renews a lease record in durable storage. If a broker's lease expires, that broker
+is considered unavailable and its persisted jobs are eligible for reclaim.
+
+This means the persistence store sees one write per long-running job (on persist) and one delete
+(on completion), plus periodic lease renewals per broker — not one heartbeat per in-flight job.
 
 ## Store abstraction
 
-The persistence layer is abstracted behind traits so in-memory and TiKV backends can implement
-the same behavior.
+The persistence layer is implemented behind a trait interface, so the same behavior works with
+different backends. An in-memory store (for testing) and a TiKV store (for production) both
+implement this interface.
 
-Logical namespaces separate job records and broker lease records.
+Two logical namespaces keep records separate:
+
+- **Job records** — one record per persisted job.
+- **Broker lease records** — one record per live broker.

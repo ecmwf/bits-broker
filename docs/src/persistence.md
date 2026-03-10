@@ -1,10 +1,12 @@
 # Persistence
 
-BITS persistence is dispatcher-level and owner-aware.
+BITS persistence is owner-aware and time-threshold based.
 
-When a dispatcher is marked persistent, the broker stores durable job state before queueing and
-maintains lock heartbeats while work is active. This allows recovery after broker failure and
-supports multi-broker ownership handoff.
+When `bits.persist_after_ms` is configured, a job is persisted once after it has been in-flight for
+that duration. Short jobs avoid database writes, while longer jobs become recoverable.
+
+Reclaim is strict: a non-owner broker only attempts claim/replay when the owner broker lease is
+missing or expired. Transient proxy failures do not trigger reclaim while the owner lease is valid.
 
 This section covers:
 

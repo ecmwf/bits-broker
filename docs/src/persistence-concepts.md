@@ -7,15 +7,15 @@ Jobs use owner-aware identifiers in the form `{broker_id}~{uuid}`.
 This allows any broker receiving a poll request to determine likely ownership without scanning
 all instances.
 
-## Persistent dispatcher behavior
+## Threshold persistence behavior
 
-With `dispatcher.persistent: true`:
+With `bits.persist_after_ms` configured:
 
-1. The broker writes or updates the persistent job record before enqueueing.
-2. While executing, lock heartbeats are renewed.
+1. Job starts immediately in-memory.
+2. If still running at the threshold, the broker writes a durable job record once.
 3. On completion, the durable record is removed.
 
-Persistence is therefore tied to the execution boundary where queueing and coordination happen.
+No per-job lock heartbeat is required; owner liveness comes from broker lease TTL.
 
 ## Store abstraction
 

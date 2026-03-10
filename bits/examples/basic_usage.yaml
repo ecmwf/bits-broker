@@ -5,7 +5,12 @@
 #   - Dispatcher config (queue, concurrency) nested under `dispatcher:` in registry entries
 #   - Switch for conditional branching
 #   - Inline actions for one-off steps
-#   - Optional dispatcher persistence for durable jobs
+#   - Optional time-based persistence policy for durable jobs
+
+bits:
+  persist_after_ms: 10000
+  poll_timeout_ms: 30000
+  persist_guard_ms: 1000
 
 checks:
 

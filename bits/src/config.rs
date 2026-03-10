@@ -17,22 +17,9 @@ struct Registries {
     targets: HashMap<String, serde_json::Value>,
 }
 
-impl Clone for Registries {
-    fn clone(&self) -> Self {
-        Self {
-            checks: self.checks.clone(),
-            transforms: self.transforms.clone(),
-            targets: self.targets.clone(),
-        }
-    }
-}
-
 #[derive(Clone)]
 struct ParseContext {
     registries: Registries,
-    job_store: Option<Arc<dyn PersistenceStore>>,
-    broker_id: String,
-    default_lock_ttl: Duration,
 }
 
 #[derive(Default)]
@@ -40,8 +27,6 @@ struct DispatcherSettings {
     queue: Option<QueueKind>,
     executor: Option<ExecutorKind>,
     concurrency: Option<usize>,
-    persistent: bool,
-    lock_ttl: Option<Duration>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +40,12 @@ struct BitsConfig {
     #[serde(default)]
     job_cleanup_interval_ms: Option<u64>,
     #[serde(default)]
+    persist_after_ms: Option<u64>,
+    #[serde(default)]
+    poll_timeout_ms: Option<u64>,
+    #[serde(default)]
+    persist_guard_ms: Option<u64>,
+    #[serde(default)]
     tikv: Option<TiKvConfig>,
 }
 
@@ -62,18 +53,12 @@ struct BitsConfig {
 #[derive(Debug, Deserialize)]
 struct TiKvConfig {
     endpoints: Vec<String>,
-    #[serde(default = "default_lock_ttl_secs")]
-    lock_ttl_secs: f64,
     #[serde(default = "default_broker_lease_ttl_secs")]
     broker_lease_ttl_secs: f64,
 }
 
 #[cfg(feature = "tikv")]
 type StoreFactory = crate::db::tikv::TiKvStore;
-
-fn default_lock_ttl_secs() -> f64 {
-    300.0
-}
 
 fn default_broker_lease_ttl_secs() -> f64 {
     30.0
@@ -86,8 +71,8 @@ pub(crate) struct ParsedConfig {
     pub internal_poll_base_url: String,
     pub internal_poll_timeout: Duration,
     pub job_store: Option<Arc<dyn PersistenceStore>>,
-    pub lock_ttl: Duration,
     pub broker_lease_ttl: Duration,
+    pub persist_after: Option<Duration>,
 }
 
 pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::error::Error>> {
@@ -103,6 +88,9 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
             internal_poll_base_url: None,
             internal_poll_timeout_ms: None,
             job_cleanup_interval_ms: None,
+            persist_after_ms: None,
+            poll_timeout_ms: None,
+            persist_guard_ms: None,
             tikv: None,
         });
 
@@ -116,7 +104,20 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
         Duration::from_millis(bits_cfg.internal_poll_timeout_ms.unwrap_or(2500));
     let sweep_interval = bits_cfg.job_cleanup_interval_ms.map(Duration::from_millis);
 
-    let (job_store, lock_ttl, broker_lease_ttl) = match bits_cfg.tikv {
+    let poll_timeout = Duration::from_millis(bits_cfg.poll_timeout_ms.unwrap_or(30_000));
+    let persist_guard = Duration::from_millis(bits_cfg.persist_guard_ms.unwrap_or(1_000));
+    let persist_after = bits_cfg.persist_after_ms.map(Duration::from_millis);
+
+    if let Some(persist_after) = persist_after {
+        if persist_after + persist_guard >= poll_timeout {
+            return Err(
+                "bits.persist_after_ms + bits.persist_guard_ms must be less than bits.poll_timeout_ms"
+                    .into(),
+            );
+        }
+    }
+
+    let (job_store, broker_lease_ttl) = match bits_cfg.tikv {
         Some(tikv) => {
             if tikv.endpoints.is_empty() {
                 return Err("bits.tikv.endpoints must not be empty".into());
@@ -129,14 +130,12 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
             {
                 (
                     Some(Arc::new(StoreFactory::new(tikv.endpoints)) as Arc<dyn PersistenceStore>),
-                    Duration::from_secs_f64(tikv.lock_ttl_secs),
                     Duration::from_secs_f64(tikv.broker_lease_ttl_secs),
                 )
             }
         }
         None => (
             None,
-            Duration::from_secs_f64(default_lock_ttl_secs()),
             Duration::from_secs_f64(default_broker_lease_ttl_secs()),
         ),
     };
@@ -163,9 +162,6 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
             transforms,
             targets,
         },
-        job_store: job_store.clone(),
-        broker_id: broker_id.clone(),
-        default_lock_ttl: lock_ttl,
     };
 
     let routes = raw
@@ -193,8 +189,8 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
         internal_poll_base_url,
         internal_poll_timeout,
         job_store,
-        lock_ttl,
         broker_lease_ttl,
+        persist_after,
     })
 }
 
@@ -206,7 +202,7 @@ fn parse_action(
         serde_json::Value::String(name) => {
             if name == "persist" {
                 return Err(
-                    "'persist' step has been removed; use dispatcher.persistence instead".into(),
+                    "'persist' step has been removed; use bits.persist_after_ms instead".into(),
                 );
             }
             let (ns, entry_name) = split_ns(name)?;
@@ -234,8 +230,8 @@ fn parse_action(
                     let (ns, action_name) = split_ns(key)?;
                     let action = create_action(action_name, config.clone())?;
                     let action = validate_inline_action(ns, action)?;
-                    let settings = parse_dispatcher_fields(map.get("dispatcher"), Some(map))?;
-                    return attach_dispatcher(action_name, action, settings, ctx);
+                    let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
+                    return attach_dispatcher(action_name, action, settings);
                 }
             }
 
@@ -268,7 +264,7 @@ fn resolve_named(
                 .checks
                 .get(name)
                 .ok_or_else(|| format!("unknown check '{name}'"))?;
-            action_from_entry(entry, ctx)
+            action_from_entry(entry)
         }
         "transform" => {
             let entry = ctx
@@ -276,7 +272,7 @@ fn resolve_named(
                 .transforms
                 .get(name)
                 .ok_or_else(|| format!("unknown transform '{name}'"))?;
-            action_from_entry(entry, ctx)
+            action_from_entry(entry)
         }
         "target" => {
             let entry = ctx
@@ -284,7 +280,7 @@ fn resolve_named(
                 .targets
                 .get(name)
                 .ok_or_else(|| format!("unknown target '{name}'"))?;
-            action_from_entry(entry, ctx)
+            action_from_entry(entry)
         }
         _ => Err(format!("unknown namespace '{ns}' in '{ns}::{name}'").into()),
     }
@@ -301,7 +297,6 @@ fn validate_inline_action(ns: &str, action: Action) -> Result<Action, Box<dyn st
 
 fn parse_dispatcher_fields(
     dispatcher: Option<&serde_json::Value>,
-    parent: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<DispatcherSettings, Box<dyn std::error::Error>> {
     let mut settings = DispatcherSettings::default();
 
@@ -319,61 +314,46 @@ fn parse_dispatcher_fields(
             .get("concurrency")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
-        settings.persistent = map
-            .get("persistent")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        settings.lock_ttl = map
-            .get("lock_ttl_secs")
-            .and_then(|v| v.as_f64())
-            .map(Duration::from_secs_f64);
-    }
-
-    if let Some(parent) = parent {
-        if let Some(persistent) = parent.get("persistent").and_then(|v| v.as_bool()) {
-            settings.persistent = persistent;
-        }
-        if let Some(lock_ttl_secs) = parent.get("lock_ttl_secs").and_then(|v| v.as_f64()) {
-            settings.lock_ttl = Some(Duration::from_secs_f64(lock_ttl_secs));
+        if map.contains_key("persistent") || map.contains_key("lock_ttl_secs") {
+            return Err(
+                "dispatcher.persistent/lock_ttl_secs removed; use bits.persist_after_ms policy"
+                    .into(),
+            );
         }
     }
 
     Ok(settings)
 }
 
-fn action_from_entry(
-    entry: &serde_json::Value,
-    ctx: &ParseContext,
-) -> Result<Action, Box<dyn std::error::Error>> {
+fn action_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::error::Error>> {
     let map = entry
         .as_object()
         .ok_or("registry entry must be an object")?;
+    if map.contains_key("persistent") || map.contains_key("lock_ttl_secs") {
+        return Err(
+            "registry-level persistent/lock_ttl_secs removed; use bits.persist_after_ms".into(),
+        );
+    }
     let type_name = map
         .get("type")
         .and_then(|v| v.as_str())
         .ok_or("registry entry must have a 'type' field")?;
-    let settings = parse_dispatcher_fields(map.get("dispatcher"), Some(map))?;
+    let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
 
     let config: serde_json::Value = map
         .iter()
-        .filter(|(k, _)| {
-            !matches!(
-                k.as_str(),
-                "type" | "dispatcher" | "persistent" | "lock_ttl_secs"
-            )
-        })
+        .filter(|(k, _)| !matches!(k.as_str(), "type" | "dispatcher"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<serde_json::Map<_, _>>()
         .into();
     let action = create_action(type_name, config)?;
-    attach_dispatcher(type_name, action, settings, ctx)
+    attach_dispatcher(type_name, action, settings)
 }
 
 fn attach_dispatcher(
     action_name: &str,
     action: Action,
     mut settings: DispatcherSettings,
-    ctx: &ParseContext,
 ) -> Result<Action, Box<dyn std::error::Error>> {
     let is_remote_action = action_name == "remote";
     let is_remote_pool = matches!(&settings.executor, Some(ExecutorKind::RemotePool(_)));
@@ -393,10 +373,6 @@ fn attach_dispatcher(
         return Err("executor: remote_pool requires a 'remote' target action".into());
     }
 
-    if settings.persistent && ctx.job_store.is_none() {
-        return Err("persistent dispatcher requires bits.tikv configuration".into());
-    }
-
     let has_dispatcher =
         settings.queue.is_some() || settings.executor.is_some() || settings.concurrency.is_some();
     let action_type_id = if action_name == "remote" {
@@ -404,52 +380,48 @@ fn attach_dispatcher(
     } else {
         TypeId::of::<()>()
     };
-    let lock_ttl = settings.lock_ttl.unwrap_or(ctx.default_lock_ttl);
 
     match action {
         Action::Check(check, _) => {
-            let dispatcher = Dispatcher::from_config_with_persistence(
+            let dispatcher = Dispatcher::from_config(
                 settings.queue.as_ref(),
                 settings.executor.as_ref(),
                 settings.concurrency,
                 action_type_id,
-                ctx.job_store.clone(),
-                ctx.broker_id.clone(),
-                lock_ttl,
-                settings.persistent,
             );
             Ok(Action::Check(check, dispatcher))
         }
         Action::Transform(transform, _) => {
-            let dispatcher = Dispatcher::from_config_with_persistence(
+            let dispatcher = Dispatcher::from_config(
                 settings.queue.as_ref(),
                 settings.executor.as_ref(),
                 settings.concurrency,
                 action_type_id,
-                ctx.job_store.clone(),
-                ctx.broker_id.clone(),
-                lock_ttl,
-                settings.persistent,
             );
             Ok(Action::Transform(transform, dispatcher))
         }
         Action::Target(target, _) => {
-            let dispatcher = Dispatcher::from_config_with_persistence(
+            let dispatcher = Dispatcher::from_config(
                 settings.queue.as_ref(),
                 settings.executor.as_ref(),
                 settings.concurrency,
                 action_type_id,
-                ctx.job_store.clone(),
-                ctx.broker_id.clone(),
-                lock_ttl,
-                settings.persistent,
             );
             Ok(Action::Target(target, dispatcher))
         }
-        _ if has_dispatcher || settings.persistent || settings.lock_ttl.is_some() => Err(
-            "dispatcher/persistent config only valid for Check, Transform, and Target actions"
-                .into(),
-        ),
+        _ if has_dispatcher => {
+            Err("dispatcher config only valid for Check, Transform, and Target actions".into())
+        }
         _ => Ok(action),
+    }
+}
+
+impl Clone for Registries {
+    fn clone(&self) -> Self {
+        Self {
+            checks: self.checks.clone(),
+            transforms: self.transforms.clone(),
+            targets: self.targets.clone(),
+        }
     }
 }

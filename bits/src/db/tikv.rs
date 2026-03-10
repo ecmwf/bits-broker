@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::OnceCell;
@@ -42,10 +40,6 @@ impl TiKvStore {
         format!("{BROKER_PREFIX}{broker_id}")
     }
 
-    fn lock_deadline(ttl: Duration) -> chrono::DateTime<chrono::Utc> {
-        Utc::now() + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(60))
-    }
-
     fn serialize<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, DbError> {
         serde_json::to_vec(value).map_err(|err| DbError::Backend(format!("serialize failed: {err}")))
     }
@@ -55,12 +49,11 @@ impl TiKvStore {
             .map_err(|err| DbError::Backend(format!("deserialize failed: {err}")))
     }
 
-    async fn claim_with_mode(
+    async fn claim_with_owner(
         &self,
         job_id: &str,
-        broker_id: &str,
-        ttl: Duration,
-        force: bool,
+        expected_owner_broker_id: &str,
+        claimant_broker_id: &str,
     ) -> Result<ClaimResult, DbError> {
         let key = Self::job_key(job_id);
         let client = self.client().await?;
@@ -79,14 +72,17 @@ impl TiKvStore {
             };
 
             let mut record: PersistentJobRecord = Self::deserialize(current)?;
-            if !force && record.locked_until > Utc::now() && record.broker_id != broker_id {
+            if record.broker_id == claimant_broker_id {
+                return Ok(ClaimResult::Claimed(record));
+            }
+
+            if record.broker_id != expected_owner_broker_id {
                 return Ok(ClaimResult::Active {
                     owner_broker_id: record.broker_id.clone(),
                 });
             }
 
-            record.broker_id = broker_id.to_string();
-            record.locked_until = Self::lock_deadline(ttl);
+            record.broker_id = claimant_broker_id.to_string();
             txn.put(key.clone(), Self::serialize(&record)?)
                 .await
                 .map_err(|err| DbError::Backend(format!("put failed: {err}")))?;
@@ -125,37 +121,6 @@ impl JobStore for TiKvStore {
         Ok(())
     }
 
-    async fn renew_job_lock(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<(), DbError> {
-        let key = Self::job_key(job_id);
-        let client = self.client().await?;
-        let mut txn = client
-            .begin_optimistic()
-            .await
-            .map_err(|err| DbError::Backend(format!("begin txn failed: {err}")))?;
-        let current = txn
-            .get(key.clone())
-            .await
-            .map_err(|err| DbError::Backend(format!("get failed: {err}")))?;
-        let Some(current) = current else {
-            return Ok(());
-        };
-        let mut record: PersistentJobRecord = Self::deserialize(current)?;
-        if record.broker_id != broker_id {
-            return Err(DbError::Conflict(format!(
-                "job '{job_id}' owned by '{}'",
-                record.broker_id
-            )));
-        }
-        record.locked_until = Self::lock_deadline(ttl);
-        txn.put(key, Self::serialize(&record)?)
-            .await
-            .map_err(|err| DbError::Backend(format!("put failed: {err}")))?;
-        txn.commit()
-            .await
-            .map_err(|err| DbError::Backend(format!("commit failed: {err}")))?;
-        Ok(())
-    }
-
     async fn delete_job(&self, job_id: &str) -> Result<(), DbError> {
         let key = Self::job_key(job_id);
         let client = self.client().await?;
@@ -172,12 +137,14 @@ impl JobStore for TiKvStore {
         Ok(())
     }
 
-    async fn try_claim_expired(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError> {
-        self.claim_with_mode(job_id, broker_id, ttl, false).await
-    }
-
-    async fn force_claim(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError> {
-        self.claim_with_mode(job_id, broker_id, ttl, true).await
+    async fn claim_if_owner(
+        &self,
+        job_id: &str,
+        expected_owner_broker_id: &str,
+        claimant_broker_id: &str,
+    ) -> Result<ClaimResult, DbError> {
+        self.claim_with_owner(job_id, expected_owner_broker_id, claimant_broker_id)
+            .await
     }
 }
 

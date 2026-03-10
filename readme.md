@@ -21,7 +21,7 @@
 
 ## ✨ Features
 
-- ⚡ **Fast and slow requests, one broker** — ephemeral jobs flow through the pipeline in-memory with no overhead; long-lived jobs opt into dispatcher-level persistence.
+- ⚡ **Fast and slow requests, one broker** — ephemeral jobs flow through the pipeline in-memory with no overhead; long-lived jobs persist after a configurable in-flight threshold.
 
 - 📡 **Horizontal scalability with consistency** — multiple broker instances share quota of shared resources safely and efficiently.
 

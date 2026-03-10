@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 use crate::db::{
     BrokerLeaseRecord, BrokerLeaseStore, ClaimResult, DbError, JobStore, PersistentJobRecord,
@@ -21,10 +21,6 @@ impl MemoryStore {
             brokers: Mutex::new(HashMap::new()),
         }
     }
-
-    fn next_lock_deadline(ttl: Duration) -> DateTime<Utc> {
-        Utc::now() + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(60))
-    }
 }
 
 impl Default for MemoryStore {
@@ -40,47 +36,33 @@ impl JobStore for MemoryStore {
         Ok(())
     }
 
-    async fn renew_job_lock(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<(), DbError> {
-        let mut jobs = self.jobs.lock().unwrap();
-        if let Some(record) = jobs.get_mut(job_id) {
-            if record.broker_id != broker_id {
-                return Err(DbError::Conflict(format!(
-                    "job '{job_id}' owned by '{}'",
-                    record.broker_id
-                )));
-            }
-            record.locked_until = Self::next_lock_deadline(ttl);
-        }
-        Ok(())
-    }
-
     async fn delete_job(&self, job_id: &str) -> Result<(), DbError> {
         self.jobs.lock().unwrap().remove(job_id);
         Ok(())
     }
 
-    async fn try_claim_expired(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError> {
+    async fn claim_if_owner(
+        &self,
+        job_id: &str,
+        expected_owner_broker_id: &str,
+        claimant_broker_id: &str,
+    ) -> Result<ClaimResult, DbError> {
         let mut jobs = self.jobs.lock().unwrap();
         let Some(record) = jobs.get_mut(job_id) else {
             return Ok(ClaimResult::NotFound);
         };
-        if record.locked_until > Utc::now() && record.broker_id != broker_id {
+
+        if record.broker_id == claimant_broker_id {
+            return Ok(ClaimResult::Claimed(record.clone()));
+        }
+
+        if record.broker_id != expected_owner_broker_id {
             return Ok(ClaimResult::Active {
                 owner_broker_id: record.broker_id.clone(),
             });
         }
-        record.broker_id = broker_id.to_string();
-        record.locked_until = Self::next_lock_deadline(ttl);
-        Ok(ClaimResult::Claimed(record.clone()))
-    }
 
-    async fn force_claim(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError> {
-        let mut jobs = self.jobs.lock().unwrap();
-        let Some(record) = jobs.get_mut(job_id) else {
-            return Ok(ClaimResult::NotFound);
-        };
-        record.broker_id = broker_id.to_string();
-        record.locked_until = Self::next_lock_deadline(ttl);
+        record.broker_id = claimant_broker_id.to_string();
         Ok(ClaimResult::Claimed(record.clone()))
     }
 }
@@ -121,16 +103,15 @@ impl BrokerLeaseStore for MemoryStore {
 mod tests {
     use std::time::Duration;
 
-    use chrono::{Duration as ChronoDuration, Utc};
+    use chrono::Utc;
     use serde_json::json;
 
     use super::*;
 
-    fn sample_job(job_id: &str, broker_id: &str, lock_offset_secs: i64) -> PersistentJobRecord {
+    fn sample_job(job_id: &str, broker_id: &str) -> PersistentJobRecord {
         PersistentJobRecord {
             job_id: job_id.to_string(),
             broker_id: broker_id.to_string(),
-            locked_until: Utc::now() + ChronoDuration::seconds(lock_offset_secs),
             original_request: json!({"foo": "bar"}),
             user: json!({"name": "alice"}),
             metadata: json!({"cost": 1}),
@@ -139,13 +120,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_renew_delete_job() {
+    async fn upsert_claim_delete_job() {
         let store = MemoryStore::new();
-        let job = sample_job("broker-1~1", "broker-1", -30);
+        let job = sample_job("broker-1~1", "broker-1");
         store.upsert_job(job.clone()).await.unwrap();
 
         match store
-            .try_claim_expired("broker-1~1", "broker-2", Duration::from_secs(60))
+            .claim_if_owner("broker-1~1", "broker-1", "broker-2")
             .await
             .unwrap()
         {
@@ -153,15 +134,10 @@ mod tests {
             other => panic!("expected claimed, got {other:?}"),
         }
 
-        store
-            .renew_job_lock("broker-1~1", "broker-2", Duration::from_secs(120))
-            .await
-            .unwrap();
-
         store.delete_job("broker-1~1").await.unwrap();
         assert!(matches!(
             store
-                .try_claim_expired("broker-1~1", "broker-3", Duration::from_secs(60))
+                .claim_if_owner("broker-1~1", "broker-2", "broker-3")
                 .await
                 .unwrap(),
             ClaimResult::NotFound
@@ -169,20 +145,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_claim_active_and_expired() {
+    async fn claim_requires_expected_owner() {
         let store = MemoryStore::new();
         store
-            .upsert_job(sample_job("broker-1~2", "broker-1", 300))
-            .await
-            .unwrap();
-        store
-            .upsert_job(sample_job("broker-1~3", "broker-1", -1))
+            .upsert_job(sample_job("broker-1~2", "broker-1"))
             .await
             .unwrap();
 
         assert!(matches!(
             store
-                .try_claim_expired("broker-1~2", "broker-2", Duration::from_secs(60))
+                .claim_if_owner("broker-1~2", "broker-9", "broker-2")
                 .await
                 .unwrap(),
             ClaimResult::Active { .. }
@@ -190,7 +162,7 @@ mod tests {
 
         assert!(matches!(
             store
-                .try_claim_expired("broker-1~3", "broker-2", Duration::from_secs(60))
+                .claim_if_owner("broker-1~2", "broker-1", "broker-2")
                 .await
                 .unwrap(),
             ClaimResult::Claimed(_)
@@ -198,17 +170,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_claim_overrides_active_lock() {
+    async fn claim_idempotent_for_same_claimant() {
         let store = MemoryStore::new();
         store
-            .upsert_job(sample_job("broker-1~4", "broker-1", 600))
+            .upsert_job(sample_job("broker-1~4", "broker-1"))
+            .await
+            .unwrap();
+
+        store
+            .claim_if_owner("broker-1~4", "broker-1", "broker-9")
             .await
             .unwrap();
 
         let result = store
-            .force_claim("broker-1~4", "broker-9", Duration::from_secs(60))
+            .claim_if_owner("broker-1~4", "broker-1", "broker-9")
             .await
             .unwrap();
+
         match result {
             ClaimResult::Claimed(record) => assert_eq!(record.broker_id, "broker-9"),
             other => panic!("expected claimed, got {other:?}"),

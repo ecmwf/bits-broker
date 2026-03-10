@@ -3,6 +3,11 @@
 # Uses ECMWF-specific action types registered by the bits-ecmwf crate.
 # Dispatcher config (queue, concurrency) lives nested under `dispatcher:` in registry entries.
 
+bits:
+  persist_after_ms: 10000
+  poll_timeout_ms: 30000
+  persist_guard_ms: 1000
+
 checks:
 
   valid_data:

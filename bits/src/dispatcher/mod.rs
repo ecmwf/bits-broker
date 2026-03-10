@@ -9,12 +9,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
 use futures::future::BoxFuture;
 use tokio::sync::oneshot;
 
 use crate::actions::ActionError;
-use crate::db::{PersistenceStore, PersistentJobRecord};
 use crate::job::Job;
 
 fn default_remote_bind() -> String {
@@ -89,10 +87,6 @@ pub struct Dispatcher<T: Send + 'static> {
     pending: Arc<PendingMap<T>>,
     #[allow(dead_code)] // captured by value into the worker task at construction
     action_type_id: TypeId,
-    job_store: Option<Arc<dyn PersistenceStore>>,
-    broker_id: String,
-    lock_ttl: Duration,
-    persistent: bool,
 }
 
 impl<T: Send + 'static> Dispatcher<T> {
@@ -104,29 +98,7 @@ impl<T: Send + 'static> Dispatcher<T> {
         concurrency: Option<usize>,
         action_type_id: TypeId,
     ) -> Option<Self> {
-        Self::from_config_with_persistence(
-            queue,
-            executor,
-            concurrency,
-            action_type_id,
-            None,
-            "local".to_string(),
-            Duration::from_secs(300),
-            false,
-        )
-    }
-
-    pub fn from_config_with_persistence(
-        queue: Option<&QueueKind>,
-        executor: Option<&ExecutorKind>,
-        concurrency: Option<usize>,
-        action_type_id: TypeId,
-        job_store: Option<Arc<dyn PersistenceStore>>,
-        broker_id: String,
-        lock_ttl: Duration,
-        persistent: bool,
-    ) -> Option<Self> {
-        if queue.is_none() && concurrency.is_none() && executor.is_none() && !persistent {
+        if queue.is_none() && concurrency.is_none() && executor.is_none() {
             return None;
         }
         let concurrency = concurrency.unwrap_or(tokio::sync::Semaphore::MAX_PERMITS);
@@ -146,10 +118,6 @@ impl<T: Send + 'static> Dispatcher<T> {
             queue,
             executor,
             action_type_id,
-            job_store,
-            broker_id,
-            lock_ttl,
-            persistent,
         ))
     }
 
@@ -157,10 +125,6 @@ impl<T: Send + 'static> Dispatcher<T> {
         queue: Arc<dyn Queue>,
         executor: Arc<dyn Executor<T>>,
         action_type_id: TypeId,
-        job_store: Option<Arc<dyn PersistenceStore>>,
-        broker_id: String,
-        lock_ttl: Duration,
-        persistent: bool,
     ) -> Self {
         let pending: Arc<PendingMap<T>> = Arc::new(Mutex::new(HashMap::new()));
 
@@ -194,10 +158,6 @@ impl<T: Send + 'static> Dispatcher<T> {
             executor,
             pending,
             action_type_id,
-            job_store,
-            broker_id,
-            lock_ttl,
-            persistent,
         }
     }
 
@@ -210,85 +170,17 @@ impl<T: Send + 'static> Dispatcher<T> {
         let pending = Arc::clone(&self.pending);
         let queue = Arc::clone(&self.queue);
         let job_to_enqueue = job.clone();
-        let job_id = job.id.clone();
-        let persistent = self.persistent;
-        let lock_ttl = self.lock_ttl;
-        let broker_id = self.broker_id.clone();
-        let job_store = self.job_store.clone();
         Box::pin(async move {
-            if persistent {
-                let Some(store) = &job_store else {
-                    return Err(ActionError::ConfigError(
-                        "persistent dispatcher requires configured job store".into(),
-                    ));
-                };
-                let locked_until = Utc::now()
-                    + chrono::Duration::from_std(lock_ttl)
-                        .unwrap_or_else(|_| chrono::Duration::seconds(60));
-                let record = PersistentJobRecord {
-                    job_id: job_to_enqueue.id.clone(),
-                    broker_id: broker_id.clone(),
-                    locked_until,
-                    original_request: job_to_enqueue.original_request.clone(),
-                    user: job_to_enqueue.user.clone(),
-                    metadata: job_to_enqueue.metadata.clone(),
-                    created_at: job_to_enqueue.created_at,
-                };
-                store.upsert_job(record).await.map_err(to_action_error)?;
-            }
-
             // Insert before enqueue so the worker always finds the entry.
-            pending.lock().unwrap().insert(job_id.clone(), (work, reply_tx));
+            pending
+                .lock()
+                .unwrap()
+                .insert(job_to_enqueue.id.clone(), (work, reply_tx));
             queue.enqueue(job_to_enqueue.clone());
 
-            let _heartbeat = if persistent {
-                if let Some(store) = job_store.clone() {
-                    Some(AbortOnDrop::spawn(async move {
-                        let tick = lock_ttl.div_f64(2.0).max(Duration::from_millis(100));
-                        loop {
-                            tokio::time::sleep(tick).await;
-                            let _ = store.renew_job_lock(&job_id, &broker_id, lock_ttl).await;
-                        }
-                    }))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let result = reply_rx
+            reply_rx
                 .await
-                .map_err(|_| ActionError::ResourceError("dispatcher closed".into()))?;
-
-            if persistent {
-                if let Some(store) = &job_store {
-                    let _ = store.delete_job(&job_to_enqueue.id).await;
-                }
-            }
-
-            result
+                .map_err(|_| ActionError::ResourceError("dispatcher closed".into()))?
         })
-    }
-}
-
-fn to_action_error(err: crate::db::DbError) -> ActionError {
-    ActionError::ResourceError(format!("persistence error: {err}"))
-}
-
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl AbortOnDrop {
-    fn spawn<F>(future: F) -> Self
-    where
-        F: std::future::Future<Output = ()> + Send + 'static,
-    {
-        Self(tokio::spawn(future))
-    }
-}
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }

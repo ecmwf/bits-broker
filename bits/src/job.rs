@@ -34,7 +34,6 @@ pub struct Job {
     pub user: Value,
     pub created_at: DateTime<Utc>,
     pub metadata: Value,
-    pub persistent: bool,
     /// Set by `Bits::cancel()`. Checked in the pipeline before each action.
     #[serde(skip, default = "default_cancelled")]
     pub(crate) cancelled: Arc<AtomicBool>,
@@ -65,7 +64,6 @@ impl Job {
             user: serde_json::json!({}),
             created_at: Utc::now(),
             metadata: serde_json::json!({}),
-            persistent: false,
             cancelled: default_cancelled(),
             client_connected: default_client_connected(),
             reconnect_deadline: default_reconnect_deadline(),
@@ -82,7 +80,6 @@ impl Job {
             user: record.user,
             created_at: record.created_at,
             metadata: record.metadata,
-            persistent: true,
             cancelled: default_cancelled(),
             client_connected: default_client_connected(),
             reconnect_deadline: default_reconnect_deadline(),
@@ -112,7 +109,6 @@ impl Clone for Job {
             user: self.user.clone(),
             created_at: self.created_at,
             metadata: self.metadata.clone(),
-            persistent: self.persistent,
             // Lifecycle arcs — share the same underlying state so the pipeline
             // clone can still read cancellation / client-presence correctly.
             cancelled: self.cancelled.clone(),
@@ -137,6 +133,5 @@ mod tests {
         let job = Job::new(request.clone());
         assert_eq!(job.original_request, request);
         assert_eq!(job.request, request);
-        assert!(!job.persistent);
     }
 }

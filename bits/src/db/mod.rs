@@ -13,7 +13,6 @@ use serde_json::Value;
 pub struct PersistentJobRecord {
     pub job_id: String,
     pub broker_id: String,
-    pub locked_until: DateTime<Utc>,
     pub original_request: Value,
     pub user: Value,
     pub metadata: Value,
@@ -55,10 +54,13 @@ impl std::error::Error for DbError {}
 #[async_trait]
 pub trait JobStore: Send + Sync {
     async fn upsert_job(&self, record: PersistentJobRecord) -> Result<(), DbError>;
-    async fn renew_job_lock(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<(), DbError>;
     async fn delete_job(&self, job_id: &str) -> Result<(), DbError>;
-    async fn try_claim_expired(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError>;
-    async fn force_claim(&self, job_id: &str, broker_id: &str, ttl: Duration) -> Result<ClaimResult, DbError>;
+    async fn claim_if_owner(
+        &self,
+        job_id: &str,
+        expected_owner_broker_id: &str,
+        claimant_broker_id: &str,
+    ) -> Result<ClaimResult, DbError>;
 }
 
 #[async_trait]

@@ -15,6 +15,13 @@
 #
 # concurrency: <n>  — max simultaneous executions
 
+bits:
+  # For long-running jobs: persist once after this threshold.
+  persist_after_ms: 10000
+  # Guarantee persistence happens before a poll timeout can naturally elapse.
+  poll_timeout_ms: 30000
+  persist_guard_ms: 1000
+
 checks:
 
   valid_data:
@@ -47,7 +54,6 @@ targets:
       executor:
         type: thread_pool     # run each job on a dedicated thread to avoid blocking the dispatcher
         concurrency: 10
-      persistent: true
 
 
   dss_od:
@@ -58,7 +64,6 @@ targets:
       executor:
         type: semaphore
         concurrency: 8
-      persistent: true
 
   fdb_worker:
     type: remote              # noop — work is done by external FDB workers

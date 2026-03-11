@@ -1,7 +1,7 @@
 apiVersion: skaffold/v4beta2
 kind: Config
 metadata:
-  name: bits-broker
+  name: bits
 build:
   local:
     useBuildkit: true
@@ -12,13 +12,13 @@ build:
       template: '{{default .CARGO_VERSION "dev"}}'
 
   artifacts:
-    - image: "bits-ecmwf"
+    - image: "eccr.ecmwf.int/bits/bits-ecmwf"
       context: .
       docker:
         dockerfile: bits-ecmwf/Dockerfile
         target: release
 
-    - image: "bits-ecmwf-debug"
+    - image: "eccr.ecmwf.int/bits/bits-ecmwf-debug"
       context: .
       docker:
         dockerfile: bits-ecmwf/Dockerfile

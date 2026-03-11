@@ -5,12 +5,17 @@
 - [x] Add persistence, maybe time-based
 - [ ] Add integration tests which actually spin up tikv
 - [ ] Build an FDB worker (new repo)
+- [ ] Add an age-based priority queue
+- [ ] Add a throttle-proxy
 - [ ] Implement a MARS library and worker (new repo)
 - [ ] Allow dynamic configuration of routes
 - [ ] Clean up unwraps and expect, add better error handling
 - [ ] Migrate rules from polytope to BITS
 - [ ] Add tier-based token bucket implementation for rate-limiting
 - [ ] Consider anonymous access
+- [ ] Load balancing of workers to brokers
+- [ ] Broker lease should be a thread, not an async task
+- [ ] Diagrams in the docs
 
 - [ ] Add ecmwf-specific match actions, schedule actions and authotron action
 - [ ] Think about metrics implementation, aggregate statistics
@@ -21,6 +26,7 @@
 # Advanced
 - [ ] Tiered token bucket implementation for rate-limiting
 - [ ] Dehogger implementation to handle access to shared resources
+- [ ] For slow jobs we might want a globally-synchronised queue
 
 
 # Optional:

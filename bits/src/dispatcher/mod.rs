@@ -2,7 +2,7 @@ pub mod executor;
 pub mod queue;
 
 pub use executor::{RemotePoolExecutor, SemaphoreExecutor, ThreadPoolExecutor};
-pub use queue::{CostWeightedQueue, FifoQueue, Queue, QueueKind};
+pub use queue::{AgePriorityQueue, CostWeightedQueue, FifoQueue, Queue, QueueKind};
 
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -113,6 +113,7 @@ impl<T: Send + 'static> Dispatcher<T> {
         let queue: Arc<dyn Queue> = match queue.unwrap_or(&QueueKind::Fifo) {
             QueueKind::Fifo => Arc::new(FifoQueue::new()),
             QueueKind::CostWeighted => Arc::new(CostWeightedQueue::new()),
+            QueueKind::AgePriority => Arc::new(AgePriorityQueue::new()),
         };
         Some(Self::new(queue, executor, action_type_id))
     }

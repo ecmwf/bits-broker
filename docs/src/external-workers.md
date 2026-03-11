@@ -51,13 +51,17 @@ Important rules:
 
 ## 2) Worker API contract
 
-When `remote_pool` is configured, BITS starts an HTTP server with three endpoints.
+When `remote_pool` is configured, BITS starts an HTTP server with dedicated work, heartbeat,
+and terminal outcome endpoints.
 
 | Endpoint | Method | Purpose | Success codes |
 |---|---|---|---|
 | `/work?timeout_ms=N` | `GET` | Long-poll for one available job | `200`, `204` |
 | `/heartbeat/{job_id}` | `POST` | Keep an in-progress job alive | `200`, `404` |
-| `/complete/{job_id}` | `POST` | Submit final job outcome | `200`, `404` |
+| `/complete/data/{job_id}` | `POST` | Stream successful response body | `200`, `404` |
+| `/complete/reject/{job_id}` | `POST` | Submit business rejection JSON | `200`, `404` |
+| `/complete/error/{job_id}` | `POST` | Submit worker failure JSON | `200`, `404` |
+| `/complete/redirect/{job_id}` | `POST` | Submit redirect JSON | `200`, `404` |
 
 ### `GET /work?timeout_ms=N`
 
@@ -92,46 +96,46 @@ Send heartbeats while processing a job.
 If no heartbeat arrives within `heartbeat_timeout_secs`, BITS evicts the in-progress job and
 the broker side returns a failed result.
 
-### `POST /complete/{job_id}`
+### `POST /complete/data/{job_id}`
 
-Submit exactly one terminal outcome for a claimed job.
+Submit exactly one successful terminal outcome for a claimed job.
 
-`status: complete`:
+- The HTTP request body is the result stream.
+- `Content-Type` is forwarded to the final client response.
+- `Content-Length` is forwarded when provided, otherwise the client receives a chunked stream.
 
-```json
-{
-  "status": "complete",
-  "content_type": "application/json",
-  "body": "{\"result\":42}"
-}
+Example:
+
+```http
+POST /complete/data/broker-a123~9d2f... HTTP/1.1
+Content-Type: application/x-grib
+
+...streamed bytes...
 ```
 
-`status: reject`:
+### `POST /complete/reject/{job_id}`
 
 ```json
 {
-  "status": "reject",
   "reason": "unsupported request"
 }
 ```
 
-`status: redirect`:
+### `POST /complete/redirect/{job_id}`
 
 ```json
 {
-  "status": "redirect",
   "location": "https://my-bucket.s3.amazonaws.com/path/object.grib?X-Amz-Signature=...",
   "message": "Download is ready"
 }
 ```
 
-`message` is optional for `redirect`.
+`message` is optional for redirect.
 
-`status: error`:
+### `POST /complete/error/{job_id}`
 
 ```json
 {
-  "status": "error",
   "message": "worker internal failure"
 }
 ```
@@ -148,14 +152,14 @@ Response codes:
 3. BITS queues the job in the remote pool.
 4. A worker long-polls `/work` and receives job payload.
 5. Worker processes job and sends periodic `/heartbeat/{job_id}`.
-6. Worker posts final outcome to `/complete/{job_id}`.
+6. Worker posts final outcome to one of the `/complete/.../{job_id}` endpoints.
 7. BITS unblocks the waiting route and returns result to the client.
 
 ## 4) Outcome mapping inside BITS
 
 | Worker outcome | Internal action result | Client-visible effect |
 |---|---|---|
-| `complete` | `TargetResult::Complete(JobResult::Success)` | Success response with worker `content_type` and `body` |
+| `complete/data` | `TargetResult::Complete(JobResult::Success)` | Success response streamed end-to-end with worker `Content-Type` |
 | `redirect` | `TargetResult::Complete(JobResult::Redirect)` | Redirect response (for HTTP frontends typically `303 See Other` with `Location`) |
 | `reject` | `TargetResult::Reject` | Current route is rejected; switch tries next route. If none match, client gets an error |
 | `error` | `ActionError::ResourceError` | Job becomes `Failed` |
@@ -165,7 +169,7 @@ Response codes:
 
 - Long-poll `/work` continuously (with jittered retry on transport errors).
 - Start heartbeating immediately after receiving a job.
-- Stop heartbeating once `/complete/{job_id}` returns `200` or `404`.
+- Stop heartbeating once a `/complete/.../{job_id}` endpoint returns `200` or `404`.
 - Treat `404` from heartbeat or complete as terminal for that job.
 - Distinguish business rejection (`status: reject`) from execution failure (`status: error`).
 - Use `status: redirect` when data should be fetched from object storage rather than streamed
@@ -190,14 +194,14 @@ async def heartbeat_loop(session: aiohttp.ClientSession, job_id: str, stop: asyn
                 stop.set()
                 return
 
-async def process_job(work: dict) -> tuple[str, dict]:
+async def process_job(work: dict):
     req = work["request"]
     if "dataset" not in req:
         return "reject", {"reason": "dataset is required"}
-    result = {"ok": True, "dataset": req["dataset"]}
-    return "complete", {
+    result = __import__("json").dumps({"ok": True, "dataset": req["dataset"]}).encode()
+    return "data", {
         "content_type": "application/json",
-        "body": __import__("json").dumps(result),
+        "body": result,
     }
 
 async def worker():
@@ -220,15 +224,24 @@ async def worker():
             hb_task = asyncio.create_task(heartbeat_loop(session, job_id, stop))
             try:
                 status, payload = await process_job(work)
-                body = {"status": status, **payload}
-                async with session.post(f"{BASE}/complete/{job_id}", json=body) as done:
-                    # 200 = accepted, 404 = no longer active; both terminal for worker
-                    if done.status not in (200, 404):
-                        done.raise_for_status()
+                if status == "data":
+                    async with session.post(
+                        f"{BASE}/complete/data/{job_id}",
+                        data=payload["body"],
+                        headers={"Content-Type": payload["content_type"]},
+                    ) as done:
+                        if done.status not in (200, 404):
+                            done.raise_for_status()
+                elif status == "reject":
+                    async with session.post(
+                        f"{BASE}/complete/reject/{job_id}", json=payload
+                    ) as done:
+                        if done.status not in (200, 404):
+                            done.raise_for_status()
             except Exception as exc:
                 async with session.post(
-                    f"{BASE}/complete/{job_id}",
-                    json={"status": "error", "message": str(exc)},
+                    f"{BASE}/complete/error/{job_id}",
+                    json={"message": str(exc)},
                 ):
                     pass
             finally:
@@ -270,11 +283,10 @@ async def process_job(work: dict) -> tuple[str, dict]:
     }
 ```
 
-The worker then posts this payload to `/complete/{job_id}`:
+The worker then posts this payload to `/complete/redirect/{job_id}`:
 
 ```json
 {
-  "status": "redirect",
   "location": "https://my-results-bucket.s3.amazonaws.com/results/abc.json?...",
   "message": "Result stored in S3"
 }

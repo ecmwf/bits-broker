@@ -455,26 +455,33 @@ impl Bits {
         let Some(store) = &self.job_store else {
             return;
         };
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!(
-                broker_id = %self.broker_id,
-                "no runtime available; skipping broker lease heartbeat"
-            );
-            return;
-        };
         let store = Arc::clone(store);
         let broker_id = self.broker_id.clone();
         let base_url = self.internal_poll_base_url.clone();
-        handle.spawn(async move {
-            let tick = broker_lease_ttl.div_f64(2.0).max(Duration::from_millis(100));
+        std::thread::spawn(move || {
+            let tick = broker_lease_ttl
+                .div_f64(2.0)
+                .max(Duration::from_millis(100));
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    tracing::warn!(broker_id = %broker_id, error = %err, "failed to start broker lease heartbeat runtime");
+                    return;
+                }
+            };
+
             loop {
-                if let Err(err) = store
-                    .upsert_broker_lease(&broker_id, &base_url, broker_lease_ttl)
-                    .await
-                {
+                if let Err(err) = runtime.block_on(store.upsert_broker_lease(
+                    &broker_id,
+                    &base_url,
+                    broker_lease_ttl,
+                )) {
                     tracing::warn!(broker_id = %broker_id, error = %err, "broker lease upsert failed");
                 }
-                tokio::time::sleep(tick).await;
+                std::thread::sleep(tick);
             }
         });
     }

@@ -96,11 +96,12 @@ routes:
 
 | Field | Values | Default |
 |-------|--------|---------|
-| `queue` | `fifo`, `cost_weighted` | none (FIFO when `concurrency` is set) |
+| `queue` | `fifo`, `cost_weighted`, `age_priority` | none (FIFO when `concurrency` is set) |
 | `executor` | `semaphore`, `thread_pool`, `remote_pool` | `semaphore` |
 | `concurrency` | positive integer | unlimited |
 
 - `cost_weighted` ordering requires a `metadata["cost"]` value set by a prior transform.
+- `age_priority` ages waiting jobs into service while still making larger-cost jobs wait longer to gain queue priority.
 - `thread_pool` offloads work to dedicated OS threads — use this for CPU-bound or blocking work.
 - `remote_pool` is only valid with `target::remote` and is auto-inserted when using that target
   type. Any other combination is rejected at config parse time.

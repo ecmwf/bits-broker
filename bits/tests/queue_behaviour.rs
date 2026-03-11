@@ -78,3 +78,28 @@ async fn target_dummy_cheap_job_dequeued_before_expensive() {
         "cheap job should be dequeued first"
     );
 }
+
+#[tokio::test]
+async fn age_priority_old_expensive_job_beats_new_cheap_job() {
+    use bits::dispatcher::queue::{AgePriorityQueue, Queue};
+
+    let q = Arc::new(AgePriorityQueue::new());
+
+    let mut expensive = Job::new(serde_json::json!({}));
+    expensive.metadata["cost"] = serde_json::json!(100u64);
+    q.enqueue(expensive);
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let mut cheap = Job::new(serde_json::json!({}));
+    cheap.metadata["cost"] = serde_json::json!(1u64);
+    q.enqueue(cheap);
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let first = q.dequeue().await.unwrap();
+    let second = q.dequeue().await.unwrap();
+
+    assert_eq!(first.metadata["cost"], serde_json::json!(100u64));
+    assert_eq!(second.metadata["cost"], serde_json::json!(1u64));
+}

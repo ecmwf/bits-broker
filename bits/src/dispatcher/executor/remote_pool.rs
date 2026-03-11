@@ -6,14 +6,16 @@ use std::time::{Duration, Instant};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     routing::{get, post},
 };
 use bytes::Bytes;
 use dashmap::DashMap;
+use futures::StreamExt;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::actions::{ActionError, TargetResult, target_remote::RemoteTarget};
 use crate::dispatcher::Executor;
@@ -23,10 +25,21 @@ use crate::result::JobResult;
 // ─── worker outcome ───────────────────────────────────────────────────────────
 
 enum WorkerOutcome {
-    Complete { content_type: String, body: Bytes },
-    Redirect { location: String, message: String },
-    Reject { reason: String },
-    Error { message: String },
+    Complete {
+        content_type: String,
+        size: i64,
+        stream: Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin>,
+    },
+    Redirect {
+        location: String,
+        message: String,
+    },
+    Reject {
+        reason: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 // ─── shared state ─────────────────────────────────────────────────────────────
@@ -69,29 +82,21 @@ struct WorkResponse {
     metadata: serde_json::Value,
 }
 
-/// Body the worker POSTs to `POST /complete/{job_id}`.
-///
-/// `body` is the raw response payload as a UTF-8 string. For binary data the
-/// worker should base64-encode it and set `content_type` accordingly; decoding
-/// is left to the downstream consumer.
 #[derive(Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum CompleteRequest {
-    Complete {
-        content_type: String,
-        body: String,
-    },
-    Redirect {
-        location: String,
-        #[serde(default)]
-        message: String,
-    },
-    Reject {
-        reason: String,
-    },
-    Error {
-        message: String,
-    },
+struct RedirectRequest {
+    location: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct RejectRequest {
+    reason: String,
+}
+
+#[derive(Deserialize)]
+struct ErrorRequest {
+    message: String,
 }
 
 // ─── axum handlers ────────────────────────────────────────────────────────────
@@ -151,27 +156,102 @@ async fn handle_heartbeat(
     }
 }
 
-/// Completion endpoint. Worker posts the outcome; the waiting `execute()` future
-/// is unblocked and the job is removed from the in-progress map.
-async fn handle_complete(
+/// Completion data endpoint. Worker posts the successful response body as a
+/// streaming HTTP request body; the waiting `execute()` future receives a
+/// streaming `JobResult::Success`.
+async fn handle_complete_data(
     State(state): State<Arc<RemotePoolState>>,
     Path(job_id): Path<String>,
-    Json(req): Json<CompleteRequest>,
+    request: axum::extract::Request,
 ) -> StatusCode {
     match state.in_progress.remove(&job_id) {
         Some((_, entry)) => {
-            let outcome = match req {
-                CompleteRequest::Complete { content_type, body } => WorkerOutcome::Complete {
-                    content_type,
-                    body: Bytes::from(body.into_bytes()),
-                },
-                CompleteRequest::Redirect { location, message } => {
-                    WorkerOutcome::Redirect { location, message }
+            let content_type = request
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let size = request
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(-1);
+
+            let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+            let mut body = request.into_body().into_data_stream();
+            tokio::spawn(async move {
+                while let Some(frame) = body.next().await {
+                    match frame {
+                        Ok(bytes) => {
+                            if tx.send(Ok(bytes)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
+                            break;
+                        }
+                    }
                 }
-                CompleteRequest::Reject { reason } => WorkerOutcome::Reject { reason },
-                CompleteRequest::Error { message } => WorkerOutcome::Error { message },
+            });
+
+            let outcome = WorkerOutcome::Complete {
+                content_type,
+                size,
+                stream: Box::new(ReceiverStream::new(rx)),
             };
             let _ = entry.result_tx.send(outcome);
+            StatusCode::OK
+        }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+async fn handle_complete_redirect(
+    State(state): State<Arc<RemotePoolState>>,
+    Path(job_id): Path<String>,
+    Json(req): Json<RedirectRequest>,
+) -> StatusCode {
+    match state.in_progress.remove(&job_id) {
+        Some((_, entry)) => {
+            let _ = entry.result_tx.send(WorkerOutcome::Redirect {
+                location: req.location,
+                message: req.message,
+            });
+            StatusCode::OK
+        }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+async fn handle_complete_reject(
+    State(state): State<Arc<RemotePoolState>>,
+    Path(job_id): Path<String>,
+    Json(req): Json<RejectRequest>,
+) -> StatusCode {
+    match state.in_progress.remove(&job_id) {
+        Some((_, entry)) => {
+            let _ = entry
+                .result_tx
+                .send(WorkerOutcome::Reject { reason: req.reason });
+            StatusCode::OK
+        }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+async fn handle_complete_error(
+    State(state): State<Arc<RemotePoolState>>,
+    Path(job_id): Path<String>,
+    Json(req): Json<ErrorRequest>,
+) -> StatusCode {
+    match state.in_progress.remove(&job_id) {
+        Some((_, entry)) => {
+            let _ = entry.result_tx.send(WorkerOutcome::Error {
+                message: req.message,
+            });
             StatusCode::OK
         }
         None => StatusCode::NOT_FOUND,
@@ -187,13 +267,10 @@ async fn handle_complete(
 /// - `GET  /work?timeout_ms=N`   — long-poll; blocks until a job is available,
 ///   returns job JSON, or 204 on timeout.
 /// - `POST /heartbeat/{job_id}`  — worker keepalive; resets the heartbeat timer.
-/// - `POST /complete/{job_id}`   — worker posts the result:
-///   ```json
-///   {"status": "complete", "content_type": "...", "body": "..."}
-///   {"status": "redirect", "location": "...", "message": "..."}
-///   {"status": "reject",   "reason": "..."}
-///   {"status": "error",    "message": "..."}
-///   ```
+/// - `POST /complete/data/{job_id}`     — worker streams the successful body.
+/// - `POST /complete/redirect/{job_id}` — worker posts redirect JSON.
+/// - `POST /complete/reject/{job_id}`   — worker posts reject JSON.
+/// - `POST /complete/error/{job_id}`    — worker posts error JSON.
 ///
 /// A background reaper task evicts jobs whose heartbeat has expired, which
 /// causes the suspended `execute()` future to return a `ResourceError`.
@@ -217,7 +294,13 @@ impl RemotePoolExecutor {
         let app = Router::new()
             .route("/work", get(handle_get_work))
             .route("/heartbeat/{job_id}", post(handle_heartbeat))
-            .route("/complete/{job_id}", post(handle_complete))
+            .route("/complete/data/{job_id}", post(handle_complete_data))
+            .route(
+                "/complete/redirect/{job_id}",
+                post(handle_complete_redirect),
+            )
+            .route("/complete/reject/{job_id}", post(handle_complete_reject))
+            .route("/complete/error/{job_id}", post(handle_complete_error))
             .with_state(Arc::clone(&state));
 
         let bind_addr = bind.to_string();
@@ -303,20 +386,15 @@ impl<T: Send + 'static> Executor<T> for RemotePoolExecutor {
             })?;
 
             let target_result: TargetResult = match outcome {
-                WorkerOutcome::Complete { content_type, body } => {
-                    let size = body.len() as i64;
-                    let stream = Box::new(futures::stream::once(futures::future::ready(Ok::<
-                        _,
-                        std::io::Error,
-                    >(
-                        body
-                    ))));
-                    TargetResult::Complete(JobResult::Success {
-                        content_type,
-                        size,
-                        stream,
-                    })
-                }
+                WorkerOutcome::Complete {
+                    content_type,
+                    size,
+                    stream,
+                } => TargetResult::Complete(JobResult::Success {
+                    content_type,
+                    size,
+                    stream,
+                }),
                 WorkerOutcome::Redirect { location, message } => {
                     TargetResult::Complete(JobResult::Redirect { location, message })
                 }

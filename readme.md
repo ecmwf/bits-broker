@@ -191,7 +191,7 @@ routes:
 
 | Field | Values | Default |
 |-------|--------|---------|
-| `queue` | `fifo`, `cost_weighted` | none (FIFO when `concurrency` is set) |
+| `queue` | `fifo`, `cost_weighted`, `age_priority` | none (FIFO when `concurrency` is set) |
 | `executor` | `semaphore`, `thread_pool`, `remote_pool`* | `semaphore` |
 | `concurrency` | positive integer | unlimited |
 

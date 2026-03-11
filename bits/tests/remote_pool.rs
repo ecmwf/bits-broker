@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use bits::{Bits, Job, JobResult, PollOutcome};
+use futures::TryStreamExt;
 use reqwest::Client;
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ routes:
 
 // ─── tests ────────────────────────────────────────────────────────────────────
 
-/// Happy path: worker polls, sends a heartbeat, then completes → Success.
+/// Happy path: worker polls, sends a heartbeat, then streams a completion body.
 #[tokio::test]
 async fn worker_completes_job() {
     let port = free_port().await;
@@ -85,20 +86,82 @@ async fn worker_completes_job() {
 
     // Complete the job.
     let done = client
-        .post(format!("http://127.0.0.1:{port}/complete/{job_id}"))
-        .json(&serde_json::json!({
-            "status": "complete",
-            "content_type": "application/json",
-            "body": r#"{"result": 42}"#
-        }))
+        .post(format!("http://127.0.0.1:{port}/complete/data/{job_id}"))
+        .header("content-type", "application/json")
+        .body(r#"{"result": 42}"#)
         .send()
         .await
         .unwrap();
     assert_eq!(done.status(), 200);
 
     match bits.poll(&handle.id, Some(Duration::from_secs(5))).await {
-        PollOutcome::Ready(JobResult::Success { content_type, .. }) => {
+        PollOutcome::Ready(JobResult::Success {
+            content_type,
+            size,
+            stream,
+        }) => {
             assert_eq!(content_type, "application/json");
+            assert_eq!(size, 14);
+            let body = stream
+                .try_fold(Vec::new(), |mut acc, chunk| async move {
+                    acc.extend_from_slice(&chunk);
+                    Ok(acc)
+                })
+                .await
+                .unwrap();
+            assert_eq!(body, br#"{"result": 42}"#);
+        }
+        other => panic!("expected Success, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn worker_streams_binary_job_chunks() {
+    let port = free_port().await;
+    let bits = make_bits(port, 60.0);
+    wait_for_server(port).await;
+
+    let handle = bits.submit(Job::new(serde_json::json!({"class": "od"})));
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+    let work: serde_json::Value = resp.json().await.unwrap();
+    let job_id = work["job_id"].as_str().unwrap();
+
+    let upload = reqwest::Body::wrap_stream(futures::stream::iter(vec![
+        Ok::<_, std::io::Error>(bytes::Bytes::from_static(&[0u8, 159u8])),
+        Ok::<_, std::io::Error>(bytes::Bytes::from_static(&[146u8, 150u8])),
+    ]));
+
+    let done = client
+        .post(format!("http://127.0.0.1:{port}/complete/data/{job_id}"))
+        .header("content-type", "application/x-grib")
+        .body(upload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(done.status(), 200);
+
+    match bits.poll(&handle.id, Some(Duration::from_secs(5))).await {
+        PollOutcome::Ready(JobResult::Success {
+            content_type,
+            size,
+            stream,
+        }) => {
+            assert_eq!(content_type, "application/x-grib");
+            assert_eq!(size, -1);
+            let body = stream
+                .try_fold(Vec::new(), |mut acc, chunk| async move {
+                    acc.extend_from_slice(&chunk);
+                    Ok(acc)
+                })
+                .await
+                .unwrap();
+            assert_eq!(body, vec![0u8, 159u8, 146u8, 150u8]);
         }
         other => panic!("expected Success, got {:?}", other),
     }
@@ -124,9 +187,8 @@ async fn worker_rejects_job() {
     let job_id = work["job_id"].as_str().unwrap();
 
     client
-        .post(format!("http://127.0.0.1:{port}/complete/{job_id}"))
+        .post(format!("http://127.0.0.1:{port}/complete/reject/{job_id}"))
         .json(&serde_json::json!({
-            "status": "reject",
             "reason": "unsupported request"
         }))
         .send()
@@ -161,9 +223,8 @@ async fn worker_reports_error() {
     let job_id = work["job_id"].as_str().unwrap();
 
     client
-        .post(format!("http://127.0.0.1:{port}/complete/{job_id}"))
+        .post(format!("http://127.0.0.1:{port}/complete/error/{job_id}"))
         .json(&serde_json::json!({
-            "status": "error",
             "message": "internal worker failure"
         }))
         .send()
@@ -201,9 +262,10 @@ async fn worker_requests_redirect() {
     let job_id = work["job_id"].as_str().unwrap();
 
     let done = client
-        .post(format!("http://127.0.0.1:{port}/complete/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/complete/redirect/{job_id}"
+        ))
         .json(&serde_json::json!({
-            "status": "redirect",
             "location": "https://example-bucket.s3.amazonaws.com/object?signature=abc",
             "message": "Download from object storage"
         }))
@@ -259,8 +321,10 @@ async fn complete_unknown_job_returns_404() {
     wait_for_server(port).await;
 
     let resp = Client::new()
-        .post(format!("http://127.0.0.1:{port}/complete/no-such-job"))
-        .json(&serde_json::json!({"status": "reject", "reason": "nope"}))
+        .post(format!(
+            "http://127.0.0.1:{port}/complete/reject/no-such-job"
+        ))
+        .json(&serde_json::json!({"reason": "nope"}))
         .send()
         .await
         .unwrap();

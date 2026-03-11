@@ -1,6 +1,8 @@
+pub mod age_priority;
 pub mod cost_weighted;
 pub mod fifo;
 
+pub use age_priority::AgePriorityQueue;
 pub use cost_weighted::CostWeightedQueue;
 pub use fifo::FifoQueue;
 
@@ -14,6 +16,7 @@ use crate::job::Job;
 pub enum QueueKind {
     Fifo,
     CostWeighted,
+    AgePriority,
 }
 
 /// A queue is a pure data structure: items go in via `enqueue` and come out
@@ -65,6 +68,30 @@ mod tests {
             first.metadata["cost"].as_u64().unwrap(),
             1,
             "cheaper job should come out first"
+        );
+    }
+
+    #[tokio::test]
+    async fn age_priority_queue_eventually_promotes_old_expensive_job() {
+        let q = AgePriorityQueue::new();
+
+        let mut expensive = Job::new(serde_json::json!({}));
+        expensive.metadata["cost"] = serde_json::json!(100u64);
+        q.enqueue(expensive);
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let mut cheap = Job::new(serde_json::json!({}));
+        cheap.metadata["cost"] = serde_json::json!(1u64);
+        q.enqueue(cheap);
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let first = q.dequeue().await.unwrap();
+        assert_eq!(
+            first.metadata["cost"].as_u64().unwrap(),
+            100,
+            "older expensive job should eventually outrank a newly-arrived cheap job"
         );
     }
 }

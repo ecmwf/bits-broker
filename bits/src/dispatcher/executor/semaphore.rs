@@ -20,7 +20,9 @@ pub struct SemaphoreExecutor {
 
 impl SemaphoreExecutor {
     pub fn new(concurrency: usize) -> Self {
-        Self { semaphore: Arc::new(Semaphore::new(concurrency)) }
+        Self {
+            semaphore: Arc::new(Semaphore::new(concurrency)),
+        }
     }
 }
 

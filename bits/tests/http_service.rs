@@ -3,12 +3,12 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Json, Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use bits::{Bits, Job, JobResult, PollOutcome};
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -35,9 +35,15 @@ async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Resp
 async fn poll_by_id(id: &str, state: &AppState) -> Response {
     match state.bits.poll(id, Some(state.poll_timeout)).await {
         PollOutcome::Ready(result) => match result {
-            JobResult::Success { content_type, stream, .. } => {
-                ([(header::CONTENT_TYPE, content_type)], Body::from_stream(stream)).into_response()
-            }
+            JobResult::Success {
+                content_type,
+                stream,
+                ..
+            } => (
+                [(header::CONTENT_TYPE, content_type)],
+                Body::from_stream(stream),
+            )
+                .into_response(),
             JobResult::Redirect { location, .. } => {
                 (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
             }
@@ -140,8 +146,17 @@ routes:
         .unwrap();
 
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    let poll_url = resp.headers().get("location").unwrap().to_str().unwrap().to_string();
-    assert!(poll_url.starts_with("/job/"), "expected poll redirect, got Location: {poll_url}");
+    let poll_url = resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        poll_url.starts_with("/job/"),
+        "expected poll redirect, got Location: {poll_url}"
+    );
 
     // Follow the redirect — job finishes during this poll, expect the final result.
     let resp = client

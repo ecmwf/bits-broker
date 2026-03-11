@@ -61,6 +61,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
         let first = q.dequeue().await.unwrap();
-        assert_eq!(first.metadata["cost"].as_u64().unwrap(), 1, "cheaper job should come out first");
+        assert_eq!(
+            first.metadata["cost"].as_u64().unwrap(),
+            1,
+            "cheaper job should come out first"
+        );
     }
 }

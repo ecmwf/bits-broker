@@ -1,12 +1,12 @@
 use std::collections::{BinaryHeap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::job::Job;
 use super::Queue;
+use crate::job::Job;
 
 /// A queue that yields the cheapest waiting job first.
 ///
@@ -60,7 +60,10 @@ impl CostWeightedQueue {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(worker(rx));
-        Self { tx, seq: Arc::new(AtomicU64::new(0)) }
+        Self {
+            tx,
+            seq: Arc::new(AtomicU64::new(0)),
+        }
     }
 }
 
@@ -80,7 +83,11 @@ async fn worker(mut rx: mpsc::UnboundedReceiver<WorkerCmd>) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
             WorkerCmd::Enqueue { cost, seq, job } => {
-                heap.push(Entry { cost, seq, job: *job });
+                heap.push(Entry {
+                    cost,
+                    seq,
+                    job: *job,
+                });
             }
             WorkerCmd::Dequeue(reply) => {
                 waiters.push_back(reply);
@@ -102,9 +109,7 @@ async fn worker(mut rx: mpsc::UnboundedReceiver<WorkerCmd>) {
 #[async_trait]
 impl Queue for CostWeightedQueue {
     fn enqueue(&self, job: Job) {
-        let cost = job.metadata["cost"]
-            .as_u64()
-            .unwrap_or(0);
+        let cost = job.metadata["cost"].as_u64().unwrap_or(0);
         let seq = self.seq.fetch_add(1, AtomicOrdering::Relaxed);
         let _ = self.tx.send(WorkerCmd::Enqueue {
             cost,

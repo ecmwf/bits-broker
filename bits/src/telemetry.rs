@@ -26,11 +26,11 @@ where
 
         // Level badge — bright colours
         let (colour, label) = match level {
-            Level::TRACE => ("\x1b[35m", "TRACE"),  // magenta
-            Level::DEBUG => ("\x1b[34m", "DEBUG"),  // blue
-            Level::INFO  => ("\x1b[92m", " INFO"),  // bright green
-            Level::WARN  => ("\x1b[93m", " WARN"),  // bright yellow
-            Level::ERROR => ("\x1b[91m", "ERROR"),  // bright red
+            Level::TRACE => ("\x1b[35m", "TRACE"), // magenta
+            Level::DEBUG => ("\x1b[34m", "DEBUG"), // blue
+            Level::INFO => ("\x1b[92m", " INFO"),  // bright green
+            Level::WARN => ("\x1b[93m", " WARN"),  // bright yellow
+            Level::ERROR => ("\x1b[91m", "ERROR"), // bright red
         };
         write!(writer, "{colour}\x1b[1m{label}\x1b[0m  ")?;
 

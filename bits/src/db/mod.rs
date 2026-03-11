@@ -135,7 +135,8 @@ pub trait BrokerLeaseStore: Send + Sync {
     ///
     /// Returns `Ok(None)` when the broker has no recorded lease. Callers are
     /// responsible for evaluating `lease_until` against current time.
-    async fn get_broker_lease(&self, broker_id: &str) -> Result<Option<BrokerLeaseRecord>, DbError>;
+    async fn get_broker_lease(&self, broker_id: &str)
+    -> Result<Option<BrokerLeaseRecord>, DbError>;
 
     /// Remove a broker lease record.
     ///

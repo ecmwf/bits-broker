@@ -114,11 +114,7 @@ impl<T: Send + 'static> Dispatcher<T> {
             QueueKind::Fifo => Arc::new(FifoQueue::new()),
             QueueKind::CostWeighted => Arc::new(CostWeightedQueue::new()),
         };
-        Some(Self::new(
-            queue,
-            executor,
-            action_type_id,
-        ))
+        Some(Self::new(queue, executor, action_type_id))
     }
 
     pub fn new(

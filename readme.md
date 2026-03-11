@@ -202,3 +202,21 @@ routes:
 ## 🏗 Architecture
 
 See [design.md](design.md) for the full design specification.
+
+---
+
+## 🧰 Developer hooks
+
+This repo includes a pre-commit configuration that runs rustfmt automatically:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The hook runs `cargo fmt --all` on each commit.
+You can also run it manually:
+
+```bash
+pre-commit run --all-files
+```

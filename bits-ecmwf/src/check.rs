@@ -1,6 +1,6 @@
-use bits::actions::{ActionError, CheckAction, CheckResult};
-use bits::Job;
 use async_trait::async_trait;
+use bits::Job;
+use bits::actions::{ActionError, CheckAction, CheckResult};
 use serde::{Deserialize, Serialize};
 
 /// Check if a job matches a specific MARS class (e.g. "od", "ea").

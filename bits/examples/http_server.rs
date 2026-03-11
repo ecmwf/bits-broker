@@ -10,12 +10,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Json, Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use bits::{Bits, Job, JobResult, PollOutcome};
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -69,9 +69,15 @@ async fn poll_by_id(id: &str, state: &AppState) -> Response {
 
 fn result_to_response(result: JobResult) -> Response {
     match result {
-        JobResult::Success { content_type, stream, .. } => {
-            ([(header::CONTENT_TYPE, content_type)], Body::from_stream(stream)).into_response()
-        }
+        JobResult::Success {
+            content_type,
+            stream,
+            ..
+        } => (
+            [(header::CONTENT_TYPE, content_type)],
+            Body::from_stream(stream),
+        )
+            .into_response(),
         JobResult::Redirect { location, .. } => {
             (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
         }

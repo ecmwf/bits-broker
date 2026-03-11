@@ -69,7 +69,10 @@ pub fn create_action(name: &str, config: Value) -> Result<Action, ActionError> {
             return (reg.factory)(config);
         }
     }
-    Err(ActionError::ConfigError(format!("Unknown action: '{}'", name)))
+    Err(ActionError::ConfigError(format!(
+        "Unknown action: '{}'",
+        name
+    )))
 }
 
 /// List all registered action names (both compile-time and runtime).
@@ -122,9 +125,8 @@ mod tests {
             }
         }
 
-        let factory: RuntimeActionFactory = Arc::new(|_config| {
-            Ok(Action::Check(Arc::new(AlwaysPass), None))
-        });
+        let factory: RuntimeActionFactory =
+            Arc::new(|_config| Ok(Action::Check(Arc::new(AlwaysPass), None)));
 
         // Use a unique name so parallel tests don't clash on the global registry.
         let name = "test_runtime_always_pass_9f3a";
@@ -144,8 +146,8 @@ mod tests {
         let name = "test_runtime_dup_8b2c";
         register_runtime_action(name, Arc::clone(&factory))
             .expect("first registration should succeed");
-        let err = register_runtime_action(name, factory)
-            .expect_err("second registration should fail");
+        let err =
+            register_runtime_action(name, factory).expect_err("second registration should fail");
         assert!(matches!(err, ActionError::ConfigError(_)));
     }
 

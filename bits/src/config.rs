@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::actions::{target_remote::RemoteTarget, Action};
+use crate::actions::{Action, target_remote::RemoteTarget};
 use crate::db::PersistenceStore;
 use crate::dispatcher::{Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig};
 use crate::routing::registry::create_action;
-use crate::routing::{switch::Switch, Route};
+use crate::routing::{Route, switch::Switch};
 
 struct Registries {
     checks: HashMap<String, serde_json::Value>,

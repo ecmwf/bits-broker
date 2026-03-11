@@ -91,7 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => unreachable!(),
         };
         match result {
-            JobResult::Success { content_type, size, .. } => {
+            JobResult::Success {
+                content_type, size, ..
+            } => {
                 println!("{} ({} bytes)", content_type, size);
             }
             JobResult::Redirect { location, .. } => {

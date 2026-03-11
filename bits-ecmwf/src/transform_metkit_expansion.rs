@@ -1,6 +1,6 @@
-use bits::actions::{ActionError, TransformAction, TransformResult};
-use bits::Job;
 use async_trait::async_trait;
+use bits::Job;
+use bits::actions::{ActionError, TransformAction, TransformResult};
 use serde::{Deserialize, Serialize};
 
 /// Expand MARS request parameters using Metkit conventions.
@@ -13,7 +13,11 @@ pub struct MetkitExpansion {
 impl TransformAction for MetkitExpansion {
     async fn execute(&self, job: &mut Job) -> Result<TransformResult, ActionError> {
         if self.expand_parameters {
-            let mut metadata = job.metadata.as_object().unwrap_or(&serde_json::Map::new()).clone();
+            let mut metadata = job
+                .metadata
+                .as_object()
+                .unwrap_or(&serde_json::Map::new())
+                .clone();
             metadata.insert("metkit_expanded".to_string(), serde_json::json!(true));
             job.metadata = serde_json::Value::Object(metadata);
         }

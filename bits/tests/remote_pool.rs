@@ -70,7 +70,10 @@ async fn worker_completes_job() {
 
     let work: serde_json::Value = resp.json().await.unwrap();
     let job_id = work["job_id"].as_str().unwrap();
-    assert_eq!(work["request"]["class"], "od", "request payload should be forwarded");
+    assert_eq!(
+        work["request"]["class"], "od",
+        "request payload should be forwarded"
+    );
 
     // Heartbeat while "working".
     let hb = client

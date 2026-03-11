@@ -3,8 +3,8 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bits::job::Job;
 use bits::actions::{CheckAction, TargetAction};
+use bits::job::Job;
 use tokio::task::JoinSet;
 
 // ================================
@@ -64,10 +64,17 @@ async fn target_dummy_cheap_job_dequeued_before_expensive() {
         let order = Arc::clone(&order);
         set.spawn(async move {
             let job = q.dequeue().await.unwrap();
-            order.lock().unwrap().push(job.metadata["cost"].as_u64().unwrap());
+            order
+                .lock()
+                .unwrap()
+                .push(job.metadata["cost"].as_u64().unwrap());
         });
     }
     while set.join_next().await.is_some() {}
 
-    assert_eq!(*order.lock().unwrap(), vec![1, 100], "cheap job should be dequeued first");
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec![1, 100],
+        "cheap job should be dequeued first"
+    );
 }

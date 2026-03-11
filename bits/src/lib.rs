@@ -1,16 +1,18 @@
+pub mod actions;
 mod bits;
 mod config;
 pub mod db;
-pub mod actions;
-pub mod telemetry;
+pub mod dispatcher;
 pub mod job;
 pub mod result;
 pub mod routing;
-pub mod dispatcher;
+pub mod telemetry;
 
+pub use actions::*;
 pub use bits::{Bits, JobHandle, PollOutcome};
 pub use db::*;
 pub use job::Job;
 pub use result::JobResult;
-pub use actions::*;
-pub use routing::registry::{create_action, list_actions, register_runtime_action, RuntimeActionFactory};
+pub use routing::registry::{
+    RuntimeActionFactory, create_action, list_actions, register_runtime_action,
+};

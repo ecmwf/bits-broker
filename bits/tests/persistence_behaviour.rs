@@ -7,18 +7,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use bits::actions::{Action, ActionError, TargetAction, TargetResult};
 use bits::db::{
-    memory::MemoryStore, BrokerLeaseStore, BrokerLeaseRecord, ClaimResult, DbError, JobStore,
-    PersistenceStore,
+    BrokerLeaseRecord, BrokerLeaseStore, ClaimResult, DbError, JobStore, PersistenceStore,
+    memory::MemoryStore,
 };
 use bits::routing::{Route, switch::Switch};
-use bits::{Bits, Job, JobResult, PollOutcome, PersistentJobRecord};
+use bits::{Bits, Job, JobResult, PersistentJobRecord, PollOutcome};
 use serde_json::json;
 use tokio::net::TcpListener;
 
@@ -229,9 +229,14 @@ async fn active_lease_prevents_reclaim_when_proxy_fails() {
         .await
         .unwrap();
 
-    let outcome = claimant.poll(&job_id, Some(Duration::from_millis(40))).await;
+    let outcome = claimant
+        .poll(&job_id, Some(Duration::from_millis(40)))
+        .await;
     assert!(matches!(outcome, PollOutcome::Pending { .. }));
-    assert_eq!(observed_owner(&store, &job_id).await.as_deref(), Some(owner_id));
+    assert_eq!(
+        observed_owner(&store, &job_id).await.as_deref(),
+        Some(owner_id)
+    );
 }
 
 #[tokio::test]
@@ -254,14 +259,23 @@ async fn expired_lease_enables_reclaim() {
         .await
         .unwrap();
     store
-        .upsert_broker_lease(owner_id, "http://127.0.0.1:1/job", Duration::from_millis(20))
+        .upsert_broker_lease(
+            owner_id,
+            "http://127.0.0.1:1/job",
+            Duration::from_millis(20),
+        )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
 
-    let outcome = claimant.poll(&job_id, Some(Duration::from_millis(30))).await;
+    let outcome = claimant
+        .poll(&job_id, Some(Duration::from_millis(30)))
+        .await;
     assert!(matches!(outcome, PollOutcome::Pending { .. }));
-    assert_eq!(observed_owner(&store, &job_id).await.as_deref(), Some(claimant_id));
+    assert_eq!(
+        observed_owner(&store, &job_id).await.as_deref(),
+        Some(claimant_id)
+    );
 }
 
 #[tokio::test]
@@ -271,13 +285,19 @@ async fn expired_lease_without_record_is_job_lost() {
     let claimant = test_bits("claimant-c", 10, None, Some(Arc::clone(&store)));
 
     store
-        .upsert_broker_lease(owner_id, "http://127.0.0.1:1/job", Duration::from_millis(20))
+        .upsert_broker_lease(
+            owner_id,
+            "http://127.0.0.1:1/job",
+            Duration::from_millis(20),
+        )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
 
     let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
-    let outcome = claimant.poll(&job_id, Some(Duration::from_millis(30))).await;
+    let outcome = claimant
+        .poll(&job_id, Some(Duration::from_millis(30)))
+        .await;
     assert!(matches!(outcome, PollOutcome::JobLost));
 }
 
@@ -319,7 +339,10 @@ async fn backend_claim_errors_backoff_within_single_poll() {
     let elapsed = started.elapsed();
 
     assert!(matches!(outcome, PollOutcome::Pending { .. }));
-    assert!(elapsed >= Duration::from_millis(90), "expected backoff delay, got {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_millis(90),
+        "expected backoff delay, got {elapsed:?}"
+    );
     assert!(
         store.attempts() >= 2,
         "expected multiple claim attempts, got {}",

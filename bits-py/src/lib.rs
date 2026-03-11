@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bits::{
-    register_runtime_action, Job, JobResult, PollOutcome, RuntimeActionFactory,
+    Job, JobResult, PollOutcome, RuntimeActionFactory,
     actions::{
         Action, ActionError, CheckAction, CheckResult, TargetAction, TargetResult, TransformAction,
         TransformResult,
     },
+    register_runtime_action,
 };
 use bytes::Bytes;
 use futures::TryStreamExt;
@@ -87,7 +88,10 @@ impl PySuccess {
     #[pyo3(signature = (body, content_type = None))]
     fn new(body: &Bound<'_, PyAny>, content_type: Option<String>) -> PyResult<Self> {
         let (raw, default_ct) = if let Ok(b) = body.cast::<PyBytes>() {
-            (b.as_bytes().to_vec(), "application/octet-stream".to_string())
+            (
+                b.as_bytes().to_vec(),
+                "application/octet-stream".to_string(),
+            )
         } else if let Ok(s) = body.extract::<String>() {
             (s.into_bytes(), "text/plain; charset=utf-8".to_string())
         } else {
@@ -317,9 +321,9 @@ enum ActionKind {
 }
 
 fn detect_kind(_py: Python<'_>, cls: &Bound<'_, PyAny>) -> PyResult<ActionKind> {
-    let cls_type = cls.cast::<PyType>().map_err(|_| {
-        PyTypeError::new_err("register_action: second argument must be a class")
-    })?;
+    let cls_type = cls
+        .cast::<PyType>()
+        .map_err(|_| PyTypeError::new_err("register_action: second argument must be a class"))?;
     let is_check = cls_type.is_subclass_of::<PyCheckAction>()?;
     let is_transform = cls_type.is_subclass_of::<PyTransformAction>()?;
     let is_target = cls_type.is_subclass_of::<PyTargetAction>()?;
@@ -338,11 +342,7 @@ fn detect_kind(_py: Python<'_>, cls: &Bound<'_, PyAny>) -> PyResult<ActionKind> 
 }
 
 /// Verify that `method_name` exists on `cls` and is a coroutine function.
-fn require_async_method(
-    py: Python<'_>,
-    cls: &Bound<'_, PyAny>,
-    method_name: &str,
-) -> PyResult<()> {
+fn require_async_method(py: Python<'_>, cls: &Bound<'_, PyAny>, method_name: &str) -> PyResult<()> {
     let method = cls.getattr(method_name).map_err(|_| {
         PyTypeError::new_err(format!(
             "action class must define an async method '{}'",
@@ -411,10 +411,9 @@ impl CheckAction for PyCheckAdapter {
         })
         .map_err(|e| ActionError::ConfigError(format!("evaluate() call failed: {}", e)))?;
 
-        let result_obj: Py<PyAny> =
-            tokio::task::spawn_blocking(move || run_python_coro(coro))
-                .await
-                .map_err(|e| ActionError::ConfigError(format!("spawn_blocking failed: {}", e)))??;
+        let result_obj: Py<PyAny> = tokio::task::spawn_blocking(move || run_python_coro(coro))
+            .await
+            .map_err(|e| ActionError::ConfigError(format!("spawn_blocking failed: {}", e)))??;
 
         Python::attach(|py| {
             let obj = result_obj.bind(py);
@@ -425,7 +424,9 @@ impl CheckAction for PyCheckAdapter {
                     reason: r.reason.clone(),
                 })
             } else {
-                let type_name = obj.get_type().name()
+                let type_name = obj
+                    .get_type()
+                    .name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| "unknown".to_string());
                 Err(ActionError::ConfigError(format!(
@@ -469,10 +470,9 @@ impl TransformAction for PyTransformAdapter {
         })
         .map_err(|e| ActionError::ConfigError(format!("execute() call failed: {}", e)))?;
 
-        let result_obj: Py<PyAny> =
-            tokio::task::spawn_blocking(move || run_python_coro(coro))
-                .await
-                .map_err(|e| ActionError::ConfigError(format!("spawn_blocking failed: {}", e)))??;
+        let result_obj: Py<PyAny> = tokio::task::spawn_blocking(move || run_python_coro(coro))
+            .await
+            .map_err(|e| ActionError::ConfigError(format!("spawn_blocking failed: {}", e)))??;
 
         // Read back mutations from the PyJob into the Rust Job.
         Python::attach(|py| -> Result<(), ActionError> {
@@ -493,7 +493,9 @@ impl TransformAction for PyTransformAdapter {
                     reason: r.reason.clone(),
                 })
             } else {
-                let type_name = obj.get_type().name()
+                let type_name = obj
+                    .get_type()
+                    .name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| "unknown".to_string());
                 Err(ActionError::ConfigError(format!(
@@ -534,10 +536,9 @@ impl TargetAction for PyTargetAdapter {
         })
         .map_err(|e| ActionError::ConfigError(format!("dispatch() call failed: {}", e)))?;
 
-        let result_obj: Py<PyAny> =
-            tokio::task::spawn_blocking(move || run_python_coro(coro))
-                .await
-                .map_err(|e| ActionError::ConfigError(format!("spawn_blocking failed: {}", e)))??;
+        let result_obj: Py<PyAny> = tokio::task::spawn_blocking(move || run_python_coro(coro))
+            .await
+            .map_err(|e| ActionError::ConfigError(format!("spawn_blocking failed: {}", e)))??;
 
         Python::attach(|py| {
             let obj = result_obj.bind(py);
@@ -545,9 +546,9 @@ impl TargetAction for PyTargetAdapter {
                 let body = Bytes::from(s.body.clone());
                 let ct = s.content_type.clone();
                 let size = body.len() as i64;
-                let stream = Box::new(futures::stream::iter(vec![
-                    Ok::<Bytes, std::io::Error>(body),
-                ]))
+                let stream = Box::new(futures::stream::iter(vec![Ok::<Bytes, std::io::Error>(
+                    body,
+                )]))
                     as Box<
                         dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin,
                     >;
@@ -570,7 +571,9 @@ impl TargetAction for PyTargetAdapter {
                     reason: r.reason.clone(),
                 })
             } else {
-                let type_name = obj.get_type().name()
+                let type_name = obj
+                    .get_type()
+                    .name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| "unknown".to_string());
                 Err(ActionError::ConfigError(format!(
@@ -649,15 +652,11 @@ fn register_action(py: Python<'_>, name: String, cls: Bound<'_, PyAny>) -> PyRes
                 .map_err(|e| ActionError::ConfigError(format!("__init__ failed: {}", e)))?;
 
             Ok(match kind {
-                ActionKind::Check => {
-                    Action::Check(Arc::new(PyCheckAdapter { instance }), None)
-                }
+                ActionKind::Check => Action::Check(Arc::new(PyCheckAdapter { instance }), None),
                 ActionKind::Transform => {
                     Action::Transform(Arc::new(PyTransformAdapter { instance }), None)
                 }
-                ActionKind::Target => {
-                    Action::Target(Arc::new(PyTargetAdapter { instance }), None)
-                }
+                ActionKind::Target => Action::Target(Arc::new(PyTargetAdapter { instance }), None),
             })
         })
     });

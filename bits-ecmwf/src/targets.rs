@@ -1,7 +1,7 @@
+use async_trait::async_trait;
+use bits::Job;
 use bits::actions::{ActionError, TargetAction, TargetResult};
 use bits::result::JobResult;
-use bits::Job;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Dispatch to a MARS retrieval endpoint.
@@ -16,8 +16,9 @@ impl TargetAction for MarsDestination {
         let data = format!("Data dispatched to MARS endpoint: {}", self.endpoint);
         let data_bytes = bytes::Bytes::from(data.into_bytes());
         let size = data_bytes.len() as i64;
-        let stream: Box<dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Unpin> =
-            Box::new(futures::stream::iter(vec![Ok(data_bytes)]));
+        let stream: Box<
+            dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Unpin,
+        > = Box::new(futures::stream::iter(vec![Ok(data_bytes)]));
         Ok(TargetResult::Complete(JobResult::Success {
             content_type: "application/json".to_string(),
             size,
@@ -40,8 +41,9 @@ impl TargetAction for DssDestination {
         let data = format!("Data dispatched to DSS endpoint: {}", self.endpoint);
         let data_bytes = bytes::Bytes::from(data.into_bytes());
         let size = data_bytes.len() as i64;
-        let stream: Box<dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Unpin> =
-            Box::new(futures::stream::iter(vec![Ok(data_bytes)]));
+        let stream: Box<
+            dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Unpin,
+        > = Box::new(futures::stream::iter(vec![Ok(data_bytes)]));
         Ok(TargetResult::Complete(JobResult::Success {
             content_type: "application/json".to_string(),
             size,

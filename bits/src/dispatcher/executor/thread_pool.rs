@@ -33,14 +33,16 @@ impl ThreadPoolExecutor {
 
         for _ in 0..concurrency {
             let rx = Arc::clone(&rx);
-            std::thread::spawn(move || loop {
-                // Lock is held only for the duration of blocking_recv, then
-                // released before work() runs so other threads can dequeue.
-                let work = match rx.lock().unwrap().blocking_recv() {
-                    Some(work) => work,
-                    None => break,
-                };
-                work();
+            std::thread::spawn(move || {
+                loop {
+                    // Lock is held only for the duration of blocking_recv, then
+                    // released before work() runs so other threads can dequeue.
+                    let work = match rx.lock().unwrap().blocking_recv() {
+                        Some(work) => work,
+                        None => break,
+                    };
+                    work();
+                }
             });
         }
 

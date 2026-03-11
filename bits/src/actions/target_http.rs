@@ -30,7 +30,10 @@ pub struct HttpTarget {
 
 impl HttpTarget {
     pub fn new(url: String) -> Self {
-        Self { url, client: OnceLock::new() }
+        Self {
+            url,
+            client: OnceLock::new(),
+        }
     }
 
     fn client(&self) -> &reqwest::Client {
@@ -40,7 +43,9 @@ impl HttpTarget {
 
 impl std::fmt::Debug for HttpTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpTarget").field("url", &self.url).finish_non_exhaustive()
+        f.debug_struct("HttpTarget")
+            .field("url", &self.url)
+            .finish_non_exhaustive()
     }
 }
 
@@ -72,18 +77,21 @@ async fn execute(
 
         let size = response.content_length().map(|n| n as i64).unwrap_or(-1);
 
-        let stream = Box::new(
-            response
-                .bytes_stream()
-                .map_err(std::io::Error::other),
-        );
+        let stream = Box::new(response.bytes_stream().map_err(std::io::Error::other));
 
-        Ok(TargetResult::Complete(JobResult::Success { content_type, size, stream }))
+        Ok(TargetResult::Complete(JobResult::Success {
+            content_type,
+            size,
+            stream,
+        }))
     } else if status.is_client_error() {
         let reason = response.text().await.unwrap_or_else(|_| status.to_string());
         Ok(TargetResult::Reject { reason })
     } else {
-        Err(ActionError::NetworkError(format!("HTTP {} from {}", status, url)))
+        Err(ActionError::NetworkError(format!(
+            "HTTP {} from {}",
+            status, url
+        )))
     }
 }
 
@@ -108,10 +116,10 @@ crate::register_action!(target, "http", HttpTarget);
 mod tests {
     use super::*;
     use axum::{
-        body::Body,
-        http::{header, Response, StatusCode},
-        routing::post,
         Router,
+        body::Body,
+        http::{Response, StatusCode, header},
+        routing::post,
     };
 
     async fn spawn_server(app: Router) -> String {
@@ -123,21 +131,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_2xx_maps_to_complete() {
-        let app = Router::new().route("/", post(|| async {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::CONTENT_LENGTH, "12")
-                .body(Body::from(r#"{"ok": true}"#))
-                .unwrap()
-        }));
+        let app = Router::new().route(
+            "/",
+            post(|| async {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::CONTENT_LENGTH, "12")
+                    .body(Body::from(r#"{"ok": true}"#))
+                    .unwrap()
+            }),
+        );
 
         let target = HttpTarget::new(spawn_server(app).await);
         let job = Job::new(serde_json::json!({"class": "od"}));
         let result = target.dispatch(&job).await.unwrap();
 
         match result {
-            TargetResult::Complete(JobResult::Success { content_type, size, .. }) => {
+            TargetResult::Complete(JobResult::Success {
+                content_type, size, ..
+            }) => {
                 assert_eq!(content_type, "application/json");
                 assert_eq!(size, 12);
             }
@@ -147,12 +160,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_4xx_maps_to_reject() {
-        let app = Router::new().route("/", post(|| async {
-            Response::builder()
-                .status(StatusCode::UNPROCESSABLE_ENTITY)
-                .body(Body::from("unknown class"))
-                .unwrap()
-        }));
+        let app = Router::new().route(
+            "/",
+            post(|| async {
+                Response::builder()
+                    .status(StatusCode::UNPROCESSABLE_ENTITY)
+                    .body(Body::from("unknown class"))
+                    .unwrap()
+            }),
+        );
 
         let target = HttpTarget::new(spawn_server(app).await);
         let job = Job::new(serde_json::json!({"class": "??"}));
@@ -166,12 +182,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_5xx_maps_to_network_error() {
-        let app = Router::new().route("/", post(|| async {
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())
-                .unwrap()
-        }));
+        let app = Router::new().route(
+            "/",
+            post(|| async {
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::empty())
+                    .unwrap()
+            }),
+        );
 
         let target = HttpTarget::new(spawn_server(app).await);
         let job = Job::new(serde_json::json!({}));

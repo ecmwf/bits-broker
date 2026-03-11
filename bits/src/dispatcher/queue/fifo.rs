@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
-use crate::job::Job;
 use super::Queue;
+use crate::job::Job;
 
 /// A simple FIFO queue. Items are dequeued in the order they were enqueued.
 #[derive(Debug)]
@@ -14,7 +14,10 @@ pub struct FifoQueue {
 impl FifoQueue {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        Self { tx, rx: Mutex::new(rx) }
+        Self {
+            tx,
+            rx: Mutex::new(rx),
+        }
     }
 }
 

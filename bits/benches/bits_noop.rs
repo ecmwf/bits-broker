@@ -1,9 +1,9 @@
 use async_trait::async_trait;
+use bits::Bits;
 use bits::actions::{ActionError, TargetAction, TargetResult};
 use bits::job::Job;
 use bits::result::JobResult;
-use bits::Bits;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------

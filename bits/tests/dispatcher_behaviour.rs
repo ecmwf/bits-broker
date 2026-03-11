@@ -6,7 +6,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 
 use bits::actions::{ActionError, CheckResult, TargetResult};
-use bits::dispatcher::{Dispatcher, Executor, ExecutorKind, ThreadPoolExecutor, QueueKind};
+use bits::dispatcher::{Dispatcher, Executor, ExecutorKind, QueueKind, ThreadPoolExecutor};
 use bits::job::Job;
 use bits::result::JobResult;
 use bits::{Bits, PollOutcome};
@@ -36,12 +36,18 @@ async fn thread_pool_runs_on_os_threads() {
         Ok(CheckResult::Pass)
     });
 
-    let (r1, r2) = tokio::join!(executor.execute(&job, std::any::TypeId::of::<()>(), work1), executor.execute(&job, std::any::TypeId::of::<()>(), work2));
+    let (r1, r2) = tokio::join!(
+        executor.execute(&job, std::any::TypeId::of::<()>(), work1),
+        executor.execute(&job, std::any::TypeId::of::<()>(), work2)
+    );
     assert!(r1.is_ok() && r2.is_ok());
 
     let ids = thread_ids.lock().unwrap();
     assert_eq!(ids.len(), 2);
-    assert!(ids.iter().all(|id| *id != test_thread), "work should run on pool threads, not the test thread");
+    assert!(
+        ids.iter().all(|id| *id != test_thread),
+        "work should run on pool threads, not the test thread"
+    );
 }
 
 /// Two futures can reach a barrier simultaneously, proving the pool runs
@@ -53,14 +59,21 @@ async fn thread_pool_executes_concurrently() {
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
     let b1 = Arc::clone(&barrier);
-    let work1: BoxFuture<'static, Result<CheckResult, ActionError>> =
-        Box::pin(async move { b1.wait().await; Ok(CheckResult::Pass) });
+    let work1: BoxFuture<'static, Result<CheckResult, ActionError>> = Box::pin(async move {
+        b1.wait().await;
+        Ok(CheckResult::Pass)
+    });
 
     let b2 = Arc::clone(&barrier);
-    let work2: BoxFuture<'static, Result<CheckResult, ActionError>> =
-        Box::pin(async move { b2.wait().await; Ok(CheckResult::Pass) });
+    let work2: BoxFuture<'static, Result<CheckResult, ActionError>> = Box::pin(async move {
+        b2.wait().await;
+        Ok(CheckResult::Pass)
+    });
 
-    let (r1, r2) = tokio::join!(executor.execute(&job, std::any::TypeId::of::<()>(), work1), executor.execute(&job, std::any::TypeId::of::<()>(), work2));
+    let (r1, r2) = tokio::join!(
+        executor.execute(&job, std::any::TypeId::of::<()>(), work1),
+        executor.execute(&job, std::any::TypeId::of::<()>(), work2)
+    );
     assert!(r1.is_ok() && r2.is_ok());
 }
 
@@ -92,7 +105,8 @@ routes:
 
     assert!(
         matches!(outcome, PollOutcome::Ready(JobResult::Redirect { .. })),
-        "expected Redirect from target, got {:?}", outcome
+        "expected Redirect from target, got {:?}",
+        outcome
     );
 }
 
@@ -127,10 +141,11 @@ async fn check_dispatcher_cost_weighted_ordering() {
     let mut expensive = Job::new(serde_json::json!({}));
     expensive.metadata["cost"] = serde_json::json!(100u64);
     let order_e = Arc::clone(&order);
-    let expensive_work: BoxFuture<'static, Result<CheckResult, ActionError>> = Box::pin(async move {
-        order_e.lock().unwrap().push(100);
-        Ok(CheckResult::Pass)
-    });
+    let expensive_work: BoxFuture<'static, Result<CheckResult, ActionError>> =
+        Box::pin(async move {
+            order_e.lock().unwrap().push(100);
+            Ok(CheckResult::Pass)
+        });
 
     let mut cheap = Job::new(serde_json::json!({}));
     cheap.metadata["cost"] = serde_json::json!(1u64);
@@ -140,9 +155,9 @@ async fn check_dispatcher_cost_weighted_ordering() {
         Ok(CheckResult::Pass)
     });
 
-    let blocker_h  = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
+    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
     let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, expensive_work));
-    let cheap_h     = tokio::spawn(dispatcher.dispatch(&cheap, cheap_work));
+    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, cheap_work));
 
     // Give expensive + cheap time to enter the cost-weighted heap.
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -152,7 +167,11 @@ async fn check_dispatcher_cost_weighted_ordering() {
     expensive_h.await.unwrap().unwrap();
     cheap_h.await.unwrap().unwrap();
 
-    assert_eq!(*order.lock().unwrap(), vec![1, 100], "cheap check should run before expensive");
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec![1, 100],
+        "cheap check should run before expensive"
+    );
 }
 
 // ================================
@@ -177,30 +196,38 @@ async fn target_dispatcher_cost_weighted_ordering() {
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let mut blocker = Job::new(serde_json::json!({}));
     blocker.metadata["cost"] = serde_json::json!(0u64);
-    let blocker_work: BoxFuture<'static, Result<TargetResult, ActionError>> = Box::pin(async move {
-        let _ = release_rx.await;
-        Ok(TargetResult::Complete(JobResult::Error { message: "blocker".into() }))
-    });
+    let blocker_work: BoxFuture<'static, Result<TargetResult, ActionError>> =
+        Box::pin(async move {
+            let _ = release_rx.await;
+            Ok(TargetResult::Complete(JobResult::Error {
+                message: "blocker".into(),
+            }))
+        });
 
     let mut expensive = Job::new(serde_json::json!({}));
     expensive.metadata["cost"] = serde_json::json!(100u64);
     let order_e = Arc::clone(&order);
-    let expensive_work: BoxFuture<'static, Result<TargetResult, ActionError>> = Box::pin(async move {
-        order_e.lock().unwrap().push(100);
-        Ok(TargetResult::Complete(JobResult::Error { message: "expensive".into() }))
-    });
+    let expensive_work: BoxFuture<'static, Result<TargetResult, ActionError>> =
+        Box::pin(async move {
+            order_e.lock().unwrap().push(100);
+            Ok(TargetResult::Complete(JobResult::Error {
+                message: "expensive".into(),
+            }))
+        });
 
     let mut cheap = Job::new(serde_json::json!({}));
     cheap.metadata["cost"] = serde_json::json!(1u64);
     let order_c = Arc::clone(&order);
     let cheap_work: BoxFuture<'static, Result<TargetResult, ActionError>> = Box::pin(async move {
         order_c.lock().unwrap().push(1);
-        Ok(TargetResult::Complete(JobResult::Error { message: "cheap".into() }))
+        Ok(TargetResult::Complete(JobResult::Error {
+            message: "cheap".into(),
+        }))
     });
 
-    let blocker_h   = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
+    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
     let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, expensive_work));
-    let cheap_h     = tokio::spawn(dispatcher.dispatch(&cheap, cheap_work));
+    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, cheap_work));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     let _ = release_tx.send(());
@@ -209,5 +236,9 @@ async fn target_dispatcher_cost_weighted_ordering() {
     expensive_h.await.unwrap().unwrap();
     cheap_h.await.unwrap().unwrap();
 
-    assert_eq!(*order.lock().unwrap(), vec![1, 100], "cheap target should run before expensive");
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec![1, 100],
+        "cheap target should run before expensive"
+    );
 }

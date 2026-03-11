@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use bits::job::Job;
 use bits::dispatcher::{CostWeightedQueue, FifoQueue, Queue};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use bits::job::Job;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 fn job() -> Job {
     Job::new(serde_json::json!({}))
@@ -65,18 +65,26 @@ fn bench_sequential_drain(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("fifo", n), &n, |b, &n| {
             b.to_async(&rt).iter(|| async move {
                 let q = FifoQueue::new();
-                for _ in 0..n { q.enqueue(job()); }
-                for _ in 0..n { let _ = q.dequeue().await; }
+                for _ in 0..n {
+                    q.enqueue(job());
+                }
+                for _ in 0..n {
+                    let _ = q.dequeue().await;
+                }
             });
         });
 
         group.bench_with_input(BenchmarkId::new("cost_weighted", n), &n, |b, &n| {
             b.to_async(&rt).iter(|| async move {
                 let q = CostWeightedQueue::new();
-                for i in 0..n { q.enqueue(job_with_cost(i as u64)); }
+                for i in 0..n {
+                    q.enqueue(job_with_cost(i as u64));
+                }
                 // Give the worker a moment to ingest all items before draining.
                 tokio::time::sleep(std::time::Duration::from_micros(100)).await;
-                for _ in 0..n { let _ = q.dequeue().await; }
+                for _ in 0..n {
+                    let _ = q.dequeue().await;
+                }
             });
         });
     }
@@ -107,14 +115,22 @@ fn bench_concurrent_fan_out(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let fifo = fifo.clone();
                 async move {
-                    let producers: Vec<_> = (0..n).map(|_| {
-                        let q = fifo.clone();
-                        async move { q.enqueue(job()); }
-                    }).collect();
-                    let consumers: Vec<_> = (0..n).map(|_| {
-                        let q = fifo.clone();
-                        async move { let _ = q.dequeue().await; }
-                    }).collect();
+                    let producers: Vec<_> = (0..n)
+                        .map(|_| {
+                            let q = fifo.clone();
+                            async move {
+                                q.enqueue(job());
+                            }
+                        })
+                        .collect();
+                    let consumers: Vec<_> = (0..n)
+                        .map(|_| {
+                            let q = fifo.clone();
+                            async move {
+                                let _ = q.dequeue().await;
+                            }
+                        })
+                        .collect();
                     futures::future::join_all(producers).await;
                     futures::future::join_all(consumers).await;
                 }
@@ -126,14 +142,22 @@ fn bench_concurrent_fan_out(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let cost = cost.clone();
                 async move {
-                    let producers: Vec<_> = (0..n).map(|i| {
-                        let q = cost.clone();
-                        async move { q.enqueue(job_with_cost(i as u64)); }
-                    }).collect();
-                    let consumers: Vec<_> = (0..n).map(|_| {
-                        let q = cost.clone();
-                        async move { let _ = q.dequeue().await; }
-                    }).collect();
+                    let producers: Vec<_> = (0..n)
+                        .map(|i| {
+                            let q = cost.clone();
+                            async move {
+                                q.enqueue(job_with_cost(i as u64));
+                            }
+                        })
+                        .collect();
+                    let consumers: Vec<_> = (0..n)
+                        .map(|_| {
+                            let q = cost.clone();
+                            async move {
+                                let _ = q.dequeue().await;
+                            }
+                        })
+                        .collect();
                     futures::future::join_all(producers).await;
                     futures::future::join_all(consumers).await;
                 }
@@ -144,5 +168,10 @@ fn bench_concurrent_fan_out(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_single_roundtrip, bench_sequential_drain, bench_concurrent_fan_out);
+criterion_group!(
+    benches,
+    bench_single_roundtrip,
+    bench_sequential_drain,
+    bench_concurrent_fan_out
+);
 criterion_main!(benches);

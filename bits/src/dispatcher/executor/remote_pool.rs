@@ -4,16 +4,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
-    Json, Router,
 };
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{Notify, oneshot};
 
 use crate::actions::{ActionError, TargetResult, target_remote::RemoteTarget};
 use crate::dispatcher::Executor;
@@ -102,8 +102,7 @@ async fn handle_get_work(
     State(state): State<Arc<RemotePoolState>>,
     Query(params): Query<PollParams>,
 ) -> Result<Json<WorkResponse>, StatusCode> {
-    let deadline =
-        tokio::time::Instant::now() + Duration::from_millis(params.timeout_ms);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(params.timeout_ms);
 
     loop {
         {
@@ -126,8 +125,7 @@ async fn handle_get_work(
             }
         }
 
-        let remaining =
-            deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Err(StatusCode::NO_CONTENT);
         }
@@ -163,17 +161,12 @@ async fn handle_complete(
     match state.in_progress.remove(&job_id) {
         Some((_, entry)) => {
             let outcome = match req {
-                CompleteRequest::Complete { content_type, body } => {
-                    WorkerOutcome::Complete {
-                        content_type,
-                        body: Bytes::from(body.into_bytes()),
-                    }
-                }
+                CompleteRequest::Complete { content_type, body } => WorkerOutcome::Complete {
+                    content_type,
+                    body: Bytes::from(body.into_bytes()),
+                },
                 CompleteRequest::Redirect { location, message } => {
-                    WorkerOutcome::Redirect {
-                        location,
-                        message,
-                    }
+                    WorkerOutcome::Redirect { location, message }
                 }
                 CompleteRequest::Reject { reason } => WorkerOutcome::Reject { reason },
                 CompleteRequest::Error { message } => WorkerOutcome::Error { message },
@@ -256,7 +249,10 @@ impl RemotePoolExecutor {
                     let alive =
                         now.duration_since(entry.last_heartbeat) < reaper_state.heartbeat_timeout;
                     if !alive {
-                        tracing::warn!(job_id, "remote_pool: evicting job due to heartbeat timeout");
+                        tracing::warn!(
+                            job_id,
+                            "remote_pool: evicting job due to heartbeat timeout"
+                        );
                     }
                     alive
                 });
@@ -291,10 +287,14 @@ impl<T: Send + 'static> Executor<T> for RemotePoolExecutor {
 
         let (result_tx, result_rx) = oneshot::channel::<WorkerOutcome>();
 
-        self.state.available.lock().unwrap().push_back(AvailableJob {
-            job: job.clone(),
-            result_tx,
-        });
+        self.state
+            .available
+            .lock()
+            .unwrap()
+            .push_back(AvailableJob {
+                job: job.clone(),
+                result_tx,
+            });
         self.state.available_notify.notify_one();
 
         Box::pin(async move {
@@ -305,16 +305,20 @@ impl<T: Send + 'static> Executor<T> for RemotePoolExecutor {
             let target_result: TargetResult = match outcome {
                 WorkerOutcome::Complete { content_type, body } => {
                     let size = body.len() as i64;
-                    let stream = Box::new(futures::stream::once(futures::future::ready(
-                        Ok::<_, std::io::Error>(body),
-                    )));
-                    TargetResult::Complete(JobResult::Success { content_type, size, stream })
+                    let stream = Box::new(futures::stream::once(futures::future::ready(Ok::<
+                        _,
+                        std::io::Error,
+                    >(
+                        body
+                    ))));
+                    TargetResult::Complete(JobResult::Success {
+                        content_type,
+                        size,
+                        stream,
+                    })
                 }
                 WorkerOutcome::Redirect { location, message } => {
-                    TargetResult::Complete(JobResult::Redirect {
-                        location,
-                        message,
-                    })
+                    TargetResult::Complete(JobResult::Redirect { location, message })
                 }
                 WorkerOutcome::Reject { reason } => TargetResult::Reject { reason },
                 WorkerOutcome::Error { message } => {

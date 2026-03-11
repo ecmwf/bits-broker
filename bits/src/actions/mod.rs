@@ -5,14 +5,14 @@ use crate::result::JobResult;
 use async_trait::async_trait;
 
 pub mod check_hasrole;
+pub mod registry;
 pub mod target_http;
 pub mod target_remote;
-pub mod registry;
 
 pub use check_hasrole::*;
+pub use registry::{create_action, list_actions};
 pub use target_http::*;
 pub use target_remote::*;
-pub use registry::{create_action, list_actions};
 
 // Re-export the macro at crate root for convenience
 pub use crate::register_action;
@@ -43,7 +43,9 @@ impl std::fmt::Display for ActionError {
             ActionError::AuthError(msg) => write!(f, "Auth error: {}", msg),
             ActionError::ResourceError(msg) => write!(f, "Resource error: {}", msg),
             ActionError::Cancelled => write!(f, "Cancelled"),
-            ActionError::ClientGone => write!(f, "Client disconnected before data could be delivered"),
+            ActionError::ClientGone => {
+                write!(f, "Client disconnected before data could be delivered")
+            }
         }
     }
 }
@@ -55,9 +57,18 @@ impl std::error::Error for ActionError {}
 // ================================
 
 pub enum Action {
-    Check(Arc<dyn CheckAction>, Option<crate::dispatcher::Dispatcher<CheckResult>>),
-    Transform(Arc<dyn TransformAction>, Option<crate::dispatcher::Dispatcher<TransformResult>>),
-    Target(Arc<dyn TargetAction>, Option<crate::dispatcher::Dispatcher<TargetResult>>),
+    Check(
+        Arc<dyn CheckAction>,
+        Option<crate::dispatcher::Dispatcher<CheckResult>>,
+    ),
+    Transform(
+        Arc<dyn TransformAction>,
+        Option<crate::dispatcher::Dispatcher<TransformResult>>,
+    ),
+    Target(
+        Arc<dyn TargetAction>,
+        Option<crate::dispatcher::Dispatcher<TargetResult>>,
+    ),
     Switch(crate::routing::switch::Switch),
 }
 

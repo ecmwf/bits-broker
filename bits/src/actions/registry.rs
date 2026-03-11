@@ -1,5 +1,7 @@
 // Re-export from routing for convenience
-pub use crate::routing::registry::{create_action, list_actions, ActionRegistration, ActionFactory};
+pub use crate::routing::registry::{
+    ActionFactory, ActionRegistration, create_action, list_actions,
+};
 
 /// Register an action with the global registry.
 /// Usage:
@@ -45,4 +47,3 @@ macro_rules! register_action {
         }
     };
 }
-

@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use bits::actions::{ActionError, TargetAction, TargetResult};
-use bits::job::Job;
 use bits::dispatcher::queue::{CostWeightedQueue, Queue};
+use bits::job::Job;
 use bits::result::JobResult;
 
 /// A target that enqueues the job into a cost-weighted queue, dequeues it
@@ -21,11 +21,15 @@ pub struct TargetDummyDelay {
 
 impl TargetDummyDelay {
     pub fn new(duration_ms: u64) -> Self {
-        Self { duration_ms, queue: OnceLock::new() }
+        Self {
+            duration_ms,
+            queue: OnceLock::new(),
+        }
     }
 
     fn queue(&self) -> &Arc<CostWeightedQueue> {
-        self.queue.get_or_init(|| Arc::new(CostWeightedQueue::new()))
+        self.queue
+            .get_or_init(|| Arc::new(CostWeightedQueue::new()))
     }
 }
 

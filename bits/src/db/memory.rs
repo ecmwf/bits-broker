@@ -32,7 +32,10 @@ impl Default for MemoryStore {
 #[async_trait]
 impl JobStore for MemoryStore {
     async fn upsert_job(&self, record: PersistentJobRecord) -> Result<(), DbError> {
-        self.jobs.lock().unwrap().insert(record.job_id.clone(), record);
+        self.jobs
+            .lock()
+            .unwrap()
+            .insert(record.job_id.clone(), record);
         Ok(())
     }
 
@@ -81,14 +84,19 @@ impl BrokerLeaseStore for MemoryStore {
             BrokerLeaseRecord {
                 broker_id: broker_id.to_string(),
                 internal_poll_base_url: internal_poll_base_url.to_string(),
-                lease_until: now + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(60)),
+                lease_until: now
+                    + chrono::Duration::from_std(ttl)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(60)),
                 updated_at: now,
             },
         );
         Ok(())
     }
 
-    async fn get_broker_lease(&self, broker_id: &str) -> Result<Option<BrokerLeaseRecord>, DbError> {
+    async fn get_broker_lease(
+        &self,
+        broker_id: &str,
+    ) -> Result<Option<BrokerLeaseRecord>, DbError> {
         let lease = self.brokers.lock().unwrap().get(broker_id).cloned();
         Ok(lease)
     }

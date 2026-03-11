@@ -41,7 +41,8 @@ impl TiKvStore {
     }
 
     fn serialize<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, DbError> {
-        serde_json::to_vec(value).map_err(|err| DbError::Backend(format!("serialize failed: {err}")))
+        serde_json::to_vec(value)
+            .map_err(|err| DbError::Backend(format!("serialize failed: {err}")))
     }
 
     fn deserialize<T: serde::de::DeserializeOwned>(value: Vec<u8>) -> Result<T, DbError> {
@@ -166,7 +167,8 @@ impl BrokerLeaseStore for TiKvStore {
         let record = BrokerLeaseRecord {
             broker_id: broker_id.to_string(),
             internal_poll_base_url: internal_poll_base_url.to_string(),
-            lease_until: now + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(60)),
+            lease_until: now
+                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(60)),
             updated_at: now,
         };
         txn.put(key, Self::serialize(&record)?)
@@ -178,7 +180,10 @@ impl BrokerLeaseStore for TiKvStore {
         Ok(())
     }
 
-    async fn get_broker_lease(&self, broker_id: &str) -> Result<Option<BrokerLeaseRecord>, DbError> {
+    async fn get_broker_lease(
+        &self,
+        broker_id: &str,
+    ) -> Result<Option<BrokerLeaseRecord>, DbError> {
         let key = Self::broker_key(broker_id);
         let client = self.client().await?;
         let mut txn = client

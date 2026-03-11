@@ -38,7 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => unreachable!(),
         };
         match result {
-            JobResult::Success { content_type, size, .. } => {
+            JobResult::Success {
+                content_type, size, ..
+            } => {
                 println!("Job {} completed successfully", i + 1);
                 println!("Content-Type: {}, Size: {} bytes", content_type, size);
             }

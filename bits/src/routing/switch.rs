@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 
 use crate::{
-    job::Job,
     actions::{Action, ActionError, CheckResult, TargetAction, TargetResult, TransformResult},
+    job::Job,
     routing::Route,
 };
 
@@ -20,7 +20,9 @@ mod tests {
     #[async_trait]
     impl TargetAction for AlwaysSucceed {
         async fn dispatch(&self, _job: &Job) -> Result<TargetResult, ActionError> {
-            Ok(TargetResult::Complete(JobResult::Error { message: "dummy".into() }))
+            Ok(TargetResult::Complete(JobResult::Error {
+                message: "dummy".into(),
+            }))
         }
     }
 
@@ -86,7 +88,8 @@ impl TargetAction for Switch {
                         let result = match dispatcher {
                             Some(d) => {
                                 let t = Arc::clone(transform);
-                                let job_mux = Arc::new(tokio::sync::Mutex::new((*current_job).clone()));
+                                let job_mux =
+                                    Arc::new(tokio::sync::Mutex::new((*current_job).clone()));
                                 let job_mux2 = Arc::clone(&job_mux);
                                 let work: BoxFuture<'static, Result<TransformResult, ActionError>> =
                                     Box::pin(async move {
@@ -124,15 +127,17 @@ impl TargetAction for Switch {
                             None => target.dispatch(&current_job).await?,
                         };
                         match result {
-                            TargetResult::Complete(result) => return Ok(TargetResult::Complete(result)),
+                            TargetResult::Complete(result) => {
+                                return Ok(TargetResult::Complete(result));
+                            }
                             TargetResult::Reject { .. } => continue 'route,
                         }
-                    },
-                    Action::Switch(switch) => {
-                        match switch.dispatch(&current_job).await? {
-                            TargetResult::Complete(result) => return Ok(TargetResult::Complete(result)),
-                            TargetResult::Reject { .. } => continue 'route,
+                    }
+                    Action::Switch(switch) => match switch.dispatch(&current_job).await? {
+                        TargetResult::Complete(result) => {
+                            return Ok(TargetResult::Complete(result));
                         }
+                        TargetResult::Reject { .. } => continue 'route,
                     },
                 }
             }

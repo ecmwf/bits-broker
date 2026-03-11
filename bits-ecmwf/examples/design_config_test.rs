@@ -17,26 +17,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing different route types...");
 
     let test_jobs = vec![
-        ("operational_forecast", json!({
-            "class": "od",
-            "stream": "oper",
-            "type": "fc"
-        })),
-        ("era5_reanalysis", json!({
-            "class": "ea",
-            "stream": "oper",
-            "type": "an"
-        })),
-        ("extremes_dt", json!({
-            "class": "od",
-            "stream": "oper",
-            "type": "fc"
-        })),
-        ("extremes_fc", json!({
-            "class": "od",
-            "stream": "oper",
-            "type": "fc"
-        })),
+        (
+            "operational_forecast",
+            json!({
+                "class": "od",
+                "stream": "oper",
+                "type": "fc"
+            }),
+        ),
+        (
+            "era5_reanalysis",
+            json!({
+                "class": "ea",
+                "stream": "oper",
+                "type": "an"
+            }),
+        ),
+        (
+            "extremes_dt",
+            json!({
+                "class": "od",
+                "stream": "oper",
+                "type": "fc"
+            }),
+        ),
+        (
+            "extremes_fc",
+            json!({
+                "class": "od",
+                "stream": "oper",
+                "type": "fc"
+            }),
+        ),
     ];
 
     let mut handles = Vec::new();
@@ -59,8 +71,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for handle in handles {
         let (route_name, result) = handle.await?;
         match result {
-            JobResult::Success { content_type, size, .. } => {
-                println!("✓ {} processed successfully! ({}, {} bytes)", route_name, content_type, size);
+            JobResult::Success {
+                content_type, size, ..
+            } => {
+                println!(
+                    "✓ {} processed successfully! ({}, {} bytes)",
+                    route_name, content_type, size
+                );
             }
             JobResult::Error { message } => {
                 println!("✗ {} error: {}", route_name, message);

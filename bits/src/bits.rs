@@ -241,22 +241,23 @@ impl Bits {
                 // Re-submit restored work, then immediately continue as a local poll
                 // so this request can long-poll instead of forcing an instant reconnect.
                 self.submit_with_state(Job::restore(record), true);
-                self
-                    .poll_local(id, timeout)
+                self.poll_local(id, timeout)
                     .await
                     .unwrap_or(PollOutcome::Pending { id: id.to_string() })
             }
-            Ok(ClaimResult::Active { owner_broker_id }) => match self.lookup_owner_lease(&owner_broker_id).await {
-                // Ownership moved concurrently to another live broker.
-                // Proxy to that owner when reachable, otherwise keep client in pending loop.
-                LeaseLookup::Active(lease) => self
-                    .try_proxy_with_lease(&lease, id, timeout)
-                    .await
-                    .unwrap_or(PollOutcome::Pending { id: id.to_string() }),
-                LeaseLookup::MissingOrExpired | LeaseLookup::Unknown => {
-                    PollOutcome::Pending { id: id.to_string() }
+            Ok(ClaimResult::Active { owner_broker_id }) => {
+                match self.lookup_owner_lease(&owner_broker_id).await {
+                    // Ownership moved concurrently to another live broker.
+                    // Proxy to that owner when reachable, otherwise keep client in pending loop.
+                    LeaseLookup::Active(lease) => self
+                        .try_proxy_with_lease(&lease, id, timeout)
+                        .await
+                        .unwrap_or(PollOutcome::Pending { id: id.to_string() }),
+                    LeaseLookup::MissingOrExpired | LeaseLookup::Unknown => {
+                        PollOutcome::Pending { id: id.to_string() }
+                    }
                 }
-            },
+            }
             // No durable record exists for this id anymore.
             Ok(ClaimResult::NotFound) => PollOutcome::JobLost,
             Err(DbError::Conflict(message)) => {
@@ -288,7 +289,10 @@ impl Bits {
         let mut delay = Duration::from_millis(100);
 
         loop {
-            match store.claim_if_owner(id, expected_owner, &self.broker_id).await {
+            match store
+                .claim_if_owner(id, expected_owner, &self.broker_id)
+                .await
+            {
                 Ok(result) => return Ok(result),
                 Err(DbError::Conflict(message)) => return Err(DbError::Conflict(message)),
                 Err(DbError::Backend(message)) => {
@@ -474,34 +478,31 @@ impl Bits {
             }
         });
     }
-
 }
 
 fn owner_from_job_id(job_id: &str) -> Option<&str> {
     let (owner, _suffix) = job_id.split_once('~')?;
-    if owner.is_empty() {
-        None
-    } else {
-        Some(owner)
-    }
+    if owner.is_empty() { None } else { Some(owner) }
 }
 
 fn start_sweeper(jobs: Arc<DashMap<String, Arc<Job>>>, sweep_interval: Duration) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(sweep_interval);
-        let mut expired = Vec::new();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(sweep_interval);
+            let mut expired = Vec::new();
 
-        for entry in jobs.iter() {
-            let job = entry.value();
-            let has_result = job.result.lock().unwrap().is_some();
+            for entry in jobs.iter() {
+                let job = entry.value();
+                let has_result = job.result.lock().unwrap().is_some();
 
-            if has_result && !job.client_present() {
-                expired.push(entry.key().clone());
+                if has_result && !job.client_present() {
+                    expired.push(entry.key().clone());
+                }
             }
-        }
 
-        for id in expired {
-            jobs.remove(&id);
+            for id in expired {
+                jobs.remove(&id);
+            }
         }
     });
 }
@@ -538,5 +539,4 @@ routes:
             r => panic!("Expected error for empty pipeline, got: {:?}", r),
         }
     }
-
 }

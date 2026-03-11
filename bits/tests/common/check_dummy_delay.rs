@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use bits::actions::{ActionError, CheckAction, CheckResult};
-use bits::job::Job;
 use bits::dispatcher::queue::{FifoQueue, Queue};
+use bits::job::Job;
 
 /// A check that always passes after sleeping for a fixed duration.
 /// Jobs are enqueued into a FIFO queue and dequeued before sleeping,
@@ -21,7 +21,10 @@ pub struct CheckDummyDelay {
 impl CheckDummyDelay {
     #[allow(dead_code)]
     pub fn new(duration_ms: u64) -> Self {
-        Self { duration_ms, queue: Self::default_queue() }
+        Self {
+            duration_ms,
+            queue: Self::default_queue(),
+        }
     }
 
     fn default_queue() -> Arc<FifoQueue> {

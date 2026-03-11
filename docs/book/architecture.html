@@ -28,6 +28,7 @@
         <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/tabs-52f01167.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -35,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a600bcea.js";
+            window.path_to_searchindex_js = "searchindex-d8fd5745.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c9150e56.js"></script>
+        <script src="toc-03391b1f.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -217,6 +218,73 @@ ordering and concurrency before the action runs.</p>
 </ul>
 <p>This makes scheduling behavior explicit at the step level rather than a global setting. See
 <a href="configuration.html">Configuration</a> for dispatcher syntax and options.</p>
+<h2 id="background-threads-and-tasks"><a class="header" href="#background-threads-and-tasks">Background threads and tasks</a></h2>
+<p>BITS starts background threads and async tasks at startup and per-job. Operators should be
+aware of these when reasoning about resource usage, process behaviour on shutdown, and
+interaction with the host’s thread model.</p>
+<h3 id="tokio-async-runtime"><a class="header" href="#tokio-async-runtime">Tokio async runtime</a></h3>
+<p>The <code>bits-ecmwf</code> binary uses <code>#[tokio::main]</code> with the default multi-thread scheduler. Tokio
+spawns one worker thread per logical CPU. These are OS threads managed entirely by Tokio and
+are not counted in the items below.</p>
+<h3 id="started-at-bitsfrom_config--always"><a class="header" href="#started-at-bitsfrom_config--always">Started at <code>Bits::from_config()</code> — always</a></h3>
+<p><strong>Completed-job sweeper (1 OS thread)</strong>
+A single <code>std::thread::spawn</code> thread that wakes every 5 seconds (configurable via
+<code>bits.job_cleanup_interval_ms</code>) and removes finished jobs from the in-memory map once no client
+is polling them. A real blocking OS thread is used deliberately so it cannot interfere with the
+Tokio scheduler even if it is saturated.</p>
+<h3 id="started-at-bitsfrom_config--only-when-persistence-is-configured"><a class="header" href="#started-at-bitsfrom_config--only-when-persistence-is-configured">Started at <code>Bits::from_config()</code> — only when persistence is configured</a></h3>
+<p><strong>Broker lease heartbeat (1 Tokio task)</strong>
+A long-running async task that periodically upserts this broker’s lease record in the persistence
+store. It renews at half the configured lease TTL (minimum 100 ms between renewals). This task
+is the mechanism by which other brokers determine that this instance is alive. See
+<a href="persistence-broker-leases.html">Broker Leases</a>.</p>
+<h3 id="started-per-dispatcher--at-config-parse-time"><a class="header" href="#started-per-dispatcher--at-config-parse-time">Started per dispatcher — at config parse time</a></h3>
+<p>Each action step with a <code>dispatcher:</code> block starts background workers when the configuration is
+loaded. The number of workers depends on the queue type and executor type configured.</p>
+<p><strong>Dispatcher dequeue worker (1 Tokio task per dispatcher)</strong>
+Waits for jobs to become available in the queue and hands each one to the executor. Spawns an
+additional short-lived Tokio task per dequeued job to run the action without blocking the
+dequeue loop.</p>
+<p><strong>Cost-weighted queue worker (1 Tokio task, if <code>queue: cost_weighted</code>)</strong>
+Maintains the priority heap and services dequeue requests in cost order. Not started when
+<code>queue: fifo</code> is used — FIFO uses a plain channel with no background task.</p>
+<p><strong>Thread pool workers (N OS threads, if <code>executor: thread_pool</code>)</strong>
+One OS thread per <code>concurrency</code> unit. Each thread blocks on the work channel and runs the action
+on that OS thread, using <code>block_on</code> against the shared Tokio runtime. Used to isolate
+CPU-bound or blocking work from the async scheduler. Not started unless <code>executor: thread_pool</code>
+is explicitly configured.</p>
+<p><strong>Remote pool HTTP server + heartbeat reaper (2 Tokio tasks, if <code>executor: remote_pool</code>)</strong>
+One task runs an axum HTTP server on the configured bind address (default <code>0.0.0.0:9001</code>) that
+external workers poll for jobs and post results back to. A second task scans in-progress jobs
+every <code>heartbeat_timeout / 2</code> seconds and evicts any worker that has stopped sending heartbeats.
+Only started when <code>executor: remote_pool</code> is configured (or when <code>target::remote</code> is used, which
+implies it).</p>
+<p>For the wire protocol and worker implementation contract, see
+<a href="external-workers.html">External Workers</a>.</p>
+<h3 id="started-per-submitted-job"><a class="header" href="#started-per-submitted-job">Started per submitted job</a></h3>
+<p><strong>Job dispatch task (1 Tokio task per job)</strong>
+Runs the full pipeline for one job. If <code>bits.persist_after_ms</code> is configured, this task also
+handles the persistence threshold: it races the pipeline against a timer, and if the timer fires
+first it writes the durable job record before continuing to wait for the pipeline to complete.
+There is no separate timer task — the threshold logic lives inside this task via <code>tokio::select!</code>.</p>
+<h3 id="summary"><a class="header" href="#summary">Summary</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Background worker</th><th>Kind</th><th>Count</th><th>Started when</th></tr>
+</thead>
+<tbody>
+<tr><td>Completed-job sweeper</td><td>OS thread</td><td>1 per <code>Bits</code> instance</td><td>Always, at startup</td></tr>
+<tr><td>Broker lease heartbeat</td><td>Tokio task</td><td>1 per <code>Bits</code> instance</td><td>At startup, if persistence configured</td></tr>
+<tr><td>Dispatcher dequeue worker</td><td>Tokio task</td><td>1 per dispatcher</td><td>At config parse, per dispatcher block</td></tr>
+<tr><td>Cost-weighted queue worker</td><td>Tokio task</td><td>1 per <code>cost_weighted</code> queue</td><td>At config parse, if <code>queue: cost_weighted</code></td></tr>
+<tr><td>Thread pool OS workers</td><td>OS threads</td><td>N per <code>thread_pool</code> executor</td><td>At config parse, if <code>executor: thread_pool</code></td></tr>
+<tr><td>Remote pool HTTP server</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, if <code>executor: remote_pool</code></td></tr>
+<tr><td>Remote pool heartbeat reaper</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, if <code>executor: remote_pool</code></td></tr>
+<tr><td>Job dispatch + persist timer</td><td>Tokio task</td><td>1 per submitted job</td><td>Per <code>Bits::submit()</code></td></tr>
+</tbody>
+</table>
+</div>
 <h2 id="multi-broker-cooperation"><a class="header" href="#multi-broker-cooperation">Multi-broker cooperation</a></h2>
 <p>In production, multiple broker instances run behind a load balancer. Each broker holds an
 in-memory shard of the dispatcher state and a broker lease record in durable storage.</p>
@@ -266,22 +334,6 @@ storage.</li>
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>
@@ -298,6 +350,7 @@ storage.</li>
         <script src="book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="theme/tabs-0c8cb93b.js"></script>
 
 
 

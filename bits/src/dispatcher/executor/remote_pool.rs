@@ -24,6 +24,7 @@ use crate::result::JobResult;
 
 enum WorkerOutcome {
     Complete { content_type: String, body: Bytes },
+    Redirect { location: String, message: String },
     Reject { reason: String },
     Error { message: String },
 }
@@ -79,6 +80,11 @@ enum CompleteRequest {
     Complete {
         content_type: String,
         body: String,
+    },
+    Redirect {
+        location: String,
+        #[serde(default)]
+        message: String,
     },
     Reject {
         reason: String,
@@ -163,6 +169,12 @@ async fn handle_complete(
                         body: Bytes::from(body.into_bytes()),
                     }
                 }
+                CompleteRequest::Redirect { location, message } => {
+                    WorkerOutcome::Redirect {
+                        location,
+                        message,
+                    }
+                }
                 CompleteRequest::Reject { reason } => WorkerOutcome::Reject { reason },
                 CompleteRequest::Error { message } => WorkerOutcome::Error { message },
             };
@@ -185,6 +197,7 @@ async fn handle_complete(
 /// - `POST /complete/{job_id}`   — worker posts the result:
 ///   ```json
 ///   {"status": "complete", "content_type": "...", "body": "..."}
+///   {"status": "redirect", "location": "...", "message": "..."}
 ///   {"status": "reject",   "reason": "..."}
 ///   {"status": "error",    "message": "..."}
 ///   ```
@@ -296,6 +309,12 @@ impl<T: Send + 'static> Executor<T> for RemotePoolExecutor {
                         Ok::<_, std::io::Error>(body),
                     )));
                     TargetResult::Complete(JobResult::Success { content_type, size, stream })
+                }
+                WorkerOutcome::Redirect { location, message } => {
+                    TargetResult::Complete(JobResult::Redirect {
+                        location,
+                        message,
+                    })
                 }
                 WorkerOutcome::Reject { reason } => TargetResult::Reject { reason },
                 WorkerOutcome::Error { message } => {

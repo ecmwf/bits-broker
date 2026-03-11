@@ -21,6 +21,8 @@ jobs are persisted so they survive broker restarts and can be recovered by other
   and how multiple brokers cooperate.
 - **[Configuration](configuration.md)** — reference for YAML configuration: registries, routes,
   dispatchers, and top-level settings.
+- **[External Workers](external-workers.md)** — implement pull-based remote workers using
+  `target::remote`, including completion, rejection, error, and redirect outcomes.
 - **[Persistence](persistence.md)** — how jobs are persisted, recovered, and routed across
   broker instances.
 

@@ -104,6 +104,8 @@ routes:
 - `thread_pool` offloads work to dedicated OS threads — use this for CPU-bound or blocking work.
 - `remote_pool` is only valid with `target::remote` and is auto-inserted when using that target
   type. Any other combination is rejected at config parse time.
+- For the remote worker HTTP API and worker lifecycle, see
+  [External Workers](external-workers.md).
 
 ## Top-level bits settings
 

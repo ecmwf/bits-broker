@@ -178,6 +178,46 @@ async fn worker_reports_error() {
     }
 }
 
+/// Worker requests a redirect → Bits surfaces Redirect to the client.
+#[tokio::test]
+async fn worker_requests_redirect() {
+    let port = free_port().await;
+    let bits = make_bits(port, 60.0);
+    wait_for_server(port).await;
+
+    let handle = bits.submit(Job::new(serde_json::json!({"dataset": "era5"})));
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let work: serde_json::Value = resp.json().await.unwrap();
+    let job_id = work["job_id"].as_str().unwrap();
+
+    let done = client
+        .post(format!("http://127.0.0.1:{port}/complete/{job_id}"))
+        .json(&serde_json::json!({
+            "status": "redirect",
+            "location": "https://example-bucket.s3.amazonaws.com/object?signature=abc",
+            "message": "Download from object storage"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(done.status(), 200);
+
+    match bits.poll(&handle.id, Some(Duration::from_secs(5))).await {
+        PollOutcome::Ready(JobResult::Redirect { location, message }) => {
+            assert!(location.contains("example-bucket.s3.amazonaws.com/object"));
+            assert_eq!(message, "Download from object storage");
+        }
+        other => panic!("expected Redirect, got {:?}", other),
+    }
+}
+
 /// Long-polling with no queued work returns 204 No Content within the timeout.
 #[tokio::test]
 async fn long_poll_returns_204_when_no_work() {

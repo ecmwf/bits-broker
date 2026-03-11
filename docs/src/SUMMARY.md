@@ -5,6 +5,7 @@
 - [Architecture](architecture.md)
 - [Configuration](configuration.md)
 - [Custom Actions](custom-actions.md)
+- [External Workers](external-workers.md)
 - [Persistence](persistence.md)
   - [Concepts](persistence-concepts.md)
   - [Sticky Routing](persistence-sticky-routing.md)

@@ -1,14 +1,56 @@
 # Broker Leases
 
-Broker endpoints are resolved from broker lease records.
+Each BITS instance registers itself in the shared persistence store so that peer brokers can
+locate it for [internal poll proxying](persistence-poll-recovery.md). This registration is
+called a *broker lease*.
 
-Each broker periodically upserts:
+## Lease record
 
-- `broker_id`
-- internal poll base URL
-- lease expiration (`lease_until`)
+A lease record contains:
 
-Renewal runs at approximately half the configured lease TTL.
+| Field | Description |
+|---|---|
+| `broker_id` | The unique per-process broker identity (`{configured_broker_id}-{uuid}`). |
+| `internal_poll_base_url` | The URL at which this broker's poll endpoint is reachable from peers. |
+| `lease_until` | Wall-clock timestamp after which this lease is considered expired. |
+| `updated_at` | Timestamp of the last upsert. |
 
-If a lease is missing or expired, that owner is treated as unavailable for direct proxying and
-the recovery path may attempt to claim the persistent job.
+## Heartbeat
+
+At startup, BITS spawns a background task that upserts the lease record on a repeating
+interval. The renewal period is **TTL ÷ 2**, floored at 100 ms. For the default TTL of 30
+seconds, the heartbeat fires approximately every 15 seconds.
+
+There is no graceful shutdown signal. When a broker process exits, its lease record remains in
+the store until the `lease_until` timestamp passes. Until then, peer brokers treat that owner
+as live and will proxy polls to it (which will fail with a network error, returning `Pending`
+to clients). Once the lease expires, peers will attempt to [claim and recover](persistence-poll-recovery.md)
+any outstanding jobs.
+
+## Expiry evaluation
+
+BITS does not rely on any server-side TTL mechanism. The reading broker compares
+`lease.lease_until > current_wall_time` to decide if the lease is active. Expired records are
+never deleted from TiKV automatically — they remain until the broker comes back online and
+overwrites them. This is safe because the timestamp comparison is the only check that matters.
+
+## TiKV storage
+
+Broker leases are stored at the key `brokers/{broker_id}` as a JSON-encoded record. Job records
+are stored at `jobs/{job_id}`. These key spaces are disjoint.
+
+## Configuration
+
+```yaml
+bits:
+  tikv:
+    endpoints: ["pd:2379"]
+    broker_lease_ttl_secs: 30    # default: 30 seconds
+```
+
+`broker_lease_ttl_secs` is the only tuning knob for lease lifetime. Setting it lower reduces
+the window during which a crashed broker's jobs are unrecoverable, at the cost of more frequent
+upserts to TiKV.
+
+> **Note:** Broker leases are only active when a persistence store is configured. Without
+> `bits.tikv`, the heartbeat task does not start and no lease records are written.

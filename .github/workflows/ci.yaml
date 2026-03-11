@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install rustfmt
+        run: rustup component add rustfmt
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        env:
+          NO_PROXY: "127.0.0.1,localhost"
+        run: |
+          unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
+          cargo test --workspace --exclude bits-py -- --test-threads=1

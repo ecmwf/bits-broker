@@ -282,8 +282,6 @@ Multiple broker instances each hold a shard of the dispatcher:
 
 ## What is not yet implemented
 
-- Remote pool runtime — full HTTP long-poll worker API, job handoff, and result callback
-  (`executor: remote_pool` is stubbed and returns an error)
 - HTTP server (`src/api/` is a stub)
 - Resource quota tracking and broker negotiation
 - User statistics

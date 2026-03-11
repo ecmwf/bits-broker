@@ -28,6 +28,7 @@
         <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/tabs-52f01167.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -35,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a600bcea.js";
+            window.path_to_searchindex_js = "searchindex-d8fd5745.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c9150e56.js"></script>
+        <script src="toc-03391b1f.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -175,21 +176,90 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="poll-proxying-and-recovery"><a class="header" href="#poll-proxying-and-recovery">Poll Proxying and Recovery</a></h1>
-<p>On poll, a broker follows this sequence:</p>
-<ol>
-<li>Check local in-memory state.</li>
-<li>If missing, parse owner from <code>job_id</code>.</li>
-<li>If owner is another broker, resolve owner endpoint from lease records and proxy internally.</li>
-<li>If owner lease is missing/expired, attempt claim-and-recover from durable storage.</li>
-</ol>
-<p>Important: proxy failure alone does not trigger reclaim while owner lease is still active.</p>
-<p>Recovery behavior:</p>
+<p>When a poll request arrives for a job that is not in local memory, the broker follows a
+structured decision sequence to locate the result or recover the job.</p>
+<h2 id="decision-sequence"><a class="header" href="#decision-sequence">Decision sequence</a></h2>
+<pre><code>poll(id)
+  │
+  ├─ 1. Check local in-memory state
+  │       ↓ found → long-poll, return result
+  │       ↓ not found
+  │
+  ├─ 2. Parse owner from job_id (split on first '~')
+  │       ↓ unparseable → NotFound
+  │       ↓ owner == self → NotFound  (we are authoritative; job never existed or was evicted)
+  │       ↓ owner == another broker
+  │
+  ├─ 3. Look up owner's broker lease
+  │       ↓ Active lease     → Step 4a (proxy)
+  │       ↓ Missing/expired  → Step 4b (claim-and-recover)
+  │       ↓ Store unreachable → Pending (no claim attempted)
+  │
+  ├─ 4a. Proxy to owner's internal_poll_base_url/{id}
+  │       ↓ success → return translated response (see table below)
+  │       ↓ network/timeout failure → Pending (no claim while lease is active)
+  │
+  └─ 4b. Claim-and-recover from durable storage
+          ↓ Claimed     → restore job, long-poll, return Pending
+          ↓ Active(new) → look up new owner's lease; proxy if active, else Pending
+          ↓ NotFound    → JobLost
+          ↓ Error       → Pending (with exponential backoff retries)
+</code></pre>
+<h2 id="proxy-response-translation"><a class="header" href="#proxy-response-translation">Proxy response translation</a></h2>
+<p>When proxying to the owner broker, BITS translates the HTTP response back to a <code>PollOutcome</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Owner response</th><th>Caller receives</th></tr>
+</thead>
+<tbody>
+<tr><td><code>200 OK</code></td><td><code>Ready(Success)</code> — body streamed through</td></tr>
+<tr><td><code>303</code>/<code>307</code> with <code>Location</code> containing the job ID</td><td><code>Pending</code> — job is still in progress</td></tr>
+<tr><td><code>303</code>/<code>307</code> with <code>Location</code> not containing the job ID</td><td><code>Ready(Redirect)</code> — result is a redirect</td></tr>
+<tr><td><code>404 Not Found</code></td><td><code>NotFound</code></td></tr>
+<tr><td><code>400 Bad Request</code></td><td><code>Ready(Error)</code></td></tr>
+<tr><td><code>410 Gone</code></td><td><code>Ready(Cancelled)</code></td></tr>
+<tr><td><code>5xx</code></td><td><code>Pending</code> — owner is alive but errored; client should retry</td></tr>
+<tr><td>Network/timeout failure</td><td><code>Pending</code> — no ownership transfer while lease is active</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="claim-and-recovery"><a class="header" href="#claim-and-recovery">Claim and recovery</a></h2>
+<p>Recovery is only attempted when the owner’s broker lease is missing or expired. The broker
+runs <code>claim_with_backoff</code>:</p>
 <ul>
-<li>If a persistent record exists and claim succeeds, the broker restores from
-<code>original_request</code>, preserves <code>created_at</code>, resubmits, and returns <code>Pending</code>.</li>
-<li>If no durable record exists, the result is <code>JobLost</code>.</li>
+<li>Budget: <code>min(requested_timeout, 2 s)</code></li>
+<li>Backoff: starts at 100 ms, doubles each retry, capped at 1 s</li>
+<li>Uses an optimistic transaction in TiKV; up to 2 commit retries before returning <code>Conflict</code></li>
 </ul>
-<p>This keeps the client contract stable while allowing broker ownership changes.</p>
+<p>On a successful claim, <code>Job::restore</code> reconstructs the job from the durable record:</p>
+<ul>
+<li><code>request</code> is reset to <code>original_request</code> — the pipeline re-runs from the beginning</li>
+<li><code>created_at</code> is preserved from the original submission timestamp</li>
+<li>All runtime state (cancelled flag, client-connected flag, etc.) starts fresh</li>
+</ul>
+<p>The job is submitted immediately and the polling request is attached to it, so the client
+receives <code>Pending</code> in response to the recovery poll — not an extra round-trip.</p>
+<h2 id="claim-outcomes"><a class="header" href="#claim-outcomes">Claim outcomes</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>ClaimResult</code></th><th>Action</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Claimed(record)</code></td><td>Job restored and submitted; poll attaches and waits. Returns <code>Pending</code>.</td></tr>
+<tr><td><code>Active { owner_broker_id }</code></td><td>Another broker won the race. Look up its lease; proxy if active, else <code>Pending</code>.</td></tr>
+<tr><td><code>NotFound</code></td><td>No durable record exists. Returns <code>JobLost</code>.</td></tr>
+<tr><td><code>Conflict</code> (commit race)</td><td>Returns <code>Pending</code>; next poll will find the winner.</td></tr>
+<tr><td>Backend error (after retries)</td><td>Returns <code>Pending</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="client-reconnect-window"><a class="header" href="#client-reconnect-window">Client reconnect window</a></h2>
+<p>After each <code>poll_local</code> call returns, the broker extends a 5-second reconnect deadline. A job
+considers the client “present” while <code>client_connected</code> is set <strong>or</strong> while the reconnect
+deadline has not yet elapsed. This gives the client 5 seconds to reconnect between polls before
+the dispatch pipeline treats the connection as lost and stops work.</p>
 
                     </main>
 
@@ -226,22 +296,6 @@
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>
@@ -258,6 +312,7 @@
         <script src="book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="theme/tabs-0c8cb93b.js"></script>
 
 
 

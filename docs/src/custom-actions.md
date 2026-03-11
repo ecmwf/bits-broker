@@ -37,7 +37,8 @@ All actions receive a job. The fields relevant to action authors:
 
 A check reads the job and returns `Pass` or `Reject`.
 
-**Rust**
+{{#tabs global="lang" }}
+{{#tab name="Rust" }}
 
 ```rust
 use bits::actions::{ActionError, CheckAction, CheckResult};
@@ -68,7 +69,8 @@ impl CheckAction for HasLicense {
 bits::register_action!(check, "has_license", HasLicense);
 ```
 
-**Python**
+{{#endtab }}
+{{#tab name="Python" }}
 
 ```python
 from bits_py import CheckAction, Pass, Reject, register_action
@@ -88,6 +90,9 @@ class HasLicense(CheckAction):
 register_action("has_license", HasLicense)
 ```
 
+{{#endtab }}
+{{#endtabs }}
+
 **YAML**
 
 ```yaml
@@ -103,7 +108,8 @@ checks:
 
 A transform mutates `job.request` and/or `job.metadata`, then returns `Continue`.
 
-**Rust**
+{{#tabs global="lang" }}
+{{#tab name="Rust" }}
 
 ```rust
 use bits::actions::{ActionError, TransformAction, TransformResult};
@@ -135,7 +141,8 @@ impl TransformAction for ComputeCost {
 bits::register_action!(transform, "compute_cost", ComputeCost);
 ```
 
-**Python**
+{{#endtab }}
+{{#tab name="Python" }}
 
 ```python
 from bits_py import TransformAction, Continue, register_action
@@ -154,9 +161,12 @@ class ComputeCost(TransformAction):
 register_action("compute_cost", ComputeCost)
 ```
 
-> **Python note:** Mutations to `job.request` and `job.metadata` are propagated back into the
+> **Note:** Mutations to `job.request` and `job.metadata` are propagated back into the
 > Rust pipeline only when you **assign** to the attribute (e.g. `job.metadata = new_dict`).
 > Mutating the returned dict in-place without reassigning has no effect.
+
+{{#endtab }}
+{{#endtabs }}
 
 **YAML**
 
@@ -181,7 +191,12 @@ A target dispatches the job and returns one of four outcome types:
 | `Error(message)` | Job-level error (invalid request, auth failure, etc.). |
 | `Reject(reason)` | This route cannot handle the job — try the next branch. |
 
-**Rust**
+When using `target::remote`, an external worker can return the same redirect outcome by posting
+`{"status":"redirect", "location":"...", "message":"..."}` to
+`POST /complete/{job_id}`. See [External Workers](external-workers.md).
+
+{{#tabs global="lang" }}
+{{#tab name="Rust" }}
 
 ```rust
 use bits::actions::{ActionError, TargetAction, TargetResult};
@@ -234,7 +249,8 @@ impl TargetAction for MyHttpTarget {
 bits::register_action!(target, "my_http", MyHttpTarget);
 ```
 
-**Python**
+{{#endtab }}
+{{#tab name="Python" }}
 
 ```python
 import aiohttp
@@ -259,6 +275,9 @@ class MyHttpTarget(TargetAction):
 register_action("my_http", MyHttpTarget)
 ```
 
+{{#endtab }}
+{{#endtabs }}
+
 **YAML**
 
 ```yaml
@@ -272,7 +291,10 @@ targets:
 
 ## Registration
 
-### Rust: `register_action!` macro
+{{#tabs global="lang" }}
+{{#tab name="Rust" }}
+
+### `register_action!` macro
 
 Call the macro at the bottom of the same file as the implementation. It uses the
 [`inventory`](https://docs.rs/inventory) crate for compile-time distributed registration — no
@@ -287,7 +309,42 @@ bits::register_action!(target,    "my_target",    MyTarget);
 The macro deserialises the YAML config block into your struct via `serde_json`. Your struct must
 derive `Deserialize`. All YAML keys except `type` and `dispatcher` are passed as config fields.
 
-### Python: `register_action(name, class)`
+### Crate setup
+
+Actions can live in any crate that depends on `bits`. A minimal `Cargo.toml`:
+
+```toml
+[dependencies]
+bits        = { path = "../bits" }
+async-trait = "0.1"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+inventory   = "0.3"
+```
+
+Make sure the crate is actually linked into your binary. `inventory` relies on static
+initialisation, which only fires if the crate is linked. If the action crate is not a direct
+dependency of the binary, add an explicit `use` to force linkage.
+
+### Error handling
+
+Prefer returning `Reject { reason }` for expected policy rejections (wrong role, wrong class,
+etc.). Reserve `Err(ActionError)` for unexpected system failures.
+
+| Variant | When to use |
+|---------|-------------|
+| `NetworkError(msg)` | A transient upstream call failed. |
+| `ConfigError(msg)` | The action was misconfigured. Typically raised during `serde` deserialisation. |
+| `AuthError(msg)` | The job lacks required credentials. |
+| `ResourceError(msg)` | A required resource (quota, license, etc.) is unavailable. |
+| `Timeout(msg)` | An operation timed out. |
+| `Cancelled` | The job was cancelled. Check `job.is_cancelled()` in long-running actions. |
+| `ClientGone` | The client disconnected before the result could be delivered. |
+
+{{#endtab }}
+{{#tab name="Python" }}
+
+### `register_action(name, class)`
 
 Call `register_action` **before** `Bits.from_config`. Registration is validated immediately:
 
@@ -316,41 +373,10 @@ checks:
     role: admin        # → MyCheck(role="admin")
 ```
 
----
+### Error handling
 
-## Crate setup (Rust)
+Prefer returning `Reject(reason)` for expected policy rejections. For unexpected failures,
+raise an exception — it surfaces as a `Failed` result to the client.
 
-Actions can live in any crate that depends on `bits`. A minimal `Cargo.toml`:
-
-```toml
-[dependencies]
-bits        = { path = "../bits" }
-async-trait = "0.1"
-serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
-inventory   = "0.3"
-```
-
-Make sure the crate is actually linked into your binary. `inventory` relies on static
-initialisation, which only fires if the crate is linked. If the action crate is not a direct
-dependency of the binary, add an explicit `use` to force linkage.
-
----
-
-## Error handling (Rust)
-
-Prefer returning `Reject { reason }` for expected policy rejections (wrong role, wrong class,
-etc.). Reserve `Err(ActionError)` for unexpected system failures.
-
-| Variant | When to use |
-|---------|-------------|
-| `NetworkError(msg)` | A transient upstream call failed. |
-| `ConfigError(msg)` | The action was misconfigured. Typically raised during `serde` deserialisation. |
-| `AuthError(msg)` | The job lacks required credentials. |
-| `ResourceError(msg)` | A required resource (quota, license, etc.) is unavailable. |
-| `Timeout(msg)` | An operation timed out. |
-| `Cancelled` | The job was cancelled. Check `job.is_cancelled()` in long-running actions. |
-| `ClientGone` | The client disconnected before the result could be delivered. |
-
-In Python, raising an unhandled exception from an action method surfaces as a `Failed` result
-to the client.
+{{#endtab }}
+{{#endtabs }}

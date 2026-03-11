@@ -6,3 +6,9 @@ title = "BITS Documentation"
 
 [build]
 build-dir = "book"
+
+[preprocessor.tabs]
+
+[output.html]
+additional-css = ["theme/tabs.css"]
+additional-js = ["theme/tabs.js"]

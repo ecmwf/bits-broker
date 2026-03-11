@@ -3,8 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Page not found - BITS Documentation</title>
-        <base href="/">
+        <title>External Workers - BITS Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -176,14 +175,279 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="document-not-found-404"><a class="header" href="#document-not-found-404">Document not found (404)</a></h1>
-<p>This URL is invalid, sorry. Please use the navigation bar or search to continue.</p>
+                        <h1 id="external-workers"><a class="header" href="#external-workers">External Workers</a></h1>
+<p>BITS can hand jobs to custom remote workers with <code>target::remote</code> and
+<code>executor: remote_pool</code>.</p>
+<p>This mode is useful when:</p>
+<ul>
+<li>worker code lives outside the broker process,</li>
+<li>workers need their own runtime, dependencies, or hardware,</li>
+<li>you want pull-based execution (workers fetch work when ready).</li>
+</ul>
+<h2 id="1-configure-a-remote-target"><a class="header" href="#1-configure-a-remote-target">1) Configure a remote target</a></h2>
+<p>You can define a named target:</p>
+<pre><code class="language-yaml">targets:
+  worker_pool:
+    type: remote
+    dispatcher:
+      queue: cost_weighted
+      executor:
+        remote_pool:
+          bind: "0.0.0.0:9001"
+          heartbeat_timeout_secs: 60
+
+routes:
+  default:
+    - target::worker_pool
+</code></pre>
+<p>Or inline:</p>
+<pre><code class="language-yaml">routes:
+  default:
+    - target::remote: ~
+      dispatcher:
+        executor:
+          remote_pool:
+            bind: "0.0.0.0:9001"
+            heartbeat_timeout_secs: 60
+</code></pre>
+<p>Important rules:</p>
+<ul>
+<li><code>target::remote</code> must use <code>executor: remote_pool</code>.</li>
+<li><code>executor: remote_pool</code> is only valid with <code>target::remote</code>.</li>
+<li>If you use <code>target::remote</code> without an explicit executor, BITS injects a default
+remote pool config (<code>bind: 0.0.0.0:9001</code>, <code>heartbeat_timeout_secs: 60</code>).</li>
+</ul>
+<h2 id="2-worker-api-contract"><a class="header" href="#2-worker-api-contract">2) Worker API contract</a></h2>
+<p>When <code>remote_pool</code> is configured, BITS starts an HTTP server with three endpoints.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Endpoint</th><th>Method</th><th>Purpose</th><th>Success codes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>/work?timeout_ms=N</code></td><td><code>GET</code></td><td>Long-poll for one available job</td><td><code>200</code>, <code>204</code></td></tr>
+<tr><td><code>/heartbeat/{job_id}</code></td><td><code>POST</code></td><td>Keep an in-progress job alive</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/complete/{job_id}</code></td><td><code>POST</code></td><td>Submit final job outcome</td><td><code>200</code>, <code>404</code></td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="get-worktimeout_msn"><a class="header" href="#get-worktimeout_msn"><code>GET /work?timeout_ms=N</code></a></h3>
+<ul>
+<li>Blocks until a job is available or timeout expires.</li>
+<li>Returns <code>200 OK</code> with JSON when a job is assigned.</li>
+<li>Returns <code>204 No Content</code> on timeout (no work available).</li>
+</ul>
+<p>Response body:</p>
+<pre><code class="language-json">{
+  "job_id": "broker-a123~9d2f...",
+  "request": {"dataset": "era5"},
+  "user": {"id": "alice"},
+  "metadata": {"cost": 2.0}
+}
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li><code>request</code> is the transformed request as it reached the remote target step.</li>
+<li><code>metadata</code> includes values produced by earlier transforms.</li>
+<li>One poll returns at most one job.</li>
+</ul>
+<h3 id="post-heartbeatjob_id"><a class="header" href="#post-heartbeatjob_id"><code>POST /heartbeat/{job_id}</code></a></h3>
+<p>Send heartbeats while processing a job.</p>
+<ul>
+<li><code>200 OK</code>: heartbeat accepted.</li>
+<li><code>404 Not Found</code>: job is no longer in progress (already completed, evicted, or unknown).</li>
+</ul>
+<p>If no heartbeat arrives within <code>heartbeat_timeout_secs</code>, BITS evicts the in-progress job and
+the broker side returns a failed result.</p>
+<h3 id="post-completejob_id"><a class="header" href="#post-completejob_id"><code>POST /complete/{job_id}</code></a></h3>
+<p>Submit exactly one terminal outcome for a claimed job.</p>
+<p><code>status: complete</code>:</p>
+<pre><code class="language-json">{
+  "status": "complete",
+  "content_type": "application/json",
+  "body": "{\"result\":42}"
+}
+</code></pre>
+<p><code>status: reject</code>:</p>
+<pre><code class="language-json">{
+  "status": "reject",
+  "reason": "unsupported request"
+}
+</code></pre>
+<p><code>status: redirect</code>:</p>
+<pre><code class="language-json">{
+  "status": "redirect",
+  "location": "https://my-bucket.s3.amazonaws.com/path/object.grib?X-Amz-Signature=...",
+  "message": "Download is ready"
+}
+</code></pre>
+<p><code>message</code> is optional for <code>redirect</code>.</p>
+<p><code>status: error</code>:</p>
+<pre><code class="language-json">{
+  "status": "error",
+  "message": "worker internal failure"
+}
+</code></pre>
+<p>Response codes:</p>
+<ul>
+<li><code>200 OK</code>: completion accepted.</li>
+<li><code>404 Not Found</code>: job is not in progress (unknown, already completed, or heartbeat timed out).</li>
+</ul>
+<h2 id="3-end-to-end-flow"><a class="header" href="#3-end-to-end-flow">3) End-to-end flow</a></h2>
+<ol>
+<li>Client submits job to BITS.</li>
+<li>Route reaches <code>target::remote</code>.</li>
+<li>BITS queues the job in the remote pool.</li>
+<li>A worker long-polls <code>/work</code> and receives job payload.</li>
+<li>Worker processes job and sends periodic <code>/heartbeat/{job_id}</code>.</li>
+<li>Worker posts final outcome to <code>/complete/{job_id}</code>.</li>
+<li>BITS unblocks the waiting route and returns result to the client.</li>
+</ol>
+<h2 id="4-outcome-mapping-inside-bits"><a class="header" href="#4-outcome-mapping-inside-bits">4) Outcome mapping inside BITS</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Worker outcome</th><th>Internal action result</th><th>Client-visible effect</th></tr>
+</thead>
+<tbody>
+<tr><td><code>complete</code></td><td><code>TargetResult::Complete(JobResult::Success)</code></td><td>Success response with worker <code>content_type</code> and <code>body</code></td></tr>
+<tr><td><code>redirect</code></td><td><code>TargetResult::Complete(JobResult::Redirect)</code></td><td>Redirect response (for HTTP frontends typically <code>303 See Other</code> with <code>Location</code>)</td></tr>
+<tr><td><code>reject</code></td><td><code>TargetResult::Reject</code></td><td>Current route is rejected; switch tries next route. If none match, client gets an error</td></tr>
+<tr><td><code>error</code></td><td><code>ActionError::ResourceError</code></td><td>Job becomes <code>Failed</code></td></tr>
+<tr><td>Heartbeat timeout / worker disconnect</td><td><code>ActionError::ResourceError</code></td><td>Job becomes <code>Failed</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="5-worker-implementation-checklist"><a class="header" href="#5-worker-implementation-checklist">5) Worker implementation checklist</a></h2>
+<ul>
+<li>Long-poll <code>/work</code> continuously (with jittered retry on transport errors).</li>
+<li>Start heartbeating immediately after receiving a job.</li>
+<li>Stop heartbeating once <code>/complete/{job_id}</code> returns <code>200</code> or <code>404</code>.</li>
+<li>Treat <code>404</code> from heartbeat or complete as terminal for that job.</li>
+<li>Distinguish business rejection (<code>status: reject</code>) from execution failure (<code>status: error</code>).</li>
+<li>Use <code>status: redirect</code> when data should be fetched from object storage rather than streamed
+through BITS.</li>
+<li>Make processing idempotent where possible (network retries and worker restarts happen).</li>
+</ul>
+<h2 id="6-minimal-worker-loop-python"><a class="header" href="#6-minimal-worker-loop-python">6) Minimal worker loop (Python)</a></h2>
+<pre><code class="language-python">import asyncio
+import aiohttp
+
+BASE = "http://bits-broker:9001"
+WORK_TIMEOUT_MS = 30000
+HEARTBEAT_PERIOD_SECS = 10
+
+async def heartbeat_loop(session: aiohttp.ClientSession, job_id: str, stop: asyncio.Event):
+    while not stop.is_set():
+        await asyncio.sleep(HEARTBEAT_PERIOD_SECS)
+        async with session.post(f"{BASE}/heartbeat/{job_id}") as resp:
+            if resp.status == 404:
+                stop.set()
+                return
+
+async def process_job(work: dict) -&gt; tuple[str, dict]:
+    req = work["request"]
+    if "dataset" not in req:
+        return "reject", {"reason": "dataset is required"}
+    result = {"ok": True, "dataset": req["dataset"]}
+    return "complete", {
+        "content_type": "application/json",
+        "body": __import__("json").dumps(result),
+    }
+
+async def worker():
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(
+                    f"{BASE}/work", params={"timeout_ms": WORK_TIMEOUT_MS}
+                ) as resp:
+                    if resp.status == 204:
+                        continue
+                    resp.raise_for_status()
+                    work = await resp.json()
+            except Exception:
+                await asyncio.sleep(1.0)
+                continue
+
+            job_id = work["job_id"]
+            stop = asyncio.Event()
+            hb_task = asyncio.create_task(heartbeat_loop(session, job_id, stop))
+            try:
+                status, payload = await process_job(work)
+                body = {"status": status, **payload}
+                async with session.post(f"{BASE}/complete/{job_id}", json=body) as done:
+                    # 200 = accepted, 404 = no longer active; both terminal for worker
+                    if done.status not in (200, 404):
+                        done.raise_for_status()
+            except Exception as exc:
+                async with session.post(
+                    f"{BASE}/complete/{job_id}",
+                    json={"status": "error", "message": str(exc)},
+                ):
+                    pass
+            finally:
+                stop.set()
+                await hb_task
+
+if __name__ == "__main__":
+    asyncio.run(worker())
+</code></pre>
+<h2 id="7-example-redirect-to-s3-download"><a class="header" href="#7-example-redirect-to-s3-download">7) Example: redirect to S3 download</a></h2>
+<p>If your worker uploads output to S3 (or another object store), return <code>redirect</code> instead of
+streaming bytes through BITS:</p>
+<pre><code class="language-python">import aioboto3
+
+async def process_job(work: dict) -&gt; tuple[str, dict]:
+    req = work["request"]
+    key = f"results/{work['job_id']}.json"
+
+    async with aioboto3.Session().client("s3") as s3:
+        await s3.put_object(
+            Bucket="my-results-bucket",
+            Key=key,
+            Body=b'{"status":"ready"}',
+            ContentType="application/json",
+        )
+        url = await s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": "my-results-bucket", "Key": key},
+            ExpiresIn=3600,
+        )
+
+    return "redirect", {
+        "location": url,
+        "message": "Result stored in S3",
+    }
+</code></pre>
+<p>The worker then posts this payload to <code>/complete/{job_id}</code>:</p>
+<pre><code class="language-json">{
+  "status": "redirect",
+  "location": "https://my-results-bucket.s3.amazonaws.com/results/abc.json?...",
+  "message": "Result stored in S3"
+}
+</code></pre>
+<h2 id="8-operational-guidance"><a class="header" href="#8-operational-guidance">8) Operational guidance</a></h2>
+<ul>
+<li>Run the worker API on a trusted internal network. The remote pool endpoints do not implement
+authentication themselves.</li>
+<li>Scale throughput by running more workers polling <code>/work</code>.</li>
+<li>Use route dispatchers (for example <code>queue: cost_weighted</code>) to control which jobs workers
+receive first.</li>
+<li>Choose <code>heartbeat_timeout_secs</code> to match expected execution time and heartbeat cadence.</li>
+</ul>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="custom-actions.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
 
+                            <a rel="next prefetch" href="persistence.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
 
                         <div style="clear: both"></div>
                     </nav>
@@ -191,7 +455,13 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="custom-actions.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
 
+                    <a rel="next prefetch" href="persistence.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
             </nav>
 
         </div>

@@ -168,6 +168,13 @@ fn compute_accuracy(jobs: &[ScheduledJob], pops: &[PopEvent]) -> AccuracyReport 
 
 async fn run_accuracy_trial(scenario: &AccuracyScenario) -> (Duration, AccuracyReport) {
     let q = Arc::new(AgePriorityQueue::new());
+    run_accuracy_trial_with_queue(q, scenario).await
+}
+
+async fn run_accuracy_trial_with_queue<Q: Queue + 'static>(
+    q: Arc<Q>,
+    scenario: &AccuracyScenario,
+) -> (Duration, AccuracyReport) {
     let jobs = scenario.jobs.clone();
     let producer_q = Arc::clone(&q);
     let started_at = std::time::Instant::now();
@@ -294,6 +301,7 @@ fn bench_sequential_drain(c: &mut Criterion) {
                 }
             });
         });
+
     }
 
     group.finish();
@@ -391,6 +399,7 @@ fn bench_concurrent_fan_out(c: &mut Criterion) {
                 }
             });
         });
+
     }
 
     group.finish();

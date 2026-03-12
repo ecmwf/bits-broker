@@ -12,6 +12,7 @@ use crate::db::{BrokerLeaseRecord, ClaimResult, DbError, PersistenceStore, Persi
 use crate::job::Job;
 use crate::result::JobResult;
 use crate::routing::switch::Switch;
+use crate::server::ServerConfig;
 
 /// Buffer added on top of the poll timeout to allow for the reconnect round-trip.
 const RECONNECT_BUFFER: Duration = Duration::from_secs(5);
@@ -54,6 +55,7 @@ pub struct Bits {
     persist_after: Option<Duration>,
     job_store: Option<Arc<dyn PersistenceStore>>,
     internal_client: reqwest::Client,
+    server_config: ServerConfig,
 }
 
 enum LeaseLookup {
@@ -85,6 +87,7 @@ impl Bits {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to build reqwest client"),
+            server_config: ServerConfig::default(),
         };
         start_sweeper(bits.jobs.clone(), DEFAULT_SWEEP_INTERVAL);
         bits.start_broker_lease_heartbeat(broker_lease_ttl);
@@ -106,12 +109,18 @@ impl Bits {
             internal_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
+            server_config: parsed.server_config,
         };
 
         start_sweeper(bits.jobs.clone(), sweep_interval);
         bits.start_broker_lease_heartbeat(parsed.broker_lease_ttl);
 
         Ok(bits)
+    }
+
+    /// Returns the server configuration parsed from the `server:` YAML section.
+    pub fn server_config(&self) -> &ServerConfig {
+        &self.server_config
     }
 
     pub fn submit(&self, job: Job) -> JobHandle {

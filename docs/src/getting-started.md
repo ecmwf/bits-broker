@@ -52,6 +52,15 @@ Then run the HTTP server example:
 python bits/examples/python_http_server.py
 ```
 
+Or run the smaller Python examples under:
+
+```bash
+python bits-py/examples/hello_bits.py
+python bits-py/examples/custom_check.py
+python bits-py/examples/custom_target.py
+python bits-py/examples/custom_transform.py
+```
+
 ## Preview these docs
 
 Once `mdbook` is installed:

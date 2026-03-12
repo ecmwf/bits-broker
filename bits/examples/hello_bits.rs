@@ -1,6 +1,6 @@
 //! Demonstrates custom actions and job routing.
 //!
-//!     cargo run --example routing
+//!     cargo run --example hello_bits
 
 use async_trait::async_trait;
 use bits::*;

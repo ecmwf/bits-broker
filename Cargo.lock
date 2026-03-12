@@ -246,7 +246,6 @@ name = "bits-ecmwf"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum 0.8.8",
  "bits",
  "bytes",
  "chrono",
@@ -273,6 +272,15 @@ dependencies = [
  "pythonize",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "bits-server"
+version = "0.1.0"
+dependencies = [
+ "bits",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

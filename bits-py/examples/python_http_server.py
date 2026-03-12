@@ -2,7 +2,7 @@
 """Minimal asyncio-native HTTP server built on top of bits_py.
 
 Run with:
-  python bits/examples/python_http_server.py
+  python bits-py/examples/python_http_server.py
 """
 
 import asyncio

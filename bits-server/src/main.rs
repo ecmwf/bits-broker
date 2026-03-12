@@ -1,9 +1,9 @@
-// bits-ecmwf: the BITS HTTP service with ECMWF actions pre-loaded.
+// bits-server: a generic BITS HTTP service.
 //
-// ECMWF actions are registered automatically at startup via inventory.
-// Configure via a YAML file passed as the first argument.
+// Starts the built-in HTTP server with routes and actions defined
+// entirely by the YAML configuration file.
 //
-// Usage: bits-ecmwf <config.yaml>
+// Usage: bits-server <config.yaml>
 
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config_path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: bits-ecmwf <config.yaml>");
+        eprintln!("usage: bits-server <config.yaml>");
         std::process::exit(1);
     });
     let config_str = std::fs::read_to_string(&config_path)?;

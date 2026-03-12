@@ -12,12 +12,8 @@ default = []
 tikv = ["dep:tikv-client"]
 
 [[example]]
-name = "routing"
-path = "examples/routing.rs"
-
-[[example]]
-name = "http_server"
-path = "examples/http_server.rs"
+name = "hello_bits"
+path = "examples/hello_bits.rs"
 
 [dependencies]
 async-trait = "0.1.88"
@@ -44,7 +40,7 @@ tikv-client = { version = "0.3", optional = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 [[bench]]
-name = "bits_noop"
+name = "pipelines"
 harness = false
 
 [[bench]]

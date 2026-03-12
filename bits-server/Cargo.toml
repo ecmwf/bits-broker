@@ -1,0 +1,13 @@
+[package]
+name = "bits-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bits-server"
+path = "src/main.rs"
+
+[dependencies]
+bits = { path = "../bits" }
+tokio = { version = "1.46.1", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

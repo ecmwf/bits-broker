@@ -1,0 +1,147 @@
+//! Generic HTTP server for the bits broker.
+//!
+//! Exposes a jobs endpoint:
+//!   POST /job          — submit a job; long-polls up to the configured timeout, then redirects
+//!   GET  /job/{id}     — reconnect after a poll redirect
+//!
+//! Usage from a binary crate:
+//! ```ignore
+//! let bits = Arc::new(Bits::from_config(&config_str)?);
+//! let server_config = bits.server_config().clone();
+//! bits::server::serve(bits, server_config).await?;
+//! ```
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::Body;
+use axum::extract::{Json, Path, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use serde::Deserialize;
+use serde_json::Value;
+use tokio::net::TcpListener;
+
+use crate::{Bits, Job, JobResult, PollOutcome};
+
+const DEFAULT_BIND: &str = "0.0.0.0:8080";
+const DEFAULT_POLL_TIMEOUT_MS: u64 = 25_000;
+
+/// Configuration for the built-in HTTP server.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    /// Socket address to bind to (e.g. `"0.0.0.0:8080"`).
+    #[serde(default = "default_bind")]
+    pub bind: String,
+
+    /// Long-poll timeout in milliseconds for the initial submit response
+    /// and reconnect polls.
+    #[serde(default = "default_poll_timeout_ms")]
+    pub poll_timeout_ms: u64,
+}
+
+fn default_bind() -> String {
+    DEFAULT_BIND.to_string()
+}
+
+fn default_poll_timeout_ms() -> u64 {
+    DEFAULT_POLL_TIMEOUT_MS
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_bind(),
+            poll_timeout_ms: default_poll_timeout_ms(),
+        }
+    }
+}
+
+impl ServerConfig {
+    /// Returns the poll timeout as a [`Duration`].
+    pub fn poll_timeout(&self) -> Duration {
+        Duration::from_millis(self.poll_timeout_ms)
+    }
+}
+
+// ── Axum state ──────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct AppState {
+    bits: Arc<Bits>,
+    poll_timeout: Duration,
+}
+
+// ── Public entry point ──────────────────────────────────────────────────────
+
+/// Start the HTTP server, binding to the address in `config`.
+///
+/// This function runs until the process is terminated.
+pub async fn serve(
+    bits: Arc<Bits>,
+    config: ServerConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = AppState {
+        bits,
+        poll_timeout: config.poll_timeout(),
+    };
+
+    let app = Router::new()
+        .route("/job", post(submit_job))
+        .route("/job/{id}", get(poll_job))
+        .with_state(state);
+
+    let listener = TcpListener::bind(&config.bind).await?;
+    tracing::info!(address = %listener.local_addr()?, "bits server listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+// ── Handlers ────────────────────────────────────────────────────────────────
+
+async fn submit_job(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    let handle = state.bits.submit(Job::new(body));
+    poll_by_id(&handle.id, &state).await
+}
+
+async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Response {
+    poll_by_id(&id, &state).await
+}
+
+async fn poll_by_id(id: &str, state: &AppState) -> Response {
+    match state.bits.poll(id, Some(state.poll_timeout)).await {
+        PollOutcome::Ready(result) => result_to_response(result),
+        PollOutcome::Pending { id } => (
+            StatusCode::SEE_OTHER,
+            [
+                (header::LOCATION, format!("/job/{id}")),
+                (header::RETRY_AFTER, "0".to_string()),
+            ],
+        )
+            .into_response(),
+        PollOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
+        PollOutcome::JobLost => StatusCode::GONE.into_response(),
+    }
+}
+
+fn result_to_response(result: JobResult) -> Response {
+    match result {
+        JobResult::Success {
+            content_type,
+            stream,
+            ..
+        } => (
+            [(header::CONTENT_TYPE, content_type)],
+            Body::from_stream(stream),
+        )
+            .into_response(),
+        JobResult::Redirect { location, .. } => {
+            (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
+        }
+        JobResult::Error { message } => (StatusCode::BAD_REQUEST, message).into_response(),
+        JobResult::Failed { reason } => (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response(),
+        JobResult::Cancelled | JobResult::ClientGone => StatusCode::GONE.into_response(),
+    }
+}

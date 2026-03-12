@@ -10,6 +10,7 @@ use crate::db::PersistenceStore;
 use crate::dispatcher::{Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig};
 use crate::routing::registry::create_action;
 use crate::routing::{Route, switch::Switch};
+use crate::server::ServerConfig;
 
 struct Registries {
     checks: HashMap<String, serde_json::Value>,
@@ -73,6 +74,7 @@ pub(crate) struct ParsedConfig {
     pub job_store: Option<Arc<dyn PersistenceStore>>,
     pub broker_lease_ttl: Duration,
     pub persist_after: Option<Duration>,
+    pub server_config: ServerConfig,
 }
 
 pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::error::Error>> {
@@ -140,6 +142,13 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
         ),
     };
 
+    let server_config: ServerConfig = raw
+        .get("server")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+
     let checks: HashMap<String, serde_json::Value> = raw
         .get("checks")
         .map(|v| serde_json::from_value(v.clone()))
@@ -191,6 +200,7 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
         job_store,
         broker_lease_ttl,
         persist_after,
+        server_config,
     })
 }
 

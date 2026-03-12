@@ -99,8 +99,14 @@ async fn worker(mut rx: mpsc::UnboundedReceiver<WorkerCmd>) {
         while !waiters.is_empty() && !heap.is_empty() {
             let reply = waiters.pop_front().unwrap();
             let entry = heap.pop().unwrap();
-            if reply.send(entry.job).is_err() {
-                // Caller cancelled — skip and try next waiter.
+            if let Err(job) = reply.send(entry.job) {
+                // Caller cancelled — re-enqueue the job so it isn't lost.
+                let cost = job.metadata["cost"].as_u64().unwrap_or(0);
+                heap.push(Entry {
+                    cost,
+                    seq: entry.seq,
+                    job,
+                });
             }
         }
     }

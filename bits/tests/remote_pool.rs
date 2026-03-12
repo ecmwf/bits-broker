@@ -49,6 +49,23 @@ routes:
     Bits::from_config(&config).expect("config error")
 }
 
+fn make_bits_with_queue(port: u16, heartbeat_timeout_secs: f64, queue: &str) -> Bits {
+    let config = format!(
+        r#"
+routes:
+  default:
+    - target::remote: ~
+      dispatcher:
+        queue: {queue}
+        executor:
+          remote_pool:
+            bind: "127.0.0.1:{port}"
+            heartbeat_timeout_secs: {heartbeat_timeout_secs}
+"#
+    );
+    Bits::from_config(&config).expect("config error")
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 /// Happy path: worker polls, sends a heartbeat, then streams a completion body.
@@ -359,4 +376,289 @@ async fn heartbeat_timeout_evicts_job() {
         PollOutcome::Ready(JobResult::Failed { .. }) => {}
         other => panic!("expected Failed after heartbeat timeout, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn multiple_workers_polling_get_distinct_jobs() {
+    let port = free_port().await;
+    let bits = make_bits(port, 60.0);
+    wait_for_server(port).await;
+
+    let h1 = bits.submit(Job::new(serde_json::json!({"n": 1})));
+    let h2 = bits.submit(Job::new(serde_json::json!({"n": 2})));
+    let client = Client::new();
+
+    let (r1, r2) = tokio::join!(
+        client
+            .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+            .send(),
+        client
+            .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+            .send(),
+    );
+
+    let w1: serde_json::Value = r1.unwrap().json().await.unwrap();
+    let w2: serde_json::Value = r2.unwrap().json().await.unwrap();
+
+    let id1 = w1["job_id"].as_str().unwrap().to_string();
+    let id2 = w2["job_id"].as_str().unwrap().to_string();
+    assert_ne!(id1, id2, "two workers should not receive the same job");
+
+    client
+        .post(format!("http://127.0.0.1:{port}/complete/reject/{id1}"))
+        .json(&serde_json::json!({"reason": "done"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("http://127.0.0.1:{port}/complete/reject/{id2}"))
+        .json(&serde_json::json!({"reason": "done"}))
+        .send()
+        .await
+        .unwrap();
+
+    let _ = bits.poll(&h1.id, Some(Duration::from_secs(5))).await;
+    let _ = bits.poll(&h2.id, Some(Duration::from_secs(5))).await;
+}
+
+#[tokio::test]
+async fn worker_cannot_complete_same_job_twice() {
+    let port = free_port().await;
+    let bits = make_bits(port, 60.0);
+    wait_for_server(port).await;
+
+    let handle = bits.submit(Job::new(serde_json::json!({"class": "od"})));
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+    let work: serde_json::Value = resp.json().await.unwrap();
+    let job_id = work["job_id"].as_str().unwrap();
+
+    let first = client
+        .post(format!("http://127.0.0.1:{port}/complete/reject/{job_id}"))
+        .json(&serde_json::json!({"reason": "first"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+
+    let second = client
+        .post(format!("http://127.0.0.1:{port}/complete/reject/{job_id}"))
+        .json(&serde_json::json!({"reason": "second"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 404);
+
+    let _ = bits.poll(&handle.id, Some(Duration::from_secs(5))).await;
+}
+
+#[tokio::test]
+async fn heartbeat_after_completion_returns_404() {
+    let port = free_port().await;
+    let bits = make_bits(port, 60.0);
+    wait_for_server(port).await;
+
+    let handle = bits.submit(Job::new(serde_json::json!({"class": "od"})));
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+    let work: serde_json::Value = resp.json().await.unwrap();
+    let job_id = work["job_id"].as_str().unwrap();
+
+    client
+        .post(format!("http://127.0.0.1:{port}/complete/reject/{job_id}"))
+        .json(&serde_json::json!({"reason": "done"}))
+        .send()
+        .await
+        .unwrap();
+
+    let hb = client
+        .post(format!("http://127.0.0.1:{port}/heartbeat/{job_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hb.status(), 404);
+
+    let _ = bits.poll(&handle.id, Some(Duration::from_secs(5))).await;
+}
+
+#[tokio::test]
+async fn remote_pool_preserves_cost_weighted_ordering() {
+    let port = free_port().await;
+    let bits = make_bits_with_queue(port, 60.0, "cost_weighted");
+    wait_for_server(port).await;
+
+    let blocker = bits.submit(Job::new(serde_json::json!({"kind": "blocker", "cost": 0})));
+    let client = Client::new();
+
+    let blocker_resp = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+    let blocker_work: serde_json::Value = blocker_resp.json().await.unwrap();
+    let blocker_id = blocker_work["job_id"].as_str().unwrap().to_string();
+
+    let mut expensive = Job::new(serde_json::json!({"label": "expensive"}));
+    expensive.metadata["cost"] = serde_json::json!(100u64);
+    let h_expensive = bits.submit(expensive);
+
+    let mut cheap = Job::new(serde_json::json!({"label": "cheap"}));
+    cheap.metadata["cost"] = serde_json::json!(1u64);
+    let h_cheap = bits.submit(cheap);
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    client
+        .post(format!("http://127.0.0.1:{port}/complete/reject/{blocker_id}"))
+        .json(&serde_json::json!({"reason": "release blocker"}))
+        .send()
+        .await
+        .unwrap();
+
+    let first = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+    let second = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+
+    let first_work: serde_json::Value = first.json().await.unwrap();
+    let second_work: serde_json::Value = second.json().await.unwrap();
+
+    assert_eq!(first_work["request"]["label"], "cheap");
+    assert_eq!(second_work["request"]["label"], "expensive");
+
+    client
+        .post(format!(
+            "http://127.0.0.1:{port}/complete/reject/{}",
+            first_work["job_id"].as_str().unwrap()
+        ))
+        .json(&serde_json::json!({"reason": "done"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!(
+            "http://127.0.0.1:{port}/complete/reject/{}",
+            second_work["job_id"].as_str().unwrap()
+        ))
+        .json(&serde_json::json!({"reason": "done"}))
+        .send()
+        .await
+        .unwrap();
+
+    let _ = bits.poll(&blocker.id, Some(Duration::from_secs(5))).await;
+    let _ = bits.poll(&h_expensive.id, Some(Duration::from_secs(5))).await;
+    let _ = bits.poll(&h_cheap.id, Some(Duration::from_secs(5))).await;
+}
+
+#[tokio::test]
+async fn remote_pool_preserves_age_priority_ordering() {
+    let port = free_port().await;
+    let bits = make_bits_with_queue(port, 60.0, "age_priority");
+    wait_for_server(port).await;
+
+    let blocker = bits.submit(Job::new(serde_json::json!({"kind": "blocker"})));
+    let client = Client::new();
+
+    let blocker_resp = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+    let blocker_work: serde_json::Value = blocker_resp.json().await.unwrap();
+    let blocker_id = blocker_work["job_id"].as_str().unwrap().to_string();
+
+    let mut expensive = Job::new(serde_json::json!({"label": "expensive"}));
+    expensive.metadata["cost"] = serde_json::json!(100u64);
+    let h_expensive = bits.submit(expensive);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut cheap = Job::new(serde_json::json!({"label": "cheap"}));
+    cheap.metadata["cost"] = serde_json::json!(1u64);
+    let h_cheap = bits.submit(cheap);
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    client
+        .post(format!("http://127.0.0.1:{port}/complete/reject/{blocker_id}"))
+        .json(&serde_json::json!({"reason": "release blocker"}))
+        .send()
+        .await
+        .unwrap();
+
+    let first = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+    let second = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=5000"))
+        .send()
+        .await
+        .unwrap();
+
+    let first_work: serde_json::Value = first.json().await.unwrap();
+    let second_work: serde_json::Value = second.json().await.unwrap();
+
+    assert_eq!(first_work["request"]["label"], "expensive");
+    assert_eq!(second_work["request"]["label"], "cheap");
+
+    client
+        .post(format!(
+            "http://127.0.0.1:{port}/complete/reject/{}",
+            first_work["job_id"].as_str().unwrap()
+        ))
+        .json(&serde_json::json!({"reason": "done"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!(
+            "http://127.0.0.1:{port}/complete/reject/{}",
+            second_work["job_id"].as_str().unwrap()
+        ))
+        .json(&serde_json::json!({"reason": "done"}))
+        .send()
+        .await
+        .unwrap();
+
+    let _ = bits.poll(&blocker.id, Some(Duration::from_secs(5))).await;
+    let _ = bits.poll(&h_expensive.id, Some(Duration::from_secs(5))).await;
+    let _ = bits.poll(&h_cheap.id, Some(Duration::from_secs(5))).await;
+}
+
+#[tokio::test]
+async fn remote_pool_skips_claimed_job_if_caller_dropped() {
+    let port = free_port().await;
+    let bits = make_bits(port, 60.0);
+    wait_for_server(port).await;
+
+    let client = Client::new();
+
+    let handle = bits.submit(Job::new(serde_json::json!({"n": 1})));
+    bits.cancel(&handle.id);
+    let _ = bits.poll(&handle.id, Some(Duration::from_secs(5))).await;
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/work?timeout_ms=50"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
 }

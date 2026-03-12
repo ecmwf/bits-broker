@@ -92,15 +92,24 @@ fn rebalance(entries: &mut Vec<Entry>) {
     entries.sort_by(|left, right| compare_entries(left, right, now));
 }
 
-fn pop_best(entries: &mut Vec<Entry>) -> Option<Job> {
-    entries.pop().map(|entry| entry.job)
-}
-
 fn service_waiters(entries: &mut Vec<Entry>, waiters: &mut VecDeque<oneshot::Sender<Job>>) {
     while !waiters.is_empty() && !entries.is_empty() {
         let reply = waiters.pop_front().unwrap();
-        let job = pop_best(entries).unwrap();
-        let _ = reply.send(job);
+        if reply.is_closed() {
+            // Caller cancelled — skip this waiter, don't pop an entry.
+            continue;
+        }
+        let entry = entries.pop().unwrap();
+        if let Err(job) = reply.send(entry.job) {
+            // Race: caller cancelled between the check and the send.
+            // Re-insert the entry so the job isn't lost.
+            entries.push(Entry {
+                cost: entry.cost,
+                seq: entry.seq,
+                enqueued_at: entry.enqueued_at,
+                job,
+            });
+        }
     }
 }
 

@@ -6,7 +6,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 
 use bits::actions::{ActionError, CheckResult, TargetResult};
-use bits::dispatcher::{Dispatcher, ExecutorKind, QueueKind};
+use bits::dispatcher::{DispatchGuard, Dispatcher, ExecutorKind, QueueKind};
 use bits::job::Job;
 use bits::result::JobResult;
 use bits::{Bits, PollOutcome};
@@ -43,8 +43,8 @@ async fn thread_pool_runs_on_os_threads() {
     });
 
     let (r1, r2) = tokio::join!(
-        dispatcher.dispatch(&job1, work1),
-        dispatcher.dispatch(&job2, work2),
+        dispatcher.dispatch(&job1, DispatchGuard::None, work1),
+        dispatcher.dispatch(&job2, DispatchGuard::None, work2),
     );
     assert!(r1.is_ok() && r2.is_ok());
 
@@ -84,8 +84,8 @@ async fn thread_pool_executes_concurrently() {
     });
 
     let (r1, r2) = tokio::join!(
-        dispatcher.dispatch(&job1, work1),
-        dispatcher.dispatch(&job2, work2),
+        dispatcher.dispatch(&job1, DispatchGuard::None, work1),
+        dispatcher.dispatch(&job2, DispatchGuard::None, work2),
     );
     assert!(r1.is_ok() && r2.is_ok());
 }
@@ -167,9 +167,9 @@ async fn check_dispatcher_cost_weighted_ordering() {
         Ok(CheckResult::Pass)
     });
 
-    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
-    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, expensive_work));
-    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, cheap_work));
+    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, DispatchGuard::None, blocker_work));
+    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, DispatchGuard::None, expensive_work));
+    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, DispatchGuard::None, cheap_work));
 
     // Give expensive + cheap time to enter the cost-weighted heap.
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -236,9 +236,9 @@ async fn target_dispatcher_cost_weighted_ordering() {
         }))
     });
 
-    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
-    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, expensive_work));
-    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, cheap_work));
+    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, DispatchGuard::None, blocker_work));
+    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, DispatchGuard::None, expensive_work));
+    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, DispatchGuard::None, cheap_work));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     let _ = release_tx.send(());
@@ -278,7 +278,7 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
             }))
         });
 
-    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
+    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, DispatchGuard::None, blocker_work));
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     let mut expensive = Job::new(serde_json::json!({}));
@@ -291,7 +291,7 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
                 message: "expensive".into(),
             }))
         });
-    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, expensive_work));
+    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, DispatchGuard::None, expensive_work));
 
     // Give expensive enough age to outrank cheap despite higher cost.
     // score = wait_time * other_cost / sqrt(own_cost).
@@ -307,7 +307,7 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
             message: "cheap".into(),
         }))
     });
-    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, cheap_work));
+    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, DispatchGuard::None, cheap_work));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     let _ = release_tx.send(());

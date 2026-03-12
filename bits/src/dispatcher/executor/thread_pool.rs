@@ -42,7 +42,7 @@ impl<T: Send + 'static> Executor<T> for ThreadPoolExecutor {
                     };
 
                     let item = pending.lock().unwrap().remove(&job.id);
-                    let Some((work, reply_tx)) = item else {
+                    let Some((_guard, work, reply_tx)) = item else {
                         // Caller cancelled before we dequeued — skip.
                         continue;
                     };

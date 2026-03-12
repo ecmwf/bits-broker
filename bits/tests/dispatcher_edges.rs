@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 
 use bits::actions::{ActionError, CheckResult};
-use bits::dispatcher::{Dispatcher, ExecutorKind, QueueKind};
+use bits::dispatcher::{DispatchGuard, Dispatcher, ExecutorKind, QueueKind};
 use bits::job::Job;
 
 // ================================
@@ -41,7 +41,7 @@ async fn async_pool_respects_concurrency_limit() {
             running.fetch_sub(1, Ordering::SeqCst);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
     }
 
     for h in handles {
@@ -82,7 +82,7 @@ async fn thread_pool_respects_concurrency_limit() {
             running.fetch_sub(1, Ordering::SeqCst);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
     }
 
     for h in handles {
@@ -122,7 +122,7 @@ async fn async_pool_fifo_preserves_order() {
             order.lock().unwrap().push(i);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
         // Small delay to ensure enqueue order is deterministic.
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -160,7 +160,7 @@ async fn thread_pool_fifo_preserves_order() {
             order.lock().unwrap().push(i);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -218,9 +218,9 @@ async fn thread_pool_cost_weighted_ordering() {
         Ok(CheckResult::Pass)
     });
 
-    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
-    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, expensive_work));
-    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, cheap_work));
+    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, DispatchGuard::None, blocker_work));
+    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, DispatchGuard::None, expensive_work));
+    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, DispatchGuard::None, cheap_work));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     let _ = release_tx.send(());
@@ -258,7 +258,7 @@ async fn thread_pool_age_priority_ordering() {
         Ok(CheckResult::Pass)
     });
 
-    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
+    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, DispatchGuard::None, blocker_work));
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     let mut expensive = Job::new(serde_json::json!({}));
@@ -269,7 +269,7 @@ async fn thread_pool_age_priority_ordering() {
             order_e.lock().unwrap().push(100);
             Ok(CheckResult::Pass)
         });
-    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, expensive_work));
+    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, DispatchGuard::None, expensive_work));
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -280,7 +280,7 @@ async fn thread_pool_age_priority_ordering() {
         order_c.lock().unwrap().push(1);
         Ok(CheckResult::Pass)
     });
-    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, cheap_work));
+    let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, DispatchGuard::None, cheap_work));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     let _ = release_tx.send(());
@@ -322,7 +322,7 @@ async fn dispatcher_default_executor_is_async_pool() {
     let work: BoxFuture<'static, Result<CheckResult, ActionError>> =
         Box::pin(async { Ok(CheckResult::Pass) });
 
-    let result = dispatcher.dispatch(&job, work).await;
+    let result = dispatcher.dispatch(&job, DispatchGuard::None, work).await;
     assert!(result.is_ok(), "default executor should run work successfully");
 }
 
@@ -348,7 +348,7 @@ async fn dispatcher_default_queue_is_fifo() {
             order.lock().unwrap().push(i);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -389,7 +389,7 @@ async fn async_pool_skips_work_if_caller_drops_before_dequeue() {
         let _ = release_rx.await;
         Ok(CheckResult::Pass)
     });
-    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
+    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, DispatchGuard::None, blocker_work));
 
     // Give blocker time to be dequeued and start running.
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -403,7 +403,7 @@ async fn async_pool_skips_work_if_caller_drops_before_dequeue() {
             Ok(CheckResult::Pass)
         });
     {
-        let fut = dispatcher.dispatch(&cancelled_job, cancelled_work);
+        let fut = dispatcher.dispatch(&cancelled_job, DispatchGuard::None, cancelled_work);
         // Pin and poll once so the pending entry + enqueue actually happen.
         let mut pinned = Box::pin(fut);
         let _ = futures::poll!(&mut pinned);
@@ -417,7 +417,7 @@ async fn async_pool_skips_work_if_caller_drops_before_dequeue() {
         ran_normal.fetch_add(10, Ordering::SeqCst);
         Ok(CheckResult::Pass)
     });
-    let normal_h = tokio::spawn(dispatcher.dispatch(&normal_job, normal_work));
+    let normal_h = tokio::spawn(dispatcher.dispatch(&normal_job, DispatchGuard::None, normal_work));
 
     // Release blocker.
     let _ = release_tx.send(());
@@ -453,7 +453,7 @@ async fn thread_pool_skips_work_if_caller_drops_before_dequeue() {
         let _ = release_rx.await;
         Ok(CheckResult::Pass)
     });
-    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, blocker_work));
+    let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, DispatchGuard::None, blocker_work));
 
     tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -465,7 +465,7 @@ async fn thread_pool_skips_work_if_caller_drops_before_dequeue() {
             Ok(CheckResult::Pass)
         });
     {
-        let fut = dispatcher.dispatch(&cancelled_job, cancelled_work);
+        let fut = dispatcher.dispatch(&cancelled_job, DispatchGuard::None, cancelled_work);
         let mut pinned = Box::pin(fut);
         let _ = futures::poll!(&mut pinned);
     }
@@ -476,7 +476,7 @@ async fn thread_pool_skips_work_if_caller_drops_before_dequeue() {
         ran_normal.fetch_add(10, Ordering::SeqCst);
         Ok(CheckResult::Pass)
     });
-    let normal_h = tokio::spawn(dispatcher.dispatch(&normal_job, normal_work));
+    let normal_h = tokio::spawn(dispatcher.dispatch(&normal_job, DispatchGuard::None, normal_work));
 
     let _ = release_tx.send(());
     blocker_h.await.unwrap().unwrap();

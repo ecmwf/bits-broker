@@ -20,6 +20,7 @@ pub struct TargetDummyDelay {
 }
 
 impl TargetDummyDelay {
+    #[allow(dead_code)]
     pub fn new(duration_ms: u64) -> Self {
         Self {
             duration_ms,

@@ -123,6 +123,13 @@ impl Clone for Job {
 }
 
 #[cfg(test)]
+impl Job {
+    pub(crate) fn set_reconnect_deadline_for_test(&self, deadline: Instant) {
+        *self.reconnect_deadline.lock().unwrap() = deadline;
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;

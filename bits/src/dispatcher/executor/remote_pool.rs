@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::actions::{ActionError, TargetResult};
 use crate::dispatcher::queue::Queue;
-use crate::dispatcher::{Executor, PendingMap};
+use crate::dispatcher::{DispatchGuard, Executor, PendingMap};
 use crate::result::JobResult;
 
 fn default_remote_bind() -> String {
@@ -148,7 +148,7 @@ async fn handle_get_work(
 
     // Resolve the pending entry for this job.
     let item = state.pending.lock().unwrap().remove(&job.id);
-    let Some((_work, reply_tx)) = item else {
+    let Some((guard, _work, reply_tx)) = item else {
         // Caller cancelled before the work handler picked it up — skip.
         // Return 204 to tell the worker to poll again.
         return Err(StatusCode::NO_CONTENT);
@@ -157,6 +157,26 @@ async fn handle_get_work(
     if reply_tx.is_closed() {
         // Caller cancelled — drop.
         return Err(StatusCode::NO_CONTENT);
+    }
+
+    match guard {
+        DispatchGuard::None => {}
+        DispatchGuard::Cancelled => {
+            if job.is_cancelled() {
+                let _ = reply_tx.send(Err(ActionError::Cancelled));
+                return Err(StatusCode::NO_CONTENT);
+            }
+        }
+        DispatchGuard::CancelledOrClientGone => {
+            if job.is_cancelled() {
+                let _ = reply_tx.send(Err(ActionError::Cancelled));
+                return Err(StatusCode::NO_CONTENT);
+            }
+            if !job.client_present() {
+                let _ = reply_tx.send(Err(ActionError::ClientGone));
+                return Err(StatusCode::NO_CONTENT);
+            }
+        }
     }
 
     // Build the one-shot channel for the worker outcome.

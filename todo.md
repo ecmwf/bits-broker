@@ -5,7 +5,7 @@
 - [x] Add persistence, maybe time-based
 - [ ] Add integration tests which actually spin up tikv
 - [ ] Build an FDB worker (new repo)
-- [ ] Add an age-based priority queue
+- [x] Add an age-based priority queue
 - [ ] Add a throttle-proxy
 - [ ] Implement a MARS library and worker (new repo)
 - [ ] Allow dynamic configuration of routes
@@ -16,9 +16,11 @@
 - [ ] Load balancing of workers to brokers
 - [ ] Broker lease should be a thread, not an async task
 - [ ] Diagrams in the docs
+- [ ] Consider memory fragmentation for long-running brokers
 
 - [ ] Add ecmwf-specific match actions, schedule actions and authotron action
 - [ ] Think about metrics implementation, aggregate statistics
+- [ ] Consider if in-flight jobs should be cancellable
 
 # Human TODO:
 - [ ] Set up a k8s cluster for prototype of polytope
@@ -31,4 +33,4 @@
 
 # Optional:
 - [ ] Allow compile to WASM for interactive docs
-- [ ] Add a GUI for pipeline configuration and monitoring
+- [ ] Add a GUI for pipeline configuration and monitoringma

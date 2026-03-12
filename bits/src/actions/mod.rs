@@ -70,6 +70,12 @@ pub enum Action {
     Switch(crate::routing::switch::Switch),
 }
 
+impl Action {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Action::Target(..) | Action::Switch(..))
+    }
+}
+
 impl std::fmt::Debug for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

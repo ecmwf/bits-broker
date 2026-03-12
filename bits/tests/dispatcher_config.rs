@@ -1,3 +1,5 @@
+mod common;
+
 use bits::dispatcher::{ExecutorKind, QueueKind, RemotePoolConfig};
 use bits::Bits;
 
@@ -64,6 +66,96 @@ routes:
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(
         err.contains("'remote' target requires executor: remote_pool"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn empty_route_is_rejected() {
+    let config = r#"
+routes:
+  default: []
+"#;
+
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("route 'default' must not be empty"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn route_must_end_in_terminal_action() {
+    let _ = common::CheckDummyDelay::new(1);
+
+    let config = r#"
+routes:
+  default:
+    - check::dummy_delay:
+        duration_ms: 1
+"#;
+
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("route 'default' must end with a target or switch"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn action_after_target_is_rejected() {
+    let config = r#"
+routes:
+  default:
+    - target::http:
+        url: "http://example.com"
+    - target::http:
+        url: "http://example.com/after"
+"#;
+
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("route 'default' has unreachable action(s) after terminal step at index 0"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn action_after_switch_is_rejected() {
+    let config = r#"
+routes:
+  default:
+    - switch:
+        nested:
+          - target::http:
+              url: "http://example.com"
+    - target::http:
+        url: "http://example.com/after"
+"#;
+
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("route 'default' has unreachable action(s) after terminal step at index 0"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn nested_switch_routes_are_validated_recursively() {
+    let _ = common::CheckDummyDelay::new(1);
+
+    let config = r#"
+routes:
+  default:
+    - switch:
+        nested:
+          - check::dummy_delay:
+              duration_ms: 1
+"#;
+
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("route 'nested' must end with a target or switch"),
         "unexpected error: {err}"
     );
 }

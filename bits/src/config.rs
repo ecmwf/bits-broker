@@ -190,8 +190,13 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
         branches.push(Route::new(name.clone(), actions));
     }
 
+    let router = Switch::new(branches);
+    router
+        .validate()
+        .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+
     Ok(ParsedConfig {
-        router: Switch::new(branches),
+        router,
         sweep_interval,
         broker_id,
         internal_poll_base_url,
@@ -231,7 +236,11 @@ fn parse_action(
                         .collect::<Result<Vec<_>, _>>()?;
                     routes.push(Route::new(route_name.clone(), actions));
                 }
-                return Ok(Action::Switch(Switch::new(routes)));
+                let switch = Switch::new(routes);
+                switch
+                    .validate()
+                    .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+                return Ok(Action::Switch(switch));
             }
 
             for (key, config) in map {

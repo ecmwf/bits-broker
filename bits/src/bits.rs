@@ -540,7 +540,6 @@ async fn dispatch(router: &Switch, job: Job) -> JobResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[tokio::test]
     async fn test_empty_pipeline() {
@@ -548,11 +547,12 @@ mod tests {
 routes:
   test_pipeline: []
 "#;
-        let bits = Bits::from_config(config).expect("Failed to parse config");
-        let handle = bits.submit(Job::new(json!({"class": "od"})));
-        match bits.poll(&handle.id, None).await {
-            PollOutcome::Ready(JobResult::Error { .. }) => {}
-            r => panic!("Expected error for empty pipeline, got: {:?}", r),
-        }
+        let err = Bits::from_config(config)
+            .err()
+            .expect("empty pipeline should be rejected");
+        assert!(
+            err.to_string().contains("route 'test_pipeline' must not be empty"),
+            "unexpected error: {err}"
+        );
     }
 }

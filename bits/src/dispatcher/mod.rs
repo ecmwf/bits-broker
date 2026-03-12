@@ -31,6 +31,7 @@ pub enum ExecutorKind {
 /// The queue only stores `Job` metadata for ordering. The actual async work
 /// and the channel to send its result back live here, keyed by `job.id`.
 pub type PendingItem<T> = (
+    DispatchGuard,
     BoxFuture<'static, Result<T, ActionError>>,
     oneshot::Sender<Result<T, ActionError>>,
 );
@@ -64,6 +65,22 @@ pub trait Executor<T: Send + 'static>: Send + Sync {
 pub struct Dispatcher<T: Send + 'static> {
     queue: Arc<dyn Queue>,
     pending: Arc<PendingMap<T>>,
+}
+
+impl<T: Send + 'static> Clone for Dispatcher<T> {
+    fn clone(&self) -> Self {
+        Self {
+            queue: Arc::clone(&self.queue),
+            pending: Arc::clone(&self.pending),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DispatchGuard {
+    None,
+    Cancelled,
+    CancelledOrClientGone,
 }
 
 impl<T: Send + 'static> Dispatcher<T> {
@@ -124,18 +141,41 @@ impl<T: Send + 'static> Dispatcher<T> {
     pub fn dispatch(
         &self,
         job: &Job,
+        guard: DispatchGuard,
         work: BoxFuture<'static, Result<T, ActionError>>,
     ) -> BoxFuture<'static, Result<T, ActionError>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let pending = Arc::clone(&self.pending);
         let queue = Arc::clone(&self.queue);
         let job_to_enqueue = job.clone();
+        let job_for_guard = job_to_enqueue.clone();
         Box::pin(async move {
+            let guarded_work: BoxFuture<'static, Result<T, ActionError>> = Box::pin(async move {
+                match guard {
+                    DispatchGuard::None => {}
+                    DispatchGuard::Cancelled => {
+                        if job_for_guard.is_cancelled() {
+                            return Err(ActionError::Cancelled);
+                        }
+                    }
+                    DispatchGuard::CancelledOrClientGone => {
+                        if job_for_guard.is_cancelled() {
+                            return Err(ActionError::Cancelled);
+                        }
+                        if !job_for_guard.client_present() {
+                            return Err(ActionError::ClientGone);
+                        }
+                    }
+                }
+
+                work.await
+            });
+
             // Insert before enqueue so the scheduler always finds the entry.
             pending
                 .lock()
                 .unwrap()
-                .insert(job_to_enqueue.id.clone(), (work, reply_tx));
+                .insert(job_to_enqueue.id.clone(), (guard, guarded_work, reply_tx));
             queue.enqueue(job_to_enqueue.clone());
 
             reply_rx

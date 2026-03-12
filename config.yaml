@@ -1,11 +1,6 @@
 bits:
   job_cleanup_interval_ms: 5000
 
-checks:
-  is_privileged:
-    type: has_role
-    role: privileged
-
 targets:
   # Plain HTTP target — no dispatcher, runs inline with no concurrency limit.
   backend_inline:
@@ -50,9 +45,4 @@ targets:
 
 routes:
   default:
-    - switch:
-        privileged:
-          - check::is_privileged
-          - target::backend
-        public:
-          - target::backend
+    - target::backend_inline

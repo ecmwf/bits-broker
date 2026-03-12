@@ -4,12 +4,10 @@ use crate::job::Job;
 use crate::result::JobResult;
 use async_trait::async_trait;
 
-pub mod check_hasrole;
 pub mod registry;
 pub mod target_http;
 pub mod target_remote;
 
-pub use check_hasrole::*;
 pub use registry::{create_action, list_actions};
 pub use target_http::*;
 pub use target_remote::*;

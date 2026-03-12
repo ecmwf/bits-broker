@@ -11,8 +11,8 @@ identifies the action, plus any action-specific fields.
 ```yaml
 checks:
   is_privileged:
-    type: has_role
-    role: privileged
+    type: match
+    class: od
 
 transforms:
   expand:
@@ -43,9 +43,9 @@ routes:
           - check::is_privileged
           - target::backend
         public:
-          - check::has_role:     # inline action — no registry entry needed
-              role: registered
-            - target::backend
+          - check::match:        # inline action — no registry entry needed
+              class: ea
+          - target::backend
 ```
 
 A `switch` tries its named routes in order and returns the result of the first route whose checks
@@ -56,8 +56,8 @@ all pass. Routes may be nested.
 Actions can be defined directly in a route without a registry entry:
 
 ```yaml
-- check::has_role:
-    role: registered
+- check::match:
+    class: od
 ```
 
 Inline actions are not reusable — each occurrence is an independent instance. Use the registry

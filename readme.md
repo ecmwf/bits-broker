@@ -47,9 +47,9 @@ bits:
   persist_guard_ms: 1000
 
 checks:
-  is_privileged:
-    type: has_role
-    role: privileged
+  is_operational:
+    type: match
+    class: od
 
 targets:
   backend:
@@ -61,14 +61,8 @@ targets:
 
 routes:
   default:
-    - switch:
-        privileged:
-          - check::is_privileged
-          - target::backend
-        public:
-          - check::has_role:
-              role: registered
-          - target::backend
+    - check::is_operational
+    - target::backend
 ```
 
 Load it and process jobs:

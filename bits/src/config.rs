@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::actions::{Action, target_remote::RemoteTarget};
 use crate::db::PersistenceStore;
 use crate::dispatcher::{Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig};
-use crate::routing::registry::create_action;
+use crate::actions::registry::create_action;
 use crate::routing::{Route, switch::Switch};
 use crate::server::ServerConfig;
 

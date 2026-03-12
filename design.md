@@ -42,7 +42,7 @@ A `Job` is the unit of work. It carries:
 A job flows through a **pipeline** — an ordered list of actions. Three action types:
 
 - **Check** — guard condition. Evaluates the job and either passes or rejects. A rejection stops
-  the current route and tries the next route in the switch. Examples: `check::has_role`,
+  the current route and tries the next route in the switch. Examples: `check::match`,
   `check::has_license`.
 
 - **Transform** — mutation. Mutates the job, perhaps changing the request or adding metadata, and
@@ -69,8 +69,8 @@ Config is YAML. The top-level sections are three typed registries (`checks`, `tr
 ```yaml
 checks:
   is_privileged:
-    type: has_role
-    role: privileged
+    type: match
+    class: od
 
 transforms:
   expand:
@@ -99,8 +99,8 @@ routes:
           - check::is_privileged
           - target::mars_retrieval
         public:
-          - check::has_role:    # inline — no registry entry needed
-              role: registered
+          - check::match:       # inline — no registry entry needed
+              class: ea
           - target::fdb_workers
 ```
 
@@ -117,7 +117,7 @@ routes:
 - Persistence is configured at `bits` top level (`persist_after_ms`, `poll_timeout_ms`, `persist_guard_ms`).
 - YAML anchors are deliberately not used — the named registries are an explicit feature of the
   schema, not a YAML trick. Named entries also ensure shared resources are the same instance in memory.
-- Inline actions (e.g. `check::has_role:` directly in a pipeline) bypass the registry entirely and
+- Inline actions (e.g. `check::match:` directly in a pipeline) bypass the registry entirely and
   are not reusable.
 
 ---
@@ -128,7 +128,7 @@ Actions are registered at compile time using the `inventory` crate. This allows 
 to register their own actions without the core crate knowing about them:
 
 ```rust
-register_action!(check,     "has_role",          HasRole);
+register_action!(check,     "match",             Match);
 register_action!(transform, "metkit_expansion",  MetkitExpansion);
 register_action!(target,    "http",              HttpTarget);
 register_action!(target,    "remote",            RemoteTarget);

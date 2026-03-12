@@ -49,7 +49,7 @@ maturin develop --manifest-path bits-py/Cargo.toml
 Then run the HTTP server example:
 
 ```bash
-python bits/examples/python_http_server.py
+python bits-py/examples/python_http_server.py
 ```
 
 Or run the smaller Python examples under:

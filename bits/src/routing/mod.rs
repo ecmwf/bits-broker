@@ -1,4 +1,3 @@
-pub mod registry;
 pub mod switch;
 
 use crate::actions::Action;

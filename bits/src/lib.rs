@@ -14,7 +14,7 @@ pub use bits::{Bits, JobHandle, PollOutcome};
 pub use db::*;
 pub use job::Job;
 pub use result::JobResult;
-pub use routing::registry::{
+pub use actions::registry::{
     RuntimeActionFactory, create_action, list_actions, register_runtime_action,
 };
 pub use server::ServerConfig;

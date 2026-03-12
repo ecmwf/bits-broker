@@ -24,7 +24,7 @@ A guard condition. It evaluates the job and either **passes** or **rejects**. A 
 the current route and causes the enclosing `switch` to try the next named route. Checks do not
 mutate the job.
 
-Examples: `check::has_role`, `check::has_license`
+Examples: `check::match`, `check::has_license`
 
 ### Transform
 

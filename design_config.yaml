@@ -25,8 +25,8 @@ bits:
 checks:
 
   valid_data:
-    type: has_role
-    role: valid_forecast
+    type: match
+    class: od
 
   era5_data:
     type: match

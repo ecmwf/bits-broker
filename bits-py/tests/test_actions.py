@@ -152,14 +152,14 @@ class TestRegistrationValidation:
             register_action(name, DupCheck2)
 
     def test_register_rejects_builtin_name(self):
-        """Attempting to shadow a built-in action (e.g. 'has_role') must fail."""
+        """Attempting to shadow a built-in action (e.g. 'http') must fail."""
 
         class MyCheck(CheckAction):
             async def evaluate(self, job):
                 return Pass()
 
         with pytest.raises((ValueError, Exception), match="built-in|conflicts"):
-            register_action("has_role", MyCheck)
+            register_action("http", MyCheck)
 
     def test_register_check_succeeds(self):
         """A well-formed CheckAction subclass registers without error."""

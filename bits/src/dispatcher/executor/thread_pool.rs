@@ -1,21 +1,14 @@
-use std::any::TypeId;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use futures::future::BoxFuture;
-use tokio::sync::mpsc;
-
-use crate::actions::ActionError;
-use crate::dispatcher::Executor;
-use crate::job::Job;
-
-type WorkFn = Box<dyn FnOnce() + Send + 'static>;
+use crate::dispatcher::queue::Queue;
+use crate::dispatcher::{Executor, PendingMap};
 
 /// Runs each work future on a pool of dedicated OS threads.
 ///
-/// `concurrency` threads are pre-spawned at construction. Each loops on a
-/// shared channel, pulling work items as fast as they arrive. The calling
-/// async task suspends until a thread picks up the work and sends back the
-/// result via a oneshot.
+/// `concurrency` threads are pre-spawned at construction. When
+/// `start_scheduler` is called, each thread loops: it calls
+/// `queue.dequeue()` (via `block_on`), resolves the pending work future,
+/// runs it on the OS thread, and sends the result back.
 ///
 /// Async futures run inside `Handle::block_on` on the OS thread, so all
 /// tokio I/O still goes through the runtime — the thread just blocks until
@@ -23,55 +16,46 @@ type WorkFn = Box<dyn FnOnce() + Send + 'static>;
 /// This is appropriate for work that would otherwise starve the runtime or
 /// needs guaranteed OS-thread isolation.
 pub struct ThreadPoolExecutor {
-    tx: mpsc::UnboundedSender<WorkFn>,
+    concurrency: usize,
 }
 
 impl ThreadPoolExecutor {
     pub fn new(concurrency: usize) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel::<WorkFn>();
-        let rx = Arc::new(Mutex::new(rx));
-
-        for _ in 0..concurrency {
-            let rx = Arc::clone(&rx);
-            std::thread::spawn(move || {
-                loop {
-                    // Lock is held only for the duration of blocking_recv, then
-                    // released before work() runs so other threads can dequeue.
-                    let work = match rx.lock().unwrap().blocking_recv() {
-                        Some(work) => work,
-                        None => break,
-                    };
-                    work();
-                }
-            });
-        }
-
-        Self { tx }
+        Self { concurrency }
     }
 }
 
 impl<T: Send + 'static> Executor<T> for ThreadPoolExecutor {
-    fn execute(
-        &self,
-        _job: &Job,
-        _action_type_id: TypeId,
-        work: BoxFuture<'static, Result<T, ActionError>>,
-    ) -> BoxFuture<'static, Result<T, ActionError>> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    fn start_scheduler(&self, queue: Arc<dyn Queue>, pending: Arc<PendingMap<T>>) {
         let handle = tokio::runtime::Handle::current();
 
-        let work_fn: WorkFn = Box::new(move || {
-            let result = handle.block_on(work);
-            let _ = result_tx.send(result);
-        });
+        for _ in 0..self.concurrency {
+            let queue = Arc::clone(&queue);
+            let pending = Arc::clone(&pending);
+            let handle = handle.clone();
 
-        let tx = self.tx.clone();
-        Box::pin(async move {
-            tx.send(work_fn)
-                .map_err(|_| ActionError::ResourceError("thread pool closed".into()))?;
-            result_rx
-                .await
-                .map_err(|_| ActionError::ResourceError("worker thread died".into()))?
-        })
+            std::thread::spawn(move || {
+                loop {
+                    let job = match handle.block_on(queue.dequeue()) {
+                        Some(job) => job,
+                        None => break, // queue closed
+                    };
+
+                    let item = pending.lock().unwrap().remove(&job.id);
+                    let Some((work, reply_tx)) = item else {
+                        // Caller cancelled before we dequeued — skip.
+                        continue;
+                    };
+
+                    if reply_tx.is_closed() {
+                        // Caller cancelled after we dequeued — drop the work.
+                        continue;
+                    }
+
+                    let result = handle.block_on(work);
+                    let _ = reply_tx.send(result);
+                }
+            });
+        }
     }
 }

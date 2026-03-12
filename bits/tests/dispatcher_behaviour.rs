@@ -6,39 +6,45 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 
 use bits::actions::{ActionError, CheckResult, TargetResult};
-use bits::dispatcher::{Dispatcher, Executor, ExecutorKind, QueueKind, ThreadPoolExecutor};
+use bits::dispatcher::{Dispatcher, ExecutorKind, QueueKind};
 use bits::job::Job;
 use bits::result::JobResult;
 use bits::{Bits, PollOutcome};
 
 // ================================
-//   ThreadPoolExecutor
+//   ThreadPoolExecutor via Dispatcher
 // ================================
 
-/// Work futures actually run on OS threads, not the calling tokio task.
+/// Work futures run on OS threads when using the thread_pool executor.
 #[tokio::test]
 async fn thread_pool_runs_on_os_threads() {
-    let executor = ThreadPoolExecutor::new(2);
-    let job = Job::new(serde_json::json!({}));
-    let test_thread = std::thread::current().id();
+    let dispatcher = Dispatcher::<CheckResult>::from_config(
+        Some(&QueueKind::Fifo),
+        Some(&ExecutorKind::ThreadPool),
+        Some(2),
+    )
+    .unwrap();
 
+    let test_thread = std::thread::current().id();
     let thread_ids: Arc<Mutex<Vec<std::thread::ThreadId>>> = Arc::new(Mutex::new(Vec::new()));
 
     let ids1 = Arc::clone(&thread_ids);
+    let job1 = Job::new(serde_json::json!({}));
     let work1: BoxFuture<'static, Result<CheckResult, ActionError>> = Box::pin(async move {
         ids1.lock().unwrap().push(std::thread::current().id());
         Ok(CheckResult::Pass)
     });
 
     let ids2 = Arc::clone(&thread_ids);
+    let job2 = Job::new(serde_json::json!({}));
     let work2: BoxFuture<'static, Result<CheckResult, ActionError>> = Box::pin(async move {
         ids2.lock().unwrap().push(std::thread::current().id());
         Ok(CheckResult::Pass)
     });
 
     let (r1, r2) = tokio::join!(
-        executor.execute(&job, std::any::TypeId::of::<()>(), work1),
-        executor.execute(&job, std::any::TypeId::of::<()>(), work2)
+        dispatcher.dispatch(&job1, work1),
+        dispatcher.dispatch(&job2, work2),
     );
     assert!(r1.is_ok() && r2.is_ok());
 
@@ -54,25 +60,32 @@ async fn thread_pool_runs_on_os_threads() {
 /// them concurrently. Would deadlock if only one thread ran at a time.
 #[tokio::test]
 async fn thread_pool_executes_concurrently() {
-    let executor = ThreadPoolExecutor::new(2);
-    let job = Job::new(serde_json::json!({}));
+    let dispatcher = Dispatcher::<CheckResult>::from_config(
+        Some(&QueueKind::Fifo),
+        Some(&ExecutorKind::ThreadPool),
+        Some(2),
+    )
+    .unwrap();
+
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
     let b1 = Arc::clone(&barrier);
+    let job1 = Job::new(serde_json::json!({}));
     let work1: BoxFuture<'static, Result<CheckResult, ActionError>> = Box::pin(async move {
         b1.wait().await;
         Ok(CheckResult::Pass)
     });
 
     let b2 = Arc::clone(&barrier);
+    let job2 = Job::new(serde_json::json!({}));
     let work2: BoxFuture<'static, Result<CheckResult, ActionError>> = Box::pin(async move {
         b2.wait().await;
         Ok(CheckResult::Pass)
     });
 
     let (r1, r2) = tokio::join!(
-        executor.execute(&job, std::any::TypeId::of::<()>(), work1),
-        executor.execute(&job, std::any::TypeId::of::<()>(), work2)
+        dispatcher.dispatch(&job1, work1),
+        dispatcher.dispatch(&job2, work2),
     );
     assert!(r1.is_ok() && r2.is_ok());
 }
@@ -120,9 +133,8 @@ async fn check_dispatcher_cost_weighted_ordering() {
     let dispatcher = Arc::new(
         Dispatcher::<CheckResult>::from_config(
             Some(&QueueKind::CostWeighted),
-            Some(&ExecutorKind::Semaphore),
+            Some(&ExecutorKind::AsyncPool),
             Some(1),
-            std::any::TypeId::of::<()>(),
         )
         .unwrap(),
     );
@@ -184,9 +196,8 @@ async fn target_dispatcher_cost_weighted_ordering() {
     let dispatcher = Arc::new(
         Dispatcher::<TargetResult>::from_config(
             Some(&QueueKind::CostWeighted),
-            Some(&ExecutorKind::Semaphore),
+            Some(&ExecutorKind::AsyncPool),
             Some(1),
-            std::any::TypeId::of::<()>(),
         )
         .unwrap(),
     );
@@ -248,9 +259,8 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
     let dispatcher = Arc::new(
         Dispatcher::<TargetResult>::from_config(
             Some(&QueueKind::AgePriority),
-            Some(&ExecutorKind::Semaphore),
+            Some(&ExecutorKind::AsyncPool),
             Some(1),
-            std::any::TypeId::of::<()>(),
         )
         .unwrap(),
     );
@@ -283,7 +293,10 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
         });
     let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, expensive_work));
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Give expensive enough age to outrank cheap despite higher cost.
+    // score = wait_time * other_cost / sqrt(own_cost).
+    // expensive needs wait_time * 1 > cheap_wait_time * 10.
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut cheap = Job::new(serde_json::json!({}));
     cheap.metadata["cost"] = serde_json::json!(1u64);

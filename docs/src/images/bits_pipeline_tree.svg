@@ -1,0 +1,216 @@
+<svg width="100%" viewBox="0 0 680 1000" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- ══ TOP: Config parsing + Registry ══ -->
+<g class="node c-gray">
+  <rect x="100" y="20" width="160" height="50" rx="8" stroke-width="0.5"/>
+  <text class="th" x="180" y="39" text-anchor="middle" dominant-baseline="central">Registry</text>
+  <text class="ts" x="180" y="57" text-anchor="middle" dominant-baseline="central">compile-time + runtime</text>
+</g>
+<g class="node c-gray">
+  <rect x="420" y="20" width="160" height="50" rx="8" stroke-width="0.5"/>
+  <text class="th" x="500" y="39" text-anchor="middle" dominant-baseline="central">Config (YAML)</text>
+  <text class="ts" x="500" y="57" text-anchor="middle" dominant-baseline="central">action instances + routes</text>
+</g>
+
+<!-- both feed into Submit -->
+<line x1="180" y1="70" x2="300" y2="112" class="arr" marker-end="url(#arrow)"/>
+<line x1="500" y1="70" x2="380" y2="112" class="arr" marker-end="url(#arrow)"/>
+
+<!-- ══ SUBMIT ══ -->
+<g class="node c-purple">
+  <rect x="240" y="112" width="200" height="50" rx="8" stroke-width="0.5"/>
+  <text class="th" x="340" y="131" text-anchor="middle" dominant-baseline="central">Bits::submit()</text>
+  <text class="ts" x="340" y="149" text-anchor="middle" dominant-baseline="central">assign ID · store · spawn task</text>
+</g>
+<line x1="340" y1="162" x2="340" y2="192" class="arr" marker-end="url(#arrow)"/>
+
+<!-- ══ SWITCH ══ -->
+<g class="node c-purple">
+  <rect x="240" y="192" width="200" height="50" rx="8" stroke-width="0.5"/>
+  <text class="th" x="340" y="211" text-anchor="middle" dominant-baseline="central">Switch</text>
+  <text class="ts" x="340" y="229" text-anchor="middle" dominant-baseline="central">tries routes in order</text>
+</g>
+
+<!-- trunk to branch bar -->
+<line x1="340" y1="242" x2="340" y2="270" stroke="var(--color-border-secondary)" stroke-width="0.8"/>
+<line x1="68" y1="270" x2="612" y2="270" stroke="var(--color-border-secondary)" stroke-width="0.8"/>
+
+<!-- branch drops -->
+<line x1="68"  y1="270" x2="68"  y2="298" class="arr" marker-end="url(#arrow)"/>
+<line x1="228" y1="270" x2="228" y2="298" class="arr" marker-end="url(#arrow)"/>
+<line x1="420" y1="270" x2="420" y2="298" class="arr" marker-end="url(#arrow)"/>
+<line x1="612" y1="270" x2="612" y2="298" class="arr" marker-end="url(#arrow)"/>
+
+<!-- route labels -->
+<text class="ts" x="68"  y="291" text-anchor="middle" style="font-style:italic">route 1</text>
+<text class="ts" x="228" y="291" text-anchor="middle" style="font-style:italic">route 2</text>
+<text class="ts" x="420" y="291" text-anchor="middle" style="font-style:italic">route 3</text>
+<text class="ts" x="612" y="291" text-anchor="middle" style="font-style:italic">route N</text>
+
+<!-- ═══════════════════════════════════
+     ROUTE 1 — Check → Target
+════════════════════════════════════ -->
+<g class="node c-teal">
+  <rect x="4" y="298" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="68" y="317" text-anchor="middle" dominant-baseline="central">Check</text>
+  <text class="ts" x="68" y="335" text-anchor="middle" dominant-baseline="central">Pass / Reject</text>
+</g>
+<line x1="68" y1="348" x2="68" y2="376" class="arr" marker-end="url(#arrow)"/>
+<g class="node c-coral">
+  <rect x="4" y="376" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="68" y="395" text-anchor="middle" dominant-baseline="central">Target</text>
+  <text class="ts" x="68" y="413" text-anchor="middle" dominant-baseline="central">Complete / Reject</text>
+</g>
+
+<!-- ═══════════════════════════════════
+     ROUTE 2 — Check → Check → Check → Transform → Target
+     (multi-check path)
+════════════════════════════════════ -->
+<g class="node c-teal">
+  <rect x="164" y="298" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="228" y="317" text-anchor="middle" dominant-baseline="central">Check</text>
+  <text class="ts" x="228" y="335" text-anchor="middle" dominant-baseline="central">valid data?</text>
+</g>
+<line x1="228" y1="348" x2="228" y2="376" class="arr" marker-end="url(#arrow)"/>
+<g class="node c-teal">
+  <rect x="164" y="376" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="228" y="395" text-anchor="middle" dominant-baseline="central">Check</text>
+  <text class="ts" x="228" y="413" text-anchor="middle" dominant-baseline="central">authorised?</text>
+</g>
+<line x1="228" y1="426" x2="228" y2="454" class="arr" marker-end="url(#arrow)"/>
+<g class="node c-teal">
+  <rect x="164" y="454" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="228" y="473" text-anchor="middle" dominant-baseline="central">Check</text>
+  <text class="ts" x="228" y="491" text-anchor="middle" dominant-baseline="central">quota available?</text>
+</g>
+<line x1="228" y1="504" x2="228" y2="532" class="arr" marker-end="url(#arrow)"/>
+<g class="node c-amber">
+  <rect x="164" y="532" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="228" y="551" text-anchor="middle" dominant-baseline="central">Transform</text>
+  <text class="ts" x="228" y="569" text-anchor="middle" dominant-baseline="central">enrich metadata</text>
+</g>
+<line x1="228" y1="582" x2="228" y2="610" class="arr" marker-end="url(#arrow)"/>
+<g class="node c-coral">
+  <rect x="164" y="610" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="228" y="629" text-anchor="middle" dominant-baseline="central">Target</text>
+  <text class="ts" x="228" y="647" text-anchor="middle" dominant-baseline="central">Complete / Reject</text>
+</g>
+
+<!-- ═══════════════════════════════════
+     ROUTE 3 — Check → Switch (nested)
+════════════════════════════════════ -->
+<g class="node c-teal">
+  <rect x="356" y="298" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="420" y="317" text-anchor="middle" dominant-baseline="central">Check</text>
+  <text class="ts" x="420" y="335" text-anchor="middle" dominant-baseline="central">Pass / Reject</text>
+</g>
+<line x1="420" y1="348" x2="420" y2="376" class="arr" marker-end="url(#arrow)"/>
+<g class="node c-amber">
+  <rect x="356" y="376" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="420" y="395" text-anchor="middle" dominant-baseline="central">Transform</text>
+  <text class="ts" x="420" y="413" text-anchor="middle" dominant-baseline="central">expand request</text>
+</g>
+<line x1="420" y1="426" x2="420" y2="454" class="arr" marker-end="url(#arrow)"/>
+<!-- nested switch -->
+<g class="node c-purple">
+  <rect x="348" y="454" width="144" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="420" y="473" text-anchor="middle" dominant-baseline="central">Switch (nested)</text>
+  <text class="ts" x="420" y="491" text-anchor="middle" dominant-baseline="central">conditional routing</text>
+</g>
+<!-- nested branch bar -->
+<line x1="420" y1="504" x2="420" y2="524" stroke="var(--color-border-secondary)" stroke-width="0.8"/>
+<line x1="370" y1="524" x2="470" y2="524" stroke="var(--color-border-secondary)" stroke-width="0.8"/>
+<line x1="370" y1="524" x2="370" y2="548" class="arr" marker-end="url(#arrow)"/>
+<line x1="470" y1="524" x2="470" y2="548" class="arr" marker-end="url(#arrow)"/>
+<g class="node c-coral">
+  <rect x="318" y="548" width="104" height="50" rx="6" stroke-width="0.5"/>
+  <text class="th" x="370" y="567" text-anchor="middle" dominant-baseline="central">Target A</text>
+  <text class="ts" x="370" y="585" text-anchor="middle" dominant-baseline="central">Complete</text>
+</g>
+<g class="node c-coral">
+  <rect x="418" y="548" width="104" height="50" rx="6" stroke-width="0.5"/>
+  <text class="th" x="470" y="567" text-anchor="middle" dominant-baseline="central">Target B</text>
+  <text class="ts" x="470" y="585" text-anchor="middle" dominant-baseline="central">Complete</text>
+</g>
+
+<!-- ═══════════════════════════════════
+     ROUTE N — all reject → error
+════════════════════════════════════ -->
+<g class="node c-gray">
+  <rect x="548" y="298" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="612" y="317" text-anchor="middle" dominant-baseline="central">… steps …</text>
+  <text class="ts" x="612" y="335" text-anchor="middle" dominant-baseline="central">any action type</text>
+</g>
+<line x1="612" y1="348" x2="612" y2="376" stroke="var(--color-border-tertiary)" stroke-width="0.8" stroke-dasharray="4 3"/>
+<text class="ts" x="612" y="370" text-anchor="middle" style="font-style:italic">all reject</text>
+<g class="node c-red">
+  <rect x="548" y="376" width="128" height="50" rx="7" stroke-width="0.5"/>
+  <text class="th" x="612" y="395" text-anchor="middle" dominant-baseline="central">Error result</text>
+  <text class="ts" x="612" y="413" text-anchor="middle" dominant-baseline="central">job gets error</text>
+</g>
+
+<!-- ═══════════════════════════════════
+     REJECT fallthrough note
+════════════════════════════════════ -->
+<text class="ts" x="672" y="490" text-anchor="middle" transform="rotate(90,672,490)" style="font-style:italic">any reject → next route ↓</text>
+
+<!-- ═══════════════════════════════════
+     CONVERGE to Dispatcher
+     Lines from route 1 target (68,426), route 2 target (228,660), route 3 nested targets (370,598)(470,598)
+════════════════════════════════════ -->
+<!-- horizontal gather line -->
+<line x1="68"  y1="426" x2="68"  y2="730" stroke="var(--color-border-tertiary)" stroke-width="0.6" stroke-dasharray="3 3"/>
+<line x1="228" y1="660" x2="228" y2="730" stroke="var(--color-border-tertiary)" stroke-width="0.6" stroke-dasharray="3 3"/>
+<line x1="370" y1="598" x2="370" y2="730" stroke="var(--color-border-tertiary)" stroke-width="0.6" stroke-dasharray="3 3"/>
+<line x1="470" y1="598" x2="470" y2="730" stroke="var(--color-border-tertiary)" stroke-width="0.6" stroke-dasharray="3 3"/>
+<line x1="68"  y1="730" x2="470" y2="730" stroke="var(--color-border-secondary)" stroke-width="0.8"/>
+<line x1="270" y1="730" x2="270" y2="754" class="arr" marker-end="url(#arrow)"/>
+
+<!-- ══ DISPATCHER ══ -->
+<rect x="44" y="754" width="452" height="190" rx="12" fill="none" stroke="var(--color-border-secondary)" stroke-width="0.8" stroke-dasharray="5 3"/>
+<text class="ts" x="60" y="773" style="font-style:italic">Dispatcher&lt;T&gt; — optional per step, orthogonal to pipeline</text>
+
+<text class="th" x="160" y="796" text-anchor="middle" dominant-baseline="central">Queue</text>
+<g class="node c-blue">
+  <rect x="56"  y="808" width="120" height="38" rx="6" stroke-width="0.5"/>
+  <text class="ts" x="116" y="827" text-anchor="middle" dominant-baseline="central">FifoQueue</text>
+</g>
+<g class="node c-blue">
+  <rect x="186" y="808" width="120" height="38" rx="6" stroke-width="0.5"/>
+  <text class="ts" x="246" y="827" text-anchor="middle" dominant-baseline="central">CostWeighted</text>
+</g>
+<g class="node c-blue">
+  <rect x="120" y="856" width="120" height="38" rx="6" stroke-width="0.5"/>
+  <text class="ts" x="180" y="875" text-anchor="middle" dominant-baseline="central">AgePriority</text>
+</g>
+
+<line x1="316" y1="780" x2="316" y2="944" stroke="var(--color-border-tertiary)" stroke-width="0.5"/>
+
+<text class="th" x="406" y="796" text-anchor="middle" dominant-baseline="central">Executor</text>
+<g class="node c-green">
+  <rect x="326" y="808" width="154" height="38" rx="6" stroke-width="0.5"/>
+  <text class="ts" x="403" y="827" text-anchor="middle" dominant-baseline="central">SemaphoreExecutor</text>
+</g>
+<g class="node c-green">
+  <rect x="326" y="856" width="154" height="38" rx="6" stroke-width="0.5"/>
+  <text class="ts" x="403" y="875" text-anchor="middle" dominant-baseline="central">ThreadPoolExecutor</text>
+</g>
+<g class="node c-green">
+  <rect x="326" y="904" width="154" height="38" rx="6" stroke-width="0.5"/>
+  <text class="ts" x="403" y="923" text-anchor="middle" dominant-baseline="central">RemotePoolExecutor</text>
+</g>
+
+<line x1="270" y1="944" x2="270" y2="966" class="arr" marker-end="url(#arrow)"/>
+
+<!-- ══ RESULT ══ -->
+<g class="node c-gray">
+  <rect x="44" y="966" width="452" height="24" rx="6" stroke-width="0.5"/>
+  <text class="ts" x="270" y="978" text-anchor="middle" dominant-baseline="central">JobResult: Success · Redirect · Error · Failed · Cancelled · ClientGone</text>
+</g>
+
+</svg>

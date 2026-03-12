@@ -97,7 +97,7 @@ routes:
 | Field | Values | Default |
 |-------|--------|---------|
 | `queue` | `fifo`, `cost_weighted`, `age_priority` | none (FIFO when `concurrency` is set) |
-| `executor` | `semaphore`, `thread_pool`, `remote_pool` | `semaphore` |
+| `executor` | `async_pool`, `thread_pool`, `remote_pool` | `async_pool` |
 | `concurrency` | positive integer | unlimited |
 
 - `cost_weighted` ordering requires a `metadata["cost"]` value set by a prior transform.

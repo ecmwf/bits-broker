@@ -195,6 +195,10 @@ routes:
 
 ## 🏗 Architecture
 
+<p align="center">
+  <img src="docs/src/images/bits_pipeline_tree.svg" alt="BITS pipeline routing architecture" width="100%">
+</p>
+
 See [design.md](design.md) for the full design specification.
 
 ---

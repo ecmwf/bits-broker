@@ -1,10 +1,12 @@
 pub mod executor;
 pub mod queue;
 
-pub use executor::{RemotePoolExecutor, SemaphoreExecutor, ThreadPoolExecutor};
+pub use executor::{
+    AsyncPoolExecutor, RemotePoolConfig, RemotePoolExecutor, ThreadPoolExecutor,
+};
 pub use queue::{AgePriorityQueue, CostWeightedQueue, FifoQueue, Queue, QueueKind};
 
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,81 +14,56 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use tokio::sync::oneshot;
 
-use crate::actions::ActionError;
+use crate::actions::{ActionError, TargetResult};
 use crate::job::Job;
-
-fn default_remote_bind() -> String {
-    "0.0.0.0:9001".into()
-}
-
-fn default_heartbeat_timeout_secs() -> f64 {
-    60.0
-}
-
-/// Configuration for the remote-pool executor.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RemotePoolConfig {
-    /// Address the long-poll HTTP server binds to.
-    #[serde(default = "default_remote_bind")]
-    pub bind: String,
-    /// Seconds without a heartbeat before an in-progress job is evicted.
-    /// Fractional values are supported (e.g. 0.1 for 100 ms).
-    #[serde(default = "default_heartbeat_timeout_secs")]
-    pub heartbeat_timeout_secs: f64,
-}
 
 /// Selects the executor implementation to construct from config.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutorKind {
-    Semaphore,
+    AsyncPool,
     ThreadPool,
     RemotePool(RemotePoolConfig),
 }
 
-/// An executor controls how a unit of work is run.
+/// A pending item is a work future paired with a reply channel.
 ///
-/// The executor receives a `work` future and decides how to run it —
-/// inline with a semaphore, spawned as an independent task, handed to a
-/// remote worker, etc. Ordering is handled separately by the [`Queue`].
+/// The queue only stores `Job` metadata for ordering. The actual async work
+/// and the channel to send its result back live here, keyed by `job.id`.
+pub type PendingItem<T> = (
+    BoxFuture<'static, Result<T, ActionError>>,
+    oneshot::Sender<Result<T, ActionError>>,
+);
+
+/// Maps `job.id` to the pending work and reply channel.
+pub type PendingMap<T> = Mutex<HashMap<String, PendingItem<T>>>;
+
+/// An executor controls how queued work is scheduled and run.
 ///
-/// [`Queue`]: crate::queue::Queue
-pub trait Executor<T>: Send + Sync {
-    fn execute(
-        &self,
-        job: &Job,
-        action_type_id: TypeId,
-        work: BoxFuture<'static, Result<T, ActionError>>,
-    ) -> BoxFuture<'_, Result<T, ActionError>>;
+/// Each executor owns its scheduling loop. The dispatcher calls
+/// `start_scheduler` once at construction, passing the queue and pending map.
+/// The executor is then responsible for pulling jobs from the queue, resolving
+/// the corresponding work future from the pending map, and running it.
+pub trait Executor<T: Send + 'static>: Send + Sync {
+    fn start_scheduler(&self, queue: Arc<dyn Queue>, pending: Arc<PendingMap<T>>);
 }
 
 // ================================
 //   Dispatcher
 // ================================
 
-type PendingItem<T> = (
-    BoxFuture<'static, Result<T, ActionError>>,
-    oneshot::Sender<Result<T, ActionError>>,
-);
-
-type PendingMap<T> = Mutex<HashMap<String, PendingItem<T>>>;
-
 /// Composes a [`Queue`] with an [`Executor`].
 ///
 /// The queue controls *ordering* — which job runs next. The executor
-/// controls *execution* — concurrency limits, thread-pool offload, etc.
+/// controls *scheduling and execution* — it owns the loop that pulls jobs
+/// from the queue and decides how to run the associated work.
 ///
 /// When `dispatch` is called the job is enqueued for ordering and the caller
-/// suspends. A background worker is the only entity that calls `dequeue`;
-/// once it picks a job it runs the associated work through the executor and
-/// sends the result back to the suspended caller.
+/// suspends. The executor's scheduler is the entity that dequeues jobs,
+/// resolves pending work, and sends results back to suspended callers.
 pub struct Dispatcher<T: Send + 'static> {
     queue: Arc<dyn Queue>,
-    #[allow(dead_code)] // held to keep the Arc alive; worker uses executor_ref
-    executor: Arc<dyn Executor<T>>,
     pending: Arc<PendingMap<T>>,
-    #[allow(dead_code)] // captured by value into the worker task at construction
-    action_type_id: TypeId,
 }
 
 impl<T: Send + 'static> Dispatcher<T> {
@@ -96,66 +73,52 @@ impl<T: Send + 'static> Dispatcher<T> {
         queue: Option<&QueueKind>,
         executor: Option<&ExecutorKind>,
         concurrency: Option<usize>,
-        action_type_id: TypeId,
     ) -> Option<Self> {
         if queue.is_none() && concurrency.is_none() && executor.is_none() {
             return None;
         }
         let concurrency = concurrency.unwrap_or(tokio::sync::Semaphore::MAX_PERMITS);
         let executor: Arc<dyn Executor<T>> = match executor {
-            None | Some(ExecutorKind::Semaphore) => Arc::new(SemaphoreExecutor::new(concurrency)),
+            None | Some(ExecutorKind::AsyncPool) => Arc::new(AsyncPoolExecutor::new(concurrency)),
             Some(ExecutorKind::ThreadPool) => Arc::new(ThreadPoolExecutor::new(concurrency)),
-            Some(ExecutorKind::RemotePool(cfg)) => Arc::new(RemotePoolExecutor::new(
-                &cfg.bind,
-                Duration::from_secs_f64(cfg.heartbeat_timeout_secs),
-            )),
+            Some(ExecutorKind::RemotePool(cfg)) => {
+                // RemotePoolExecutor only implements Executor<TargetResult>.
+                // Config validation ensures this branch is only reached for
+                // target actions, so T == TargetResult. We construct the
+                // concrete type and downcast via Any.
+                assert_eq!(
+                    TypeId::of::<T>(),
+                    TypeId::of::<TargetResult>(),
+                    "remote_pool executor requires T == TargetResult"
+                );
+                let concrete: Arc<dyn Executor<TargetResult>> =
+                    Arc::new(RemotePoolExecutor::new(
+                        &cfg.bind,
+                        Duration::from_secs_f64(cfg.heartbeat_timeout_secs),
+                    ));
+                // Safety: T == TargetResult verified by the assert above.
+                // Arc<dyn Executor<TargetResult>> and Arc<dyn Executor<T>>
+                // have identical layout when T == TargetResult.
+                let any: Box<dyn Any> = Box::new(concrete);
+                *any.downcast::<Arc<dyn Executor<T>>>().unwrap_or_else(|_| {
+                    panic!("remote_pool: type mismatch (T != TargetResult)")
+                })
+            }
         };
         let queue: Arc<dyn Queue> = match queue.unwrap_or(&QueueKind::Fifo) {
             QueueKind::Fifo => Arc::new(FifoQueue::new()),
             QueueKind::CostWeighted => Arc::new(CostWeightedQueue::new()),
             QueueKind::AgePriority => Arc::new(AgePriorityQueue::new()),
         };
-        Some(Self::new(queue, executor, action_type_id))
+        Some(Self::new(queue, executor))
     }
 
-    pub fn new(
-        queue: Arc<dyn Queue>,
-        executor: Arc<dyn Executor<T>>,
-        action_type_id: TypeId,
-    ) -> Self {
+    pub fn new(queue: Arc<dyn Queue>, executor: Arc<dyn Executor<T>>) -> Self {
         let pending: Arc<PendingMap<T>> = Arc::new(Mutex::new(HashMap::new()));
 
-        let queue_ref = Arc::clone(&queue);
-        let executor_ref = Arc::clone(&executor);
-        let pending_ref = Arc::clone(&pending);
+        executor.start_scheduler(Arc::clone(&queue), Arc::clone(&pending));
 
-        tokio::spawn(async move {
-            while let Some(job) = queue_ref.dequeue().await {
-                let item = pending_ref.lock().unwrap().remove(&job.id);
-                let Some((work, reply_tx)) = item else {
-                    // Caller cancelled before we dequeued — skip.
-                    continue;
-                };
-
-                if reply_tx.is_closed() {
-                    // Caller cancelled after we dequeued — drop the work.
-                    continue;
-                }
-
-                let executor = Arc::clone(&executor_ref);
-                tokio::spawn(async move {
-                    let result = executor.execute(&job, action_type_id, work).await;
-                    let _ = reply_tx.send(result);
-                });
-            }
-        });
-
-        Self {
-            queue,
-            executor,
-            pending,
-            action_type_id,
-        }
+        Self { queue, pending }
     }
 
     pub fn dispatch(
@@ -168,7 +131,7 @@ impl<T: Send + 'static> Dispatcher<T> {
         let queue = Arc::clone(&self.queue);
         let job_to_enqueue = job.clone();
         Box::pin(async move {
-            // Insert before enqueue so the worker always finds the entry.
+            // Insert before enqueue so the scheduler always finds the entry.
             pending
                 .lock()
                 .unwrap()

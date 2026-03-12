@@ -1,7 +1,7 @@
+pub mod async_pool;
 pub mod remote_pool;
-pub mod semaphore;
 pub mod thread_pool;
 
-pub use remote_pool::RemotePoolExecutor;
-pub use semaphore::SemaphoreExecutor;
+pub use async_pool::AsyncPoolExecutor;
+pub use remote_pool::{RemotePoolConfig, RemotePoolExecutor};
 pub use thread_pool::ThreadPoolExecutor;

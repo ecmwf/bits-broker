@@ -1,11 +1,10 @@
-use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::actions::{Action, target_remote::RemoteTarget};
+use crate::actions::Action;
 use crate::db::PersistenceStore;
 use crate::dispatcher::{Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig};
 use crate::actions::registry::create_action;
@@ -385,11 +384,6 @@ fn attach_dispatcher(
 
     let has_dispatcher =
         settings.queue.is_some() || settings.executor.is_some() || settings.concurrency.is_some();
-    let action_type_id = if action_name == "remote" {
-        TypeId::of::<RemoteTarget>()
-    } else {
-        TypeId::of::<()>()
-    };
 
     match action {
         Action::Check(check, _) => {
@@ -397,7 +391,6 @@ fn attach_dispatcher(
                 settings.queue.as_ref(),
                 settings.executor.as_ref(),
                 settings.concurrency,
-                action_type_id,
             );
             Ok(Action::Check(check, dispatcher))
         }
@@ -406,7 +399,6 @@ fn attach_dispatcher(
                 settings.queue.as_ref(),
                 settings.executor.as_ref(),
                 settings.concurrency,
-                action_type_id,
             );
             Ok(Action::Transform(transform, dispatcher))
         }
@@ -415,7 +407,6 @@ fn attach_dispatcher(
                 settings.queue.as_ref(),
                 settings.executor.as_ref(),
                 settings.concurrency,
-                action_type_id,
             );
             Ok(Action::Target(target, dispatcher))
         }

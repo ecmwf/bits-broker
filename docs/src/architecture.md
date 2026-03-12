@@ -1,5 +1,7 @@
 # Architecture
 
+![BITS pipeline routing architecture](images/bits_pipeline_tree.svg)
+
 ## Jobs
 
 A **job** is the unit of work in BITS. When a client submits a request, BITS creates a job
@@ -53,8 +55,19 @@ ordering and concurrency before the action runs.
 
 A dispatcher has two concerns:
 
-- **Queue** — controls which job runs next (`fifo` or `cost_weighted`).
-- **Executor** — controls how the work runs (`semaphore`, `thread_pool`, or `remote_pool`).
+- **Queue** — controls which job runs next (`fifo`, `cost_weighted`, or `age_priority`). The queue
+  only stores `Job` metadata; it knows nothing about work futures or result types.
+- **Executor** — owns the scheduling loop that pulls jobs from the queue and runs the associated
+  work (`async_pool`, `thread_pool`, or `remote_pool`).
+
+Each executor implements its own scheduling model:
+
+- **Async pool** — N Tokio tasks (one per concurrency slot) each loop on `queue.dequeue()` and run
+  work inline.
+- **Thread pool** — dedicated OS threads each call `queue.dequeue()` directly, run work via
+  `block_on`, and send results back.
+- **Remote pool** — the `/work` HTTP handler calls `queue.dequeue()` directly when a remote worker
+  polls, so external workers pull work at their own pace with no intermediate feeder task.
 
 This makes scheduling behavior explicit at the step level rather than a global setting. See
 [Configuration](configuration.md) for dispatcher syntax and options.
@@ -90,27 +103,29 @@ is the mechanism by which other brokers determine that this instance is alive. S
 ### Started per dispatcher — at config parse time
 
 Each action step with a `dispatcher:` block starts background workers when the configuration is
-loaded. The number of workers depends on the queue type and executor type configured.
+loaded. The executor owns the scheduling loop — the number and kind of workers depend on the
+executor type configured.
 
-**Dispatcher dequeue worker (1 Tokio task per dispatcher)**
-Waits for jobs to become available in the queue and hands each one to the executor. Spawns an
-additional short-lived Tokio task per dequeued job to run the action without blocking the
-dequeue loop.
+**Async pool scheduler (N Tokio tasks, if `executor: async_pool`)**
+One Tokio task per `concurrency` slot. Each task loops: dequeue a job from the queue, run
+the work future inline, send the result back, then dequeue the next. Concurrency is controlled
+by the number of tasks.
 
 **Cost-weighted queue worker (1 Tokio task, if `queue: cost_weighted`)**
 Maintains the priority heap and services dequeue requests in cost order. Not started when
 `queue: fifo` is used — FIFO uses a plain channel with no background task.
 
 **Thread pool workers (N OS threads, if `executor: thread_pool`)**
-One OS thread per `concurrency` unit. Each thread blocks on the work channel and runs the action
-on that OS thread, using `block_on` against the shared Tokio runtime. Used to isolate
+One OS thread per `concurrency` unit. Each thread calls `queue.dequeue()` directly (via
+`block_on`), resolves the pending work, and runs it on that OS thread. Used to isolate
 CPU-bound or blocking work from the async scheduler. Not started unless `executor: thread_pool`
 is explicitly configured.
 
 **Remote pool HTTP server + heartbeat reaper (2 Tokio tasks, if `executor: remote_pool`)**
-One task runs an axum HTTP server on the configured bind address (default `0.0.0.0:9001`) that
-external workers poll for jobs and post results back to. A second task scans in-progress jobs
-every `heartbeat_timeout / 2` seconds and evicts any worker that has stopped sending heartbeats.
+One task runs an axum HTTP server on the configured bind address (default `0.0.0.0:9001`).
+The `/work` endpoint calls `queue.dequeue()` directly when a remote worker long-polls — there
+is no intermediate feeder task. A second task scans in-progress jobs every
+`heartbeat_timeout / 2` seconds and evicts any worker that has stopped sending heartbeats.
 Only started when `executor: remote_pool` is configured (or when `target::remote` is used, which
 implies it).
 
@@ -131,7 +146,7 @@ There is no separate timer task — the threshold logic lives inside this task v
 |---|---|---|---|
 | Completed-job sweeper | OS thread | 1 per `Bits` instance | Always, at startup |
 | Broker lease heartbeat | Tokio task | 1 per `Bits` instance | At startup, if persistence configured |
-| Dispatcher dequeue worker | Tokio task | 1 per dispatcher | At config parse, per dispatcher block |
+| Async pool scheduler | Tokio tasks | N per `async_pool` executor | At config parse, per dispatcher block |
 | Cost-weighted queue worker | Tokio task | 1 per `cost_weighted` queue | At config parse, if `queue: cost_weighted` |
 | Thread pool OS workers | OS threads | N per `thread_pool` executor | At config parse, if `executor: thread_pool` |
 | Remote pool HTTP server | Tokio task | 1 per `remote_pool` executor | At config parse, if `executor: remote_pool` |

@@ -1,6 +1,4 @@
-use std::any::TypeId;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -12,15 +10,33 @@ use axum::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::StreamExt;
-use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::actions::{ActionError, TargetResult, target_remote::RemoteTarget};
-use crate::dispatcher::Executor;
-use crate::job::Job;
+use crate::actions::{ActionError, TargetResult};
+use crate::dispatcher::queue::Queue;
+use crate::dispatcher::{Executor, PendingMap};
 use crate::result::JobResult;
+
+fn default_remote_bind() -> String {
+    "0.0.0.0:9001".into()
+}
+
+fn default_heartbeat_timeout_secs() -> f64 {
+    60.0
+}
+
+/// Configuration for the remote-pool executor.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemotePoolConfig {
+    /// Address the long-poll HTTP server binds to.
+    #[serde(default = "default_remote_bind")]
+    pub bind: String,
+    /// Seconds without a heartbeat before an in-progress job is evicted.
+    /// Fractional values are supported (e.g. 0.1 for 100 ms).
+    #[serde(default = "default_heartbeat_timeout_secs")]
+    pub heartbeat_timeout_secs: f64,
+}
 
 // ─── worker outcome ───────────────────────────────────────────────────────────
 
@@ -44,19 +60,22 @@ enum WorkerOutcome {
 
 // ─── shared state ─────────────────────────────────────────────────────────────
 
-struct AvailableJob {
-    job: Job,
-    result_tx: oneshot::Sender<WorkerOutcome>,
-}
-
 struct InProgressJob {
     result_tx: oneshot::Sender<WorkerOutcome>,
     last_heartbeat: Instant,
 }
 
+/// State shared between the HTTP handlers and the executor.
+///
+/// Holds references to the dispatcher queue and pending map. The `/work`
+/// handler calls `queue.dequeue()` directly when a worker polls.
 struct RemotePoolState {
-    available: Mutex<VecDeque<AvailableJob>>,
-    available_notify: Notify,
+    queue: Arc<dyn Queue>,
+    /// Pending map holding work futures and reply channels, keyed by job ID.
+    /// The `/work` handler removes the entry after dequeue to drop the local
+    /// work future (remote workers do all work externally). The reply channel
+    /// is moved to `in_progress` so completion handlers can send back results.
+    pending: Arc<PendingMap<TargetResult>>,
     in_progress: DashMap<String, InProgressJob>,
     heartbeat_timeout: Duration,
 }
@@ -101,45 +120,96 @@ struct ErrorRequest {
 
 // ─── axum handlers ────────────────────────────────────────────────────────────
 
-/// Long-poll endpoint. Blocks until a job is available or `timeout_ms` elapses.
+/// Long-poll endpoint. Blocks until a job is dequeued or `timeout_ms` elapses.
 /// Returns 200 + job JSON, or 204 No Content on timeout.
+///
+/// This handler directly calls `queue.dequeue()` — the queue determines ordering.
+/// After dequeue, it resolves the pending entry (dropping the local work future,
+/// since remote workers do all work externally) and moves the reply channel into
+/// `in_progress`.
 async fn handle_get_work(
     State(state): State<Arc<RemotePoolState>>,
     Query(params): Query<PollParams>,
 ) -> Result<Json<WorkResponse>, StatusCode> {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(params.timeout_ms);
+    let timeout = Duration::from_millis(params.timeout_ms);
 
-    loop {
-        {
-            let mut queue = state.available.lock().unwrap();
-            if let Some(entry) = queue.pop_front() {
-                let resp = WorkResponse {
-                    job_id: entry.job.id.clone(),
-                    request: entry.job.request.clone(),
-                    user: entry.job.user.clone(),
-                    metadata: entry.job.metadata.clone(),
-                };
-                state.in_progress.insert(
-                    entry.job.id.clone(),
-                    InProgressJob {
-                        result_tx: entry.result_tx,
-                        last_heartbeat: Instant::now(),
-                    },
-                );
-                return Ok(Json(resp));
+    let job = tokio::select! {
+        biased;
+        result = state.queue.dequeue() => {
+            match result {
+                Some(job) => job,
+                None => return Err(StatusCode::NO_CONTENT),
             }
         }
-
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
+        _ = tokio::time::sleep(timeout) => {
             return Err(StatusCode::NO_CONTENT);
         }
+    };
 
-        tokio::select! {
-            _ = state.available_notify.notified() => {},
-            _ = tokio::time::sleep(remaining) => {},
-        }
+    // Resolve the pending entry for this job.
+    let item = state.pending.lock().unwrap().remove(&job.id);
+    let Some((_work, reply_tx)) = item else {
+        // Caller cancelled before the work handler picked it up — skip.
+        // Return 204 to tell the worker to poll again.
+        return Err(StatusCode::NO_CONTENT);
+    };
+
+    if reply_tx.is_closed() {
+        // Caller cancelled — drop.
+        return Err(StatusCode::NO_CONTENT);
     }
+
+    // Build the one-shot channel for the worker outcome.
+    let (outcome_tx, outcome_rx) = oneshot::channel::<WorkerOutcome>();
+
+    state.in_progress.insert(
+        job.id.clone(),
+        InProgressJob {
+            result_tx: outcome_tx,
+            last_heartbeat: Instant::now(),
+        },
+    );
+
+    // Spawn a task that waits for the worker outcome and translates it into
+    // the TargetResult sent back to the original dispatcher caller.
+    tokio::spawn(async move {
+        let result = match outcome_rx.await {
+            Ok(outcome) => match outcome {
+                WorkerOutcome::Complete {
+                    content_type,
+                    size,
+                    stream,
+                } => Ok(TargetResult::Complete(JobResult::Success {
+                    content_type,
+                    size,
+                    stream,
+                })),
+                WorkerOutcome::Redirect { location, message } => {
+                    Ok(TargetResult::Complete(JobResult::Redirect {
+                        location,
+                        message,
+                    }))
+                }
+                WorkerOutcome::Reject { reason } => Ok(TargetResult::Reject { reason }),
+                WorkerOutcome::Error { message } => {
+                    Err(ActionError::ResourceError(message))
+                }
+            },
+            Err(_) => Err(ActionError::ResourceError(
+                "worker heartbeat timeout or disconnect".into(),
+            )),
+        };
+        let _ = reply_tx.send(result);
+    });
+
+    let resp = WorkResponse {
+        job_id: job.id.clone(),
+        request: job.request.clone(),
+        user: job.user.clone(),
+        metadata: job.metadata.clone(),
+    };
+
+    Ok(Json(resp))
 }
 
 /// Heartbeat endpoint. Workers call this periodically to prevent timeout eviction.
@@ -157,7 +227,7 @@ async fn handle_heartbeat(
 }
 
 /// Completion data endpoint. Worker posts the successful response body as a
-/// streaming HTTP request body; the waiting `execute()` future receives a
+/// streaming HTTP request body; the waiting caller receives a
 /// streaming `JobResult::Success`.
 async fn handle_complete_data(
     State(state): State<Arc<RemotePoolState>>,
@@ -200,7 +270,7 @@ async fn handle_complete_data(
             let outcome = WorkerOutcome::Complete {
                 content_type,
                 size,
-                stream: Box::new(ReceiverStream::new(rx)),
+                stream: Box::new(tokio_stream::wrappers::ReceiverStream::new(rx)),
             };
             let _ = entry.result_tx.send(outcome);
             StatusCode::OK
@@ -262,10 +332,11 @@ async fn handle_complete_error(
 
 /// Dispatches jobs to external workers via HTTP long-poll.
 ///
-/// On construction this spawns an axum HTTP server with three endpoints:
+/// On `start_scheduler`, this spawns an axum HTTP server with endpoints:
 ///
-/// - `GET  /work?timeout_ms=N`   — long-poll; blocks until a job is available,
-///   returns job JSON, or 204 on timeout.
+/// - `GET  /work?timeout_ms=N`   — long-poll; directly dequeues from the
+///   dispatcher queue, drops the local work future, and returns job JSON.
+///   Returns 204 on timeout.
 /// - `POST /heartbeat/{job_id}`  — worker keepalive; resets the heartbeat timer.
 /// - `POST /complete/data/{job_id}`     — worker streams the successful body.
 /// - `POST /complete/redirect/{job_id}` — worker posts redirect JSON.
@@ -273,21 +344,34 @@ async fn handle_complete_error(
 /// - `POST /complete/error/{job_id}`    — worker posts error JSON.
 ///
 /// A background reaper task evicts jobs whose heartbeat has expired, which
-/// causes the suspended `execute()` future to return a `ResourceError`.
+/// causes the suspended caller to receive a `ResourceError`.
 ///
-/// This executor must always be paired with a `remote` target action. The
-/// `work` future passed to `execute()` is ignored — all work is done remotely.
+/// This executor must always be paired with a `remote` target action.
 pub struct RemotePoolExecutor {
-    state: Arc<RemotePoolState>,
+    bind: String,
+    heartbeat_timeout: Duration,
 }
 
 impl RemotePoolExecutor {
     pub fn new(bind: &str, heartbeat_timeout: Duration) -> Self {
-        let state = Arc::new(RemotePoolState {
-            available: Mutex::new(VecDeque::new()),
-            available_notify: Notify::new(),
-            in_progress: DashMap::new(),
+        Self {
+            bind: bind.to_string(),
             heartbeat_timeout,
+        }
+    }
+}
+
+impl Executor<TargetResult> for RemotePoolExecutor {
+    fn start_scheduler(
+        &self,
+        queue: Arc<dyn Queue>,
+        pending: Arc<PendingMap<TargetResult>>,
+    ) {
+        let state = Arc::new(RemotePoolState {
+            queue,
+            pending,
+            in_progress: DashMap::new(),
+            heartbeat_timeout: self.heartbeat_timeout,
         });
 
         // HTTP server task.
@@ -303,7 +387,7 @@ impl RemotePoolExecutor {
             .route("/complete/error/{job_id}", post(handle_complete_error))
             .with_state(Arc::clone(&state));
 
-        let bind_addr = bind.to_string();
+        let bind_addr = self.bind.clone();
         tokio::spawn(async move {
             let listener = tokio::net::TcpListener::bind(&bind_addr)
                 .await
@@ -318,10 +402,7 @@ impl RemotePoolExecutor {
         });
 
         // Heartbeat reaper task.
-        //
-        // When an `InProgressJob` is removed here its `result_tx` is dropped,
-        // which causes the waiting `result_rx.await` in `execute()` to return
-        // `Err(RecvError)` → `ActionError::ResourceError("worker heartbeat timeout")`.
+        let heartbeat_timeout = self.heartbeat_timeout;
         let reaper_state = Arc::clone(&state);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(heartbeat_timeout / 2);
@@ -341,75 +422,5 @@ impl RemotePoolExecutor {
                 });
             }
         });
-
-        Self { state }
-    }
-}
-
-impl<T: Send + 'static> Executor<T> for RemotePoolExecutor {
-    fn execute(
-        &self,
-        job: &Job,
-        action_type_id: TypeId,
-        work: BoxFuture<'static, Result<T, ActionError>>,
-    ) -> BoxFuture<'_, Result<T, ActionError>> {
-        use std::any::Any;
-
-        // The action must be RemoteTarget and the result type must be TargetResult.
-        // Both are enforced by config validation, but we guard here for safety.
-        if action_type_id != TypeId::of::<RemoteTarget>()
-            || TypeId::of::<T>() != TypeId::of::<TargetResult>()
-        {
-            drop(work);
-            return Box::pin(async {
-                Err(ActionError::ConfigError(
-                    "remote_pool executor requires a 'remote' target action".into(),
-                ))
-            });
-        }
-
-        let (result_tx, result_rx) = oneshot::channel::<WorkerOutcome>();
-
-        self.state
-            .available
-            .lock()
-            .unwrap()
-            .push_back(AvailableJob {
-                job: job.clone(),
-                result_tx,
-            });
-        self.state.available_notify.notify_one();
-
-        Box::pin(async move {
-            let outcome = result_rx.await.map_err(|_| {
-                ActionError::ResourceError("worker heartbeat timeout or disconnect".into())
-            })?;
-
-            let target_result: TargetResult = match outcome {
-                WorkerOutcome::Complete {
-                    content_type,
-                    size,
-                    stream,
-                } => TargetResult::Complete(JobResult::Success {
-                    content_type,
-                    size,
-                    stream,
-                }),
-                WorkerOutcome::Redirect { location, message } => {
-                    TargetResult::Complete(JobResult::Redirect { location, message })
-                }
-                WorkerOutcome::Reject { reason } => TargetResult::Reject { reason },
-                WorkerOutcome::Error { message } => {
-                    return Err(ActionError::ResourceError(message));
-                }
-            };
-
-            // Safe: TypeId guard above confirmed T == TargetResult.
-            let boxed: Box<dyn Any + Send> = Box::new(target_result);
-            boxed
-                .downcast::<T>()
-                .map(|b| *b)
-                .map_err(|_| ActionError::ResourceError("remote_pool: type mismatch".into()))
-        })
     }
 }

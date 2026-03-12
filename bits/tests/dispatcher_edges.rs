@@ -41,7 +41,11 @@ async fn async_pool_respects_concurrency_limit() {
             running.fetch_sub(1, Ordering::SeqCst);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(
+            &job,
+            DispatchGuard::None,
+            work,
+        )));
     }
 
     for h in handles {
@@ -82,7 +86,11 @@ async fn thread_pool_respects_concurrency_limit() {
             running.fetch_sub(1, Ordering::SeqCst);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(
+            &job,
+            DispatchGuard::None,
+            work,
+        )));
     }
 
     for h in handles {
@@ -122,7 +130,11 @@ async fn async_pool_fifo_preserves_order() {
             order.lock().unwrap().push(i);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(
+            &job,
+            DispatchGuard::None,
+            work,
+        )));
         // Small delay to ensure enqueue order is deterministic.
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -160,7 +172,11 @@ async fn thread_pool_fifo_preserves_order() {
             order.lock().unwrap().push(i);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(
+            &job,
+            DispatchGuard::None,
+            work,
+        )));
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -219,7 +235,8 @@ async fn thread_pool_cost_weighted_ordering() {
     });
 
     let blocker_h = tokio::spawn(dispatcher.dispatch(&blocker, DispatchGuard::None, blocker_work));
-    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, DispatchGuard::None, expensive_work));
+    let expensive_h =
+        tokio::spawn(dispatcher.dispatch(&expensive, DispatchGuard::None, expensive_work));
     let cheap_h = tokio::spawn(dispatcher.dispatch(&cheap, DispatchGuard::None, cheap_work));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -269,7 +286,8 @@ async fn thread_pool_age_priority_ordering() {
             order_e.lock().unwrap().push(100);
             Ok(CheckResult::Pass)
         });
-    let expensive_h = tokio::spawn(dispatcher.dispatch(&expensive, DispatchGuard::None, expensive_work));
+    let expensive_h =
+        tokio::spawn(dispatcher.dispatch(&expensive, DispatchGuard::None, expensive_work));
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -323,7 +341,10 @@ async fn dispatcher_default_executor_is_async_pool() {
         Box::pin(async { Ok(CheckResult::Pass) });
 
     let result = dispatcher.dispatch(&job, DispatchGuard::None, work).await;
-    assert!(result.is_ok(), "default executor should run work successfully");
+    assert!(
+        result.is_ok(),
+        "default executor should run work successfully"
+    );
 }
 
 /// When only concurrency is set (no queue), FIFO is used by default.
@@ -331,7 +352,7 @@ async fn dispatcher_default_executor_is_async_pool() {
 async fn dispatcher_default_queue_is_fifo() {
     let dispatcher = Arc::new(
         Dispatcher::<CheckResult>::from_config(
-            None,                            // default queue
+            None, // default queue
             Some(&ExecutorKind::AsyncPool),
             Some(1),
         )
@@ -348,7 +369,11 @@ async fn dispatcher_default_queue_is_fifo() {
             order.lock().unwrap().push(i);
             Ok(CheckResult::Pass)
         });
-        handles.push(tokio::spawn(dispatcher.dispatch(&job, DispatchGuard::None, work)));
+        handles.push(tokio::spawn(dispatcher.dispatch(
+            &job,
+            DispatchGuard::None,
+            work,
+        )));
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 

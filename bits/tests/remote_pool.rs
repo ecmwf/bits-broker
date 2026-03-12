@@ -519,7 +519,9 @@ async fn remote_pool_preserves_cost_weighted_ordering() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     client
-        .post(format!("http://127.0.0.1:{port}/complete/reject/{blocker_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/complete/reject/{blocker_id}"
+        ))
         .json(&serde_json::json!({"reason": "release blocker"}))
         .send()
         .await
@@ -562,7 +564,9 @@ async fn remote_pool_preserves_cost_weighted_ordering() {
         .unwrap();
 
     let _ = bits.poll(&blocker.id, Some(Duration::from_secs(5))).await;
-    let _ = bits.poll(&h_expensive.id, Some(Duration::from_secs(5))).await;
+    let _ = bits
+        .poll(&h_expensive.id, Some(Duration::from_secs(5)))
+        .await;
     let _ = bits.poll(&h_cheap.id, Some(Duration::from_secs(5))).await;
 }
 
@@ -596,7 +600,9 @@ async fn remote_pool_preserves_age_priority_ordering() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     client
-        .post(format!("http://127.0.0.1:{port}/complete/reject/{blocker_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/complete/reject/{blocker_id}"
+        ))
         .json(&serde_json::json!({"reason": "release blocker"}))
         .send()
         .await
@@ -639,7 +645,9 @@ async fn remote_pool_preserves_age_priority_ordering() {
         .unwrap();
 
     let _ = bits.poll(&blocker.id, Some(Duration::from_secs(5))).await;
-    let _ = bits.poll(&h_expensive.id, Some(Duration::from_secs(5))).await;
+    let _ = bits
+        .poll(&h_expensive.id, Some(Duration::from_secs(5)))
+        .await;
     let _ = bits.poll(&h_cheap.id, Some(Duration::from_secs(5))).await;
 }
 

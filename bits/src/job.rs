@@ -24,15 +24,20 @@ fn default_reconnect_deadline() -> Arc<Mutex<Instant>> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// A unit of work flowing through checks, transforms, and a terminal target.
 pub struct Job {
+    /// Unique identifier for the job.
     pub id: String,
     /// The original request as submitted by the client. Never modified after creation.
     /// Used as the restart point on broker recovery.
     pub original_request: Value,
     /// The working request, mutated by transform actions as the job flows through the pipeline.
     pub request: Value,
+    /// Arbitrary user-scoped context carried alongside the request.
     pub user: Value,
+    /// Creation timestamp used for routing and persistence metadata.
     pub created_at: DateTime<Utc>,
+    /// Free-form metadata available to actions and persistence backends.
     pub metadata: Value,
     /// Set by `Bits::cancel()`. Checked in the pipeline before each action.
     #[serde(skip, default = "default_cancelled")]
@@ -52,10 +57,12 @@ pub struct Job {
 }
 
 impl Job {
+    /// Creates a new job with a generated id.
     pub fn new(request: Value) -> Self {
         Self::new_with_id(uuid::Uuid::new_v4().to_string(), request)
     }
 
+    /// Creates a new job with an explicit id.
     pub fn new_with_id(id: String, request: Value) -> Self {
         Self {
             id,
@@ -72,6 +79,7 @@ impl Job {
         }
     }
 
+    /// Reconstructs a job from a durable persistence record.
     pub fn restore(record: PersistentJobRecord) -> Self {
         Self {
             id: record.job_id,
@@ -88,6 +96,7 @@ impl Job {
         }
     }
 
+    /// Returns whether cancellation has been requested for this job.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }

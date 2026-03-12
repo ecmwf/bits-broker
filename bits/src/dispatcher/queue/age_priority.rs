@@ -113,7 +113,11 @@ fn service_waiters(entries: &mut Vec<Entry>, waiters: &mut VecDeque<oneshot::Sen
     }
 }
 
-fn handle_cmd(cmd: WorkerCmd, entries: &mut Vec<Entry>, waiters: &mut VecDeque<oneshot::Sender<Job>>) {
+fn handle_cmd(
+    cmd: WorkerCmd,
+    entries: &mut Vec<Entry>,
+    waiters: &mut VecDeque<oneshot::Sender<Job>>,
+) {
     match cmd {
         WorkerCmd::Enqueue(entry) => entries.push(entry),
         WorkerCmd::Dequeue(reply) => waiters.push_back(reply),

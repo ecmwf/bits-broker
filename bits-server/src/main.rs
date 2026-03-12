@@ -7,8 +7,6 @@
 
 use std::sync::Arc;
 
-use bits::Bits;
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -23,8 +21,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     });
     let config_str = std::fs::read_to_string(&config_path)?;
-    let bits = Arc::new(Bits::from_config(&config_str)?);
-    let server_config = bits.server_config().clone();
+    let (bits, server_config) = bits::parse_bootstrap(&config_str)?.into_parts()?;
+    let bits = Arc::new(bits);
 
     bits::server::serve(bits, server_config).await
 }

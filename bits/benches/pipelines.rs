@@ -158,26 +158,21 @@ fn bench_throughput(c: &mut Criterion) {
 
         for &n in CONCURRENCY_LEVELS {
             group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(
-                BenchmarkId::new(name, n),
-                &n,
-                |b, &n| {
-                    let bits = bits.clone();
-                    b.to_async(&rt).iter(|| async {
-                        let futs: Vec<_> = (0..n)
-                            .map(|_| {
-                                let bits = bits.clone();
-                                async move {
-                                    let handle =
-                                        bits.submit(Job::new(serde_json::json!({})));
-                                    bits.poll(&handle.id, None).await
-                                }
-                            })
-                            .collect();
-                        futures::future::join_all(futs).await
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(name, n), &n, |b, &n| {
+                let bits = bits.clone();
+                b.to_async(&rt).iter(|| async {
+                    let futs: Vec<_> = (0..n)
+                        .map(|_| {
+                            let bits = bits.clone();
+                            async move {
+                                let handle = bits.submit(Job::new(serde_json::json!({})));
+                                bits.poll(&handle.id, None).await
+                            }
+                        })
+                        .collect();
+                    futures::future::join_all(futs).await
+                });
+            });
         }
     }
 

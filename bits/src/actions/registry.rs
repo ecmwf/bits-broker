@@ -198,8 +198,8 @@ mod tests {
         let factory: RuntimeActionFactory =
             Arc::new(|_| Err(ActionError::ConfigError("unused".into())));
 
-        let err =
-            register_runtime_action("http", factory).expect_err("should fail: conflicts with builtin");
+        let err = register_runtime_action("http", factory)
+            .expect_err("should fail: conflicts with builtin");
         assert!(matches!(err, ActionError::ConfigError(_)));
     }
 }

@@ -25,7 +25,10 @@ impl TransformAction for AddField {
             });
         };
 
-        map.insert(self.key.clone(), serde_json::Value::String(self.value.clone()));
+        map.insert(
+            self.key.clone(),
+            serde_json::Value::String(self.value.clone()),
+        );
         Ok(TransformResult::Continue)
     }
 }
@@ -40,7 +43,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("created: {:?}", action);
 
     let names = list_actions();
-    println!("registered: {}", names.iter().any(|n| n == "custom_add_field"));
+    println!(
+        "registered: {}",
+        names.iter().any(|n| n == "custom_add_field")
+    );
 
     Ok(())
 }

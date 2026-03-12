@@ -1,6 +1,7 @@
 type ByteStream =
     Box<dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + Unpin>;
 
+/// Final outcome produced by a routed job.
 pub enum JobResult {
     /// Job completed successfully with streaming data.
     Success {

@@ -20,6 +20,7 @@ pub use crate::register_action;
 // ================================
 
 #[derive(Debug)]
+/// Error returned by an action during routing or dispatch.
 pub enum ActionError {
     NetworkError(String),
     QueueFull(String),
@@ -54,6 +55,7 @@ impl std::error::Error for ActionError {}
 //   Actions
 // ================================
 
+/// A configured pipeline step.
 pub enum Action {
     Check(
         Arc<dyn CheckAction>,
@@ -71,6 +73,7 @@ pub enum Action {
 }
 
 impl Action {
+    /// Returns true when this action ends a route.
     pub fn is_terminal(&self) -> bool {
         matches!(self, Action::Target(..) | Action::Switch(..))
     }
@@ -98,8 +101,11 @@ pub trait CheckAction: Send + Sync {
 }
 
 #[derive(Debug)]
+/// Result of evaluating a check action.
 pub enum CheckResult {
+    /// The job may continue through the route.
     Pass,
+    /// The route is rejected with a human-readable reason.
     Reject { reason: String },
 }
 
@@ -114,8 +120,11 @@ pub trait TransformAction: Send + Sync {
 }
 
 #[derive(Debug)]
+/// Result of running a transform action.
 pub enum TransformResult {
+    /// The job was updated and may continue through the route.
     Continue,
+    /// The route is rejected with a human-readable reason.
     Reject { reason: String },
 }
 
@@ -130,7 +139,10 @@ pub trait TargetAction: Send + Sync {
 }
 
 #[derive(Debug)]
+/// Result of dispatching a job to a terminal target.
 pub enum TargetResult {
+    /// The target produced a final job result.
     Complete(JobResult),
+    /// The target rejected the job without a system failure.
     Reject { reason: String },
 }

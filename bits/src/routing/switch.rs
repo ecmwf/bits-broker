@@ -129,12 +129,8 @@ impl TargetAction for Switch {
                                 let j = (*current_job).clone();
                                 let work: BoxFuture<'static, Result<TargetResult, ActionError>> =
                                     Box::pin(async move { t.dispatch(&j).await });
-                                d.dispatch(
-                                    &current_job,
-                                    DispatchGuard::CancelledOrClientGone,
-                                    work,
-                                )
-                                .await?
+                                d.dispatch(&current_job, DispatchGuard::CancelledOrClientGone, work)
+                                    .await?
                             }
                             None => {
                                 if current_job.is_cancelled() {
@@ -242,17 +238,15 @@ mod tests {
             }
         }
 
-        let switch = Switch::new(vec![
-            Route::new(
-                "blocker".to_string(),
-                vec![Action::Target(
-                    Arc::new(BlockingTarget {
-                        release_rx: std::sync::Mutex::new(Some(release_rx)),
-                    }),
-                    Some(dispatcher.clone()),
-                )],
-            ),
-        ]);
+        let switch = Switch::new(vec![Route::new(
+            "blocker".to_string(),
+            vec![Action::Target(
+                Arc::new(BlockingTarget {
+                    release_rx: std::sync::Mutex::new(Some(release_rx)),
+                }),
+                Some(dispatcher.clone()),
+            )],
+        )]);
 
         let blocker_job = Job::new(serde_json::json!({}));
         blocker_job.set_reconnect_deadline_for_test(
@@ -375,7 +369,8 @@ mod tests {
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        job.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        job.cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         let _ = release_tx.send(());
         let _ = blocker_handle.await;

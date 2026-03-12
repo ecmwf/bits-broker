@@ -36,7 +36,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("created: {:?}", action);
 
     let names = list_actions();
-    println!("registered: {}", names.iter().any(|n| n == "custom_echo_target"));
+    println!(
+        "registered: {}",
+        names.iter().any(|n| n == "custom_echo_target")
+    );
 
     Ok(())
 }

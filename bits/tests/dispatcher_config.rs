@@ -1,7 +1,7 @@
 mod common;
 
-use bits::dispatcher::{ExecutorKind, QueueKind, RemotePoolConfig};
 use bits::Bits;
+use bits::dispatcher::{ExecutorKind, QueueKind, RemotePoolConfig};
 
 #[test]
 fn executor_kind_deserializes_async_pool() {
@@ -31,7 +31,10 @@ routes:
 "#;
 
     let bits = Bits::from_config(config);
-    assert!(bits.is_ok(), "target::remote without executor should parse successfully");
+    assert!(
+        bits.is_ok(),
+        "target::remote without executor should parse successfully"
+    );
 }
 
 #[test]

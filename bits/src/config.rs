@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::Bits;
 use crate::actions::Action;
+use crate::actions::registry::create_action;
 use crate::db::PersistenceStore;
 use crate::dispatcher::{Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig};
-use crate::actions::registry::create_action;
 use crate::routing::{Route, switch::Switch};
 use crate::server::ServerConfig;
 
@@ -64,7 +65,7 @@ fn default_broker_lease_ttl_secs() -> f64 {
     30.0
 }
 
-pub(crate) struct ParsedConfig {
+pub(crate) struct RuntimeConfig {
     pub router: Switch,
     pub sweep_interval: Option<Duration>,
     pub broker_id: String,
@@ -73,10 +74,34 @@ pub(crate) struct ParsedConfig {
     pub job_store: Option<Arc<dyn PersistenceStore>>,
     pub broker_lease_ttl: Duration,
     pub persist_after: Option<Duration>,
+}
+
+/// Parsed startup configuration split into broker runtime and HTTP server parts.
+pub struct Bootstrap {
+    runtime_config: RuntimeConfig,
+    /// Configuration for the built-in HTTP server.
     pub server_config: ServerConfig,
 }
 
-pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::error::Error>> {
+impl Bootstrap {
+    /// Consumes the bootstrap value and constructs a broker runtime.
+    pub fn into_bits(self) -> Result<Bits, Box<dyn std::error::Error>> {
+        Bits::from_runtime_config(self.runtime_config)
+    }
+
+    /// Consumes the bootstrap value and returns both the broker and server config.
+    pub fn into_parts(self) -> Result<(Bits, ServerConfig), Box<dyn std::error::Error>> {
+        let Bootstrap {
+            runtime_config,
+            server_config,
+        } = self;
+        let bits = Bits::from_runtime_config(runtime_config)?;
+        Ok((bits, server_config))
+    }
+}
+
+/// Parses the top-level YAML configuration used by the BITS binaries.
+pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Error>> {
     let raw: serde_json::Value = serde_yaml::from_str(config)?;
 
     let bits_cfg: BitsConfig = raw
@@ -195,15 +220,17 @@ pub(crate) fn parse_config(config: &str) -> Result<ParsedConfig, Box<dyn std::er
         .validate()
         .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
 
-    Ok(ParsedConfig {
-        router,
-        sweep_interval,
-        broker_id,
-        internal_poll_base_url,
-        internal_poll_timeout,
-        job_store,
-        broker_lease_ttl,
-        persist_after,
+    Ok(Bootstrap {
+        runtime_config: RuntimeConfig {
+            router,
+            sweep_interval,
+            broker_id,
+            internal_poll_base_url,
+            internal_poll_timeout,
+            job_store,
+            broker_lease_ttl,
+            persist_after,
+        },
         server_config,
     })
 }
@@ -433,5 +460,26 @@ impl Clone for Registries {
             transforms: self.transforms.clone(),
             targets: self.targets.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Bits;
+
+    #[tokio::test]
+    async fn test_empty_pipeline() {
+        let config = r#"
+routes:
+  test_pipeline: []
+"#;
+        let err = Bits::from_config(config)
+            .err()
+            .expect("empty pipeline should be rejected");
+        assert!(
+            err.to_string()
+                .contains("route 'test_pipeline' must not be empty"),
+            "unexpected error: {err}"
+        );
     }
 }

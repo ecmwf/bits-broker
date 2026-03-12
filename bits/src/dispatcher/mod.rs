@@ -1,9 +1,7 @@
 pub mod executor;
 pub mod queue;
 
-pub use executor::{
-    AsyncPoolExecutor, RemotePoolConfig, RemotePoolExecutor, ThreadPoolExecutor,
-};
+pub use executor::{AsyncPoolExecutor, RemotePoolConfig, RemotePoolExecutor, ThreadPoolExecutor};
 pub use queue::{AgePriorityQueue, CostWeightedQueue, FifoQueue, Queue, QueueKind};
 
 use std::any::{Any, TypeId};
@@ -108,18 +106,16 @@ impl<T: Send + 'static> Dispatcher<T> {
                     TypeId::of::<TargetResult>(),
                     "remote_pool executor requires T == TargetResult"
                 );
-                let concrete: Arc<dyn Executor<TargetResult>> =
-                    Arc::new(RemotePoolExecutor::new(
-                        &cfg.bind,
-                        Duration::from_secs_f64(cfg.heartbeat_timeout_secs),
-                    ));
+                let concrete: Arc<dyn Executor<TargetResult>> = Arc::new(RemotePoolExecutor::new(
+                    &cfg.bind,
+                    Duration::from_secs_f64(cfg.heartbeat_timeout_secs),
+                ));
                 // Safety: T == TargetResult verified by the assert above.
                 // Arc<dyn Executor<TargetResult>> and Arc<dyn Executor<T>>
                 // have identical layout when T == TargetResult.
                 let any: Box<dyn Any> = Box::new(concrete);
-                *any.downcast::<Arc<dyn Executor<T>>>().unwrap_or_else(|_| {
-                    panic!("remote_pool: type mismatch (T != TargetResult)")
-                })
+                *any.downcast::<Arc<dyn Executor<T>>>()
+                    .unwrap_or_else(|_| panic!("remote_pool: type mismatch (T != TargetResult)"))
             }
         };
         let queue: Arc<dyn Queue> = match queue.unwrap_or(&QueueKind::Fifo) {

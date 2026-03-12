@@ -173,6 +173,10 @@ impl BrokerLeaseStore for BackendFailingStore {
 
 #[tokio::test]
 async fn threshold_persistence_and_cleanup() {
+    // Verifies the threshold persistence lifecycle end-to-end:
+    // 1) a long-running job crosses `persist_after` and is written to durable store,
+    // 2) ownership can be observed in the store while in-flight,
+    // 3) durable record is removed after terminal completion.
     let store = Arc::new(MemoryStore::new());
     let bits = test_bits(
         "cleanup-broker",
@@ -190,6 +194,8 @@ async fn threshold_persistence_and_cleanup() {
 
 #[tokio::test]
 async fn fast_jobs_do_not_persist() {
+    // Ensures short-lived jobs stay fully ephemeral:
+    // if execution finishes before `persist_after`, no durable job record is created.
     let store = Arc::new(MemoryStore::new());
     let bits = test_bits(
         "fast-broker",
@@ -207,6 +213,9 @@ async fn fast_jobs_do_not_persist() {
 
 #[tokio::test]
 async fn active_lease_prevents_reclaim_when_proxy_fails() {
+    // Strict reclaim gate test:
+    // even if proxying to owner fails (stub returns 500), reclaim must NOT happen
+    // while owner lease is still active. Ownership should remain with the original owner.
     let store = Arc::new(MemoryStore::new());
     let owner_id = "owner-live";
     let owner_url = start_owner_stub(StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -241,6 +250,9 @@ async fn active_lease_prevents_reclaim_when_proxy_fails() {
 
 #[tokio::test]
 async fn expired_lease_enables_reclaim() {
+    // Reclaim happy path:
+    // with an expired owner lease, a different broker is allowed to claim durable ownership
+    // and continue processing from restored job state.
     let store = Arc::new(MemoryStore::new());
     let owner_id = "owner-expired";
     let claimant_id = "claimant-b";
@@ -280,6 +292,9 @@ async fn expired_lease_enables_reclaim() {
 
 #[tokio::test]
 async fn expired_lease_without_record_is_job_lost() {
+    // Terminal missing-record behavior:
+    // when owner lease is expired and no durable record exists for the job id,
+    // poll must return `JobLost` (not perpetual pending).
     let store = Arc::new(MemoryStore::new());
     let owner_id = "owner-missing";
     let claimant = test_bits("claimant-c", 10, None, Some(Arc::clone(&store)));
@@ -303,6 +318,9 @@ async fn expired_lease_without_record_is_job_lost() {
 
 #[tokio::test]
 async fn config_rejects_invalid_threshold_ordering() {
+    // Config safety check:
+    // `persist_after + persist_guard` must be strictly less than `poll_timeout`
+    // so durable persistence has time to happen before poll timeout behavior.
     let cfg = r#"
 bits:
   poll_timeout_ms: 1000
@@ -320,6 +338,10 @@ routes:
 
 #[tokio::test]
 async fn backend_claim_errors_backoff_within_single_poll() {
+    // Backend outage resilience test:
+    // claim attempts that return backend errors should back off and retry within
+    // the same poll call, rather than hammering storage with immediate retries.
+    // We assert both elapsed backoff time and multiple attempts in one poll.
     let store = Arc::new(BackendFailingStore::new());
     let router = Switch::new(vec![Route::new("default".into(), vec![])]);
     let bits = Bits::from_router_for_tests(

@@ -1,71 +1,57 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use futures::TryStreamExt;
-use tracing::Instrument;
 
-use crate::actions::{TargetAction, TargetResult};
-use crate::config::parse_config;
-use crate::db::{BrokerLeaseRecord, ClaimResult, DbError, PersistenceStore, PersistentJobRecord};
+use crate::config::{RuntimeConfig, parse_bootstrap};
+use crate::db::{ClaimResult, DbError, PersistenceStore};
 use crate::job::Job;
 use crate::result::JobResult;
 use crate::routing::switch::Switch;
-use crate::server::ServerConfig;
+use crate::runtime::maintenance::{ConnectedGuard, start_sweeper};
+use crate::runtime::recovery::{LeaseLookup, owner_from_job_id};
+use crate::runtime::runner::spawn_job;
 
 /// Buffer added on top of the poll timeout to allow for the reconnect round-trip.
 const RECONNECT_BUFFER: Duration = Duration::from_secs(5);
 /// Default sweep interval for removing expired completed jobs.
 const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
-struct ConnectedGuard(Arc<AtomicBool>);
-
-impl ConnectedGuard {
-    fn new(flag: Arc<AtomicBool>) -> Self {
-        flag.store(true, Ordering::Relaxed);
-        Self(flag)
-    }
-}
-
-impl Drop for ConnectedGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Relaxed);
-    }
-}
-
 #[derive(Debug)]
+/// Result of polling a submitted job.
 pub enum PollOutcome {
+    /// The job reached a terminal state and produced a final result.
     Ready(JobResult),
+    /// The job is still in progress; poll again using the returned id.
     Pending { id: String },
+    /// No local, remote, or durable record exists for this job id.
     NotFound,
+    /// The original owner disappeared and no durable state remained to recover.
     JobLost,
 }
 
+/// Handle returned from submission and used for later polling.
 pub struct JobHandle {
+    /// Stable identifier for the submitted job.
     pub id: String,
 }
 
+/// Main broker runtime used to submit, cancel, and poll jobs.
 pub struct Bits {
-    router: Arc<Switch>,
-    jobs: Arc<DashMap<String, Arc<Job>>>,
-    broker_id: String,
-    internal_poll_base_url: String,
-    internal_poll_timeout: Duration,
-    persist_after: Option<Duration>,
-    job_store: Option<Arc<dyn PersistenceStore>>,
-    internal_client: reqwest::Client,
-    server_config: ServerConfig,
-}
-
-enum LeaseLookup {
-    Active(BrokerLeaseRecord),
-    MissingOrExpired,
-    Unknown,
+    pub(crate) router: Arc<Switch>,
+    pub(crate) jobs: Arc<DashMap<String, Arc<Job>>>,
+    pub(crate) broker_id: String,
+    pub(crate) internal_poll_base_url: String,
+    pub(crate) internal_poll_timeout: Duration,
+    pub(crate) persist_after: Option<Duration>,
+    pub(crate) job_store: Option<Arc<dyn PersistenceStore>>,
+    pub(crate) internal_client: reqwest::Client,
 }
 
 impl Bits {
     #[doc(hidden)]
+    /// Constructs a broker directly from runtime pieces for integration tests.
     pub fn from_router_for_tests(
         router: Switch,
         broker_id: String,
@@ -87,15 +73,20 @@ impl Bits {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to build reqwest client"),
-            server_config: ServerConfig::default(),
         };
         start_sweeper(bits.jobs.clone(), DEFAULT_SWEEP_INTERVAL);
         bits.start_broker_lease_heartbeat(broker_lease_ttl);
         bits
     }
 
+    /// Builds a broker from the YAML configuration format used by the binaries.
     pub fn from_config(config: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let parsed = parse_config(config)?;
+        parse_bootstrap(config)?.into_bits()
+    }
+
+    pub(crate) fn from_runtime_config(
+        parsed: RuntimeConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let sweep_interval = parsed.sweep_interval.unwrap_or(DEFAULT_SWEEP_INTERVAL);
         let instance_id = format!("{}-{}", parsed.broker_id, uuid::Uuid::new_v4());
         let bits = Bits {
@@ -109,7 +100,6 @@ impl Bits {
             internal_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
-            server_config: parsed.server_config,
         };
 
         start_sweeper(bits.jobs.clone(), sweep_interval);
@@ -118,11 +108,7 @@ impl Bits {
         Ok(bits)
     }
 
-    /// Returns the server configuration parsed from the `server:` YAML section.
-    pub fn server_config(&self) -> &ServerConfig {
-        &self.server_config
-    }
-
+    /// Submits a job for routing and execution.
     pub fn submit(&self, job: Job) -> JobHandle {
         self.submit_with_state(job, false)
     }
@@ -138,81 +124,30 @@ impl Bits {
         let job = Arc::new(job);
         self.jobs.insert(job_id.clone(), job.clone());
 
-        let router = self.router.clone();
-        let store = self.job_store.clone();
-        let persist_after = self.persist_after;
-        let broker_id = self.broker_id.clone();
-        let span = tracing::info_span!("job", job.id = %job_id);
-        tracing::info!(parent: &span, "job received");
-
-        tokio::spawn(
-            async move {
-                let started = Instant::now();
-                let router_for_dispatch = Arc::clone(&router);
-                let job_for_dispatch = (*job).clone();
-                let dispatch_fut = async move { dispatch(&router_for_dispatch, job_for_dispatch).await };
-                tokio::pin!(dispatch_fut);
-
-                let mut persisted = already_persisted;
-
-                let result = if let Some(delay) = persist_after {
-                    tokio::select! {
-                        result = &mut dispatch_fut => result,
-                        _ = tokio::time::sleep(delay) => {
-                            if let Some(store) = &store
-                                && job.result.lock().unwrap().is_none()
-                            {
-                                let record = PersistentJobRecord {
-                                    job_id: job.id.clone(),
-                                    broker_id: broker_id.clone(),
-                                    original_request: job.original_request.clone(),
-                                    user: job.user.clone(),
-                                    metadata: job.metadata.clone(),
-                                    created_at: job.created_at,
-                                };
-                                match store.upsert_job(record).await {
-                                    Ok(_) => persisted = true,
-                                    Err(err) => tracing::warn!(job.id = %job.id, error = %err, "delayed persist failed"),
-                                }
-                            }
-                            (&mut dispatch_fut).await
-                        }
-                    }
-                } else {
-                    (&mut dispatch_fut).await
-                };
-
-                let ms = started.elapsed().as_millis();
-                match &result {
-                    JobResult::Success { .. } => tracing::info!(duration_ms = ms, "job completed"),
-                    JobResult::Redirect { .. } => tracing::info!(duration_ms = ms, "job redirected"),
-                    JobResult::Error { message } => tracing::warn!(duration_ms = ms, error = %message, "job error"),
-                    JobResult::Failed { reason } => tracing::error!(duration_ms = ms, reason = %reason, "job failed"),
-                    JobResult::Cancelled => tracing::info!(duration_ms = ms, "job cancelled"),
-                    JobResult::ClientGone => tracing::info!(duration_ms = ms, "job abandoned: client gone"),
-                }
-
-                *job.result.lock().unwrap() = Some(result);
-                job.notify.notify_waiters();
-
-                if persisted
-                    && let Some(store) = &store
-                {
-                    let _ = store.delete_job(&job.id).await;
-                }
-            }
-            .instrument(span),
+        spawn_job(
+            self.router.clone(),
+            job,
+            self.job_store.clone(),
+            self.persist_after,
+            self.broker_id.clone(),
+            already_persisted,
         );
 
         JobHandle { id: job_id }
     }
 
+    /// Requests cancellation for a previously submitted job.
+    ///
+    /// Cancellation is best-effort and is observed at action boundaries.
     pub fn cancel(&self, id: &str) {
         if let Some(job) = self.jobs.get(id) {
             job.cancelled.store(true, Ordering::Relaxed);
         }
     }
 
+    /// Waits for a job result or reports that the caller should retry later.
+    ///
+    /// When `timeout` is `Some`, the call long-polls for up to that duration.
     pub async fn poll(&self, id: &str, timeout: Option<Duration>) -> PollOutcome {
         if let Some(outcome) = self.poll_local(id, timeout).await {
             return outcome;
@@ -284,48 +219,6 @@ impl Bits {
         }
     }
 
-    async fn claim_with_backoff(
-        &self,
-        store: &Arc<dyn PersistenceStore>,
-        id: &str,
-        expected_owner: &str,
-        timeout: Option<Duration>,
-    ) -> Result<ClaimResult, DbError> {
-        let budget = timeout
-            .unwrap_or(Duration::from_secs(2))
-            .min(Duration::from_secs(2));
-        let deadline = Instant::now() + budget;
-        let mut delay = Duration::from_millis(100);
-
-        loop {
-            match store
-                .claim_if_owner(id, expected_owner, &self.broker_id)
-                .await
-            {
-                Ok(result) => return Ok(result),
-                Err(DbError::Conflict(message)) => return Err(DbError::Conflict(message)),
-                Err(DbError::Backend(message)) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(DbError::Backend(message));
-                    }
-                    let remaining = deadline.saturating_duration_since(now);
-                    let sleep_for = delay.min(remaining);
-                    if sleep_for.is_zero() {
-                        return Err(DbError::Backend(message));
-                    }
-                    tracing::warn!(
-                        job.id = %id,
-                        backoff_ms = sleep_for.as_millis(),
-                        "claim backend error; retrying"
-                    );
-                    tokio::time::sleep(sleep_for).await;
-                    delay = delay.saturating_mul(2).min(Duration::from_secs(1));
-                }
-            }
-        }
-    }
-
     async fn poll_local(&self, id: &str, timeout: Option<Duration>) -> Option<PollOutcome> {
         let job = self.jobs.get(id).map(|r| r.clone())?;
 
@@ -370,189 +263,5 @@ impl Bits {
 
     fn new_job_id(&self) -> String {
         format!("{}~{}", self.broker_id, uuid::Uuid::new_v4())
-    }
-
-    async fn lookup_owner_lease(&self, owner_broker_id: &str) -> LeaseLookup {
-        let Some(store) = &self.job_store else {
-            return LeaseLookup::Unknown;
-        };
-        match store.get_broker_lease(owner_broker_id).await {
-            Ok(Some(lease)) if lease.lease_until > chrono::Utc::now() => LeaseLookup::Active(lease),
-            Ok(_) => LeaseLookup::MissingOrExpired,
-            Err(err) => {
-                tracing::warn!(owner = %owner_broker_id, error = %err, "broker lease lookup failed");
-                LeaseLookup::Unknown
-            }
-        }
-    }
-
-    async fn try_proxy_with_lease(
-        &self,
-        lease: &BrokerLeaseRecord,
-        id: &str,
-        timeout: Option<Duration>,
-    ) -> Option<PollOutcome> {
-        let timeout = timeout.unwrap_or(self.internal_poll_timeout);
-        let base = lease.internal_poll_base_url.trim_end_matches('/');
-        let url = format!("{base}/{id}");
-        let response = self
-            .internal_client
-            .get(url)
-            .timeout(timeout)
-            .send()
-            .await
-            .ok()?;
-
-        let status = response.status();
-        if status == reqwest::StatusCode::OK {
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/octet-stream")
-                .to_string();
-            let size = response.content_length().map(|n| n as i64).unwrap_or(-1);
-            let stream = Box::new(
-                response
-                    .bytes_stream()
-                    .map_err(|e| std::io::Error::other(e.to_string())),
-            );
-            return Some(PollOutcome::Ready(JobResult::Success {
-                content_type,
-                size,
-                stream,
-            }));
-        }
-
-        if status == reqwest::StatusCode::SEE_OTHER
-            || status == reqwest::StatusCode::TEMPORARY_REDIRECT
-        {
-            let location = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_string();
-            if location.contains(id) {
-                return Some(PollOutcome::Pending { id: id.to_string() });
-            }
-            return Some(PollOutcome::Ready(JobResult::Redirect {
-                location,
-                message: "proxied redirect".into(),
-            }));
-        }
-
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Some(PollOutcome::NotFound);
-        }
-        if status == reqwest::StatusCode::BAD_REQUEST {
-            return Some(PollOutcome::Ready(JobResult::Error {
-                message: response.text().await.unwrap_or_default(),
-            }));
-        }
-        if status == reqwest::StatusCode::GONE {
-            return Some(PollOutcome::Ready(JobResult::Cancelled));
-        }
-        if status.is_server_error() {
-            return Some(PollOutcome::Pending { id: id.to_string() });
-        }
-
-        None
-    }
-
-    fn start_broker_lease_heartbeat(&self, broker_lease_ttl: Duration) {
-        let Some(store) = &self.job_store else {
-            return;
-        };
-        let store = Arc::clone(store);
-        let broker_id = self.broker_id.clone();
-        let base_url = self.internal_poll_base_url.clone();
-        std::thread::spawn(move || {
-            let tick = broker_lease_ttl
-                .div_f64(2.0)
-                .max(Duration::from_millis(100));
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(err) => {
-                    tracing::warn!(broker_id = %broker_id, error = %err, "failed to start broker lease heartbeat runtime");
-                    return;
-                }
-            };
-
-            loop {
-                if let Err(err) = runtime.block_on(store.upsert_broker_lease(
-                    &broker_id,
-                    &base_url,
-                    broker_lease_ttl,
-                )) {
-                    tracing::warn!(broker_id = %broker_id, error = %err, "broker lease upsert failed");
-                }
-                std::thread::sleep(tick);
-            }
-        });
-    }
-}
-
-fn owner_from_job_id(job_id: &str) -> Option<&str> {
-    let (owner, _suffix) = job_id.split_once('~')?;
-    if owner.is_empty() { None } else { Some(owner) }
-}
-
-fn start_sweeper(jobs: Arc<DashMap<String, Arc<Job>>>, sweep_interval: Duration) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(sweep_interval);
-            let mut expired = Vec::new();
-
-            for entry in jobs.iter() {
-                let job = entry.value();
-                let has_result = job.result.lock().unwrap().is_some();
-
-                if has_result && !job.client_present() {
-                    expired.push(entry.key().clone());
-                }
-            }
-
-            for id in expired {
-                jobs.remove(&id);
-            }
-        }
-    });
-}
-
-async fn dispatch(router: &Switch, job: Job) -> JobResult {
-    match router.dispatch(&job).await {
-        Ok(TargetResult::Complete(result)) => result,
-        Ok(TargetResult::Reject { reason }) => JobResult::Error {
-            message: format!("All pipelines rejected: {}", reason),
-        },
-        Err(crate::actions::ActionError::Cancelled) => JobResult::Cancelled,
-        Err(crate::actions::ActionError::ClientGone) => JobResult::ClientGone,
-        Err(err) => JobResult::Failed {
-            reason: format!("Dispatch failed: {}", err),
-        },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_empty_pipeline() {
-        let config = r#"
-routes:
-  test_pipeline: []
-"#;
-        let err = Bits::from_config(config)
-            .err()
-            .expect("empty pipeline should be rejected");
-        assert!(
-            err.to_string().contains("route 'test_pipeline' must not be empty"),
-            "unexpected error: {err}"
-        );
     }
 }

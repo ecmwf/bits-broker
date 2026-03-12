@@ -3,7 +3,9 @@
 //!     cargo run --example custom_check
 
 use async_trait::async_trait;
-use bits::{ActionError, CheckAction, CheckResult, Job, create_action, list_actions, register_action};
+use bits::{
+    ActionError, CheckAction, CheckResult, Job, create_action, list_actions, register_action,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -28,11 +30,17 @@ impl CheckAction for MatchField {
 register_action!(check, "custom_match_field", MatchField);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let action = create_action("custom_match_field", json!({ "field": "type", "value": "fc" }))?;
+    let action = create_action(
+        "custom_match_field",
+        json!({ "field": "type", "value": "fc" }),
+    )?;
     println!("created: {:?}", action);
 
     let names = list_actions();
-    println!("registered: {}", names.iter().any(|n| n == "custom_match_field"));
+    println!(
+        "registered: {}",
+        names.iter().any(|n| n == "custom_match_field")
+    );
 
     Ok(())
 }

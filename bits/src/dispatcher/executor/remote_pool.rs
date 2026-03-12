@@ -211,9 +211,7 @@ async fn handle_get_work(
                     }))
                 }
                 WorkerOutcome::Reject { reason } => Ok(TargetResult::Reject { reason }),
-                WorkerOutcome::Error { message } => {
-                    Err(ActionError::ResourceError(message))
-                }
+                WorkerOutcome::Error { message } => Err(ActionError::ResourceError(message)),
             },
             Err(_) => Err(ActionError::ResourceError(
                 "worker heartbeat timeout or disconnect".into(),
@@ -382,11 +380,7 @@ impl RemotePoolExecutor {
 }
 
 impl Executor<TargetResult> for RemotePoolExecutor {
-    fn start_scheduler(
-        &self,
-        queue: Arc<dyn Queue>,
-        pending: Arc<PendingMap<TargetResult>>,
-    ) {
+    fn start_scheduler(&self, queue: Arc<dyn Queue>, pending: Arc<PendingMap<TargetResult>>) {
         let state = Arc::new(RemotePoolState {
             queue,
             pending,

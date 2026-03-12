@@ -6,8 +6,8 @@
 //!
 //! Usage from a binary crate:
 //! ```ignore
-//! let bits = Arc::new(Bits::from_config(&config_str)?);
-//! let server_config = bits.server_config().clone();
+//! let (bits, server_config) = bits::parse_bootstrap(&config_str)?.into_parts()?;
+//! let bits = Arc::new(bits);
 //! bits::server::serve(bits, server_config).await?;
 //! ```
 

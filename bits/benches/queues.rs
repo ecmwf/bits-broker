@@ -107,7 +107,11 @@ fn accuracy_scenarios() -> Vec<AccuracyScenario> {
     vec![uniform_batch, bursty_staggered, adversarial_aging]
 }
 
-fn compare_scheduled_jobs(left: &ScheduledJob, right: &ScheduledJob, now: Duration) -> std::cmp::Ordering {
+fn compare_scheduled_jobs(
+    left: &ScheduledJob,
+    right: &ScheduledJob,
+    now: Duration,
+) -> std::cmp::Ordering {
     let left_cost = integer_sqrt(left.cost.max(1) as u128);
     let right_cost = integer_sqrt(right.cost.max(1) as u128);
     let left_wait = now.saturating_sub(left.enqueue_at).as_nanos();
@@ -152,7 +156,9 @@ fn compute_accuracy(jobs: &[ScheduledJob], pops: &[PopEvent]) -> AccuracyReport 
             .map(|(idx, _)| idx)
             .collect();
 
-        eligible.sort_by(|left, right| compare_scheduled_jobs(&jobs[*left], &jobs[*right], pop.popped_at));
+        eligible.sort_by(|left, right| {
+            compare_scheduled_jobs(&jobs[*left], &jobs[*right], pop.popped_at)
+        });
 
         let chosen_pos = eligible.iter().position(|idx| *idx == chosen).unwrap();
         let rank = eligible.len() - chosen_pos;
@@ -301,7 +307,6 @@ fn bench_sequential_drain(c: &mut Criterion) {
                 }
             });
         });
-
     }
 
     group.finish();
@@ -323,83 +328,76 @@ fn bench_concurrent_fan_out(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
 
         group.bench_with_input(BenchmarkId::new("fifo", n), &n, |b, &n| {
-            b.to_async(&rt).iter(|| {
-                async move {
-                    let fifo = Arc::new(FifoQueue::new());
-                    let producers: Vec<_> = (0..n)
-                        .map(|_| {
-                            let q = fifo.clone();
-                            async move {
-                                q.enqueue(job());
-                            }
-                        })
-                        .collect();
-                    let consumers: Vec<_> = (0..n)
-                        .map(|_| {
-                            let q = fifo.clone();
-                            async move {
-                                let _ = q.dequeue().await;
-                            }
-                        })
-                        .collect();
-                    futures::future::join_all(producers).await;
-                    futures::future::join_all(consumers).await;
-                }
+            b.to_async(&rt).iter(|| async move {
+                let fifo = Arc::new(FifoQueue::new());
+                let producers: Vec<_> = (0..n)
+                    .map(|_| {
+                        let q = fifo.clone();
+                        async move {
+                            q.enqueue(job());
+                        }
+                    })
+                    .collect();
+                let consumers: Vec<_> = (0..n)
+                    .map(|_| {
+                        let q = fifo.clone();
+                        async move {
+                            let _ = q.dequeue().await;
+                        }
+                    })
+                    .collect();
+                futures::future::join_all(producers).await;
+                futures::future::join_all(consumers).await;
             });
         });
 
         group.bench_with_input(BenchmarkId::new("cost_weighted", n), &n, |b, &n| {
-            b.to_async(&rt).iter(|| {
-                async move {
-                    let cost = Arc::new(CostWeightedQueue::new());
-                    let producers: Vec<_> = (0..n)
-                        .map(|i| {
-                            let q = cost.clone();
-                            async move {
-                                q.enqueue(job_with_cost(i as u64));
-                            }
-                        })
-                        .collect();
-                    let consumers: Vec<_> = (0..n)
-                        .map(|_| {
-                            let q = cost.clone();
-                            async move {
-                                let _ = q.dequeue().await;
-                            }
-                        })
-                        .collect();
-                    futures::future::join_all(producers).await;
-                    futures::future::join_all(consumers).await;
-                }
+            b.to_async(&rt).iter(|| async move {
+                let cost = Arc::new(CostWeightedQueue::new());
+                let producers: Vec<_> = (0..n)
+                    .map(|i| {
+                        let q = cost.clone();
+                        async move {
+                            q.enqueue(job_with_cost(i as u64));
+                        }
+                    })
+                    .collect();
+                let consumers: Vec<_> = (0..n)
+                    .map(|_| {
+                        let q = cost.clone();
+                        async move {
+                            let _ = q.dequeue().await;
+                        }
+                    })
+                    .collect();
+                futures::future::join_all(producers).await;
+                futures::future::join_all(consumers).await;
             });
         });
 
         group.bench_with_input(BenchmarkId::new("age_priority", n), &n, |b, &n| {
-            b.to_async(&rt).iter(|| {
-                async move {
-                    let age = Arc::new(AgePriorityQueue::new());
-                    let producers: Vec<_> = (0..n)
-                        .map(|i| {
-                            let q = age.clone();
-                            async move {
-                                q.enqueue(job_with_cost(i as u64));
-                            }
-                        })
-                        .collect();
-                    let consumers: Vec<_> = (0..n)
-                        .map(|_| {
-                            let q = age.clone();
-                            async move {
-                                let _ = q.dequeue().await;
-                            }
-                        })
-                        .collect();
-                    futures::future::join_all(producers).await;
-                    futures::future::join_all(consumers).await;
-                }
+            b.to_async(&rt).iter(|| async move {
+                let age = Arc::new(AgePriorityQueue::new());
+                let producers: Vec<_> = (0..n)
+                    .map(|i| {
+                        let q = age.clone();
+                        async move {
+                            q.enqueue(job_with_cost(i as u64));
+                        }
+                    })
+                    .collect();
+                let consumers: Vec<_> = (0..n)
+                    .map(|_| {
+                        let q = age.clone();
+                        async move {
+                            let _ = q.dequeue().await;
+                        }
+                    })
+                    .collect();
+                futures::future::join_all(producers).await;
+                futures::future::join_all(consumers).await;
             });
         });
-
     }
 
     group.finish();

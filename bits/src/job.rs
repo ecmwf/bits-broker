@@ -23,6 +23,10 @@ fn default_reconnect_deadline() -> Arc<Mutex<Instant>> {
     Arc::new(Mutex::new(Instant::now()))
 }
 
+fn default_persisted() -> AtomicBool {
+    AtomicBool::new(false)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 /// A unit of work flowing through checks, transforms, and a terminal target.
 pub struct Job {
@@ -48,6 +52,10 @@ pub struct Job {
     /// Deadline by which the client must reconnect after a poll completes.
     #[serde(skip, default = "default_reconnect_deadline")]
     pub(crate) reconnect_deadline: Arc<Mutex<Instant>>,
+    /// True once a durable record has been successfully written for this job.
+    /// Used by poll and sweeper to know whether durable cleanup is needed.
+    #[serde(skip, default = "default_persisted")]
+    pub(crate) persisted: AtomicBool,
     /// Result slot written by the dispatch task and consumed by `Bits::poll()`.
     #[serde(skip)]
     pub(crate) result: Mutex<Option<JobResult>>,
@@ -74,6 +82,7 @@ impl Job {
             cancelled: default_cancelled(),
             client_connected: default_client_connected(),
             reconnect_deadline: default_reconnect_deadline(),
+            persisted: AtomicBool::new(false),
             result: Mutex::new(None),
             notify: Notify::new(),
         }
@@ -91,6 +100,7 @@ impl Job {
             cancelled: default_cancelled(),
             client_connected: default_client_connected(),
             reconnect_deadline: default_reconnect_deadline(),
+            persisted: AtomicBool::new(false),
             result: Mutex::new(None),
             notify: Notify::new(),
         }
@@ -123,8 +133,9 @@ impl Clone for Job {
             cancelled: self.cancelled.clone(),
             client_connected: self.client_connected.clone(),
             reconnect_deadline: self.reconnect_deadline.clone(),
-            // Result slot and notifier are not shared — the pipeline clone
-            // never writes results, so it gets fresh empty values.
+            // Result slot, notifier, and persisted flag are not shared — the
+            // pipeline clone never writes results or persistence state.
+            persisted: AtomicBool::new(false),
             result: Mutex::new(None),
             notify: Notify::new(),
         }

@@ -1,4 +1,5 @@
 pub mod check_dummy_delay;
+pub mod recovery;
 pub mod target_dummy_delay;
 pub mod transform_dummy_cost;
 

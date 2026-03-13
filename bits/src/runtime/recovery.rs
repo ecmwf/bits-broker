@@ -1,9 +1,10 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
 
-use crate::db::{BrokerLeaseRecord, ClaimResult, DbError, PersistenceStore};
+use crate::db::{BrokerLeaseRecord, ClaimResult, DbError, PersistenceStore, durable_job_present};
 use crate::result::JobResult;
 use crate::{Bits, PollOutcome};
 
@@ -14,6 +15,18 @@ pub(crate) enum LeaseLookup {
 }
 
 impl Bits {
+    fn lease_grace_duration(lease: &BrokerLeaseRecord) -> chrono::Duration {
+        let ttl = (lease.lease_until - lease.updated_at)
+            .to_std()
+            .unwrap_or_default();
+        let grace = ttl.div_f64(10.0).min(Duration::from_secs(1));
+        chrono::Duration::from_std(grace).unwrap_or_else(|_| chrono::Duration::zero())
+    }
+
+    fn lease_is_active_with_grace(lease: &BrokerLeaseRecord) -> bool {
+        lease.lease_until + Self::lease_grace_duration(lease) > chrono::Utc::now()
+    }
+
     pub(crate) async fn claim_with_backoff(
         &self,
         store: &Arc<dyn PersistenceStore>,
@@ -61,11 +74,29 @@ impl Bits {
             return LeaseLookup::Unknown;
         };
         match store.get_broker_lease(owner_broker_id).await {
-            Ok(Some(lease)) if lease.lease_until > chrono::Utc::now() => LeaseLookup::Active(lease),
+            Ok(Some(lease)) if Self::lease_is_active_with_grace(&lease) => LeaseLookup::Active(lease),
             Ok(_) => LeaseLookup::MissingOrExpired,
             Err(err) => {
                 tracing::warn!(owner = %owner_broker_id, error = %err, "broker lease lookup failed");
                 LeaseLookup::Unknown
+            }
+        }
+    }
+
+    async fn owner_not_found_outcome(&self, id: &str) -> PollOutcome {
+        let Some(store) = &self.job_store else {
+            return PollOutcome::NotFound;
+        };
+
+        match durable_job_present(store.as_ref(), id).await {
+            Ok(true) => {
+                tracing::warn!(job.id = %id, "proxy owner returned 404 while durable record still exists");
+                PollOutcome::Pending { id: id.to_string() }
+            }
+            Ok(false) => PollOutcome::NotFound,
+            Err(err) => {
+                tracing::warn!(job.id = %id, error = %err, "failed to verify durable record after owner 404");
+                PollOutcome::Pending { id: id.to_string() }
             }
         }
     }
@@ -110,6 +141,8 @@ impl Bits {
 
         if status == reqwest::StatusCode::SEE_OTHER
             || status == reqwest::StatusCode::TEMPORARY_REDIRECT
+            || status == reqwest::StatusCode::FOUND
+            || status == reqwest::StatusCode::PERMANENT_REDIRECT
         {
             let location = response
                 .headers()
@@ -117,7 +150,18 @@ impl Bits {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or_default()
                 .to_string();
-            if location.contains(id) {
+            if location.is_empty() {
+                tracing::warn!(job.id = %id, status = %status, "proxy redirect with empty Location");
+                return Some(PollOutcome::Pending { id: id.to_string() });
+            }
+            let last_segment = location
+                .split('?')
+                .next()
+                .unwrap_or(&location)
+                .split('/')
+                .last()
+                .unwrap_or_default();
+            if last_segment == id {
                 return Some(PollOutcome::Pending { id: id.to_string() });
             }
             return Some(PollOutcome::Ready(JobResult::Redirect {
@@ -127,7 +171,7 @@ impl Bits {
         }
 
         if status == reqwest::StatusCode::NOT_FOUND {
-            return Some(PollOutcome::NotFound);
+            return Some(self.owner_not_found_outcome(id).await);
         }
         if status == reqwest::StatusCode::BAD_REQUEST {
             return Some(PollOutcome::Ready(JobResult::Error {
@@ -137,11 +181,22 @@ impl Bits {
         if status == reqwest::StatusCode::GONE {
             return Some(PollOutcome::Ready(JobResult::Cancelled));
         }
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+        {
+            tracing::warn!(job.id = %id, status = %status, "proxy auth error from owner");
+            return Some(PollOutcome::Pending { id: id.to_string() });
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            tracing::warn!(job.id = %id, "proxy throttled by owner");
+            return Some(PollOutcome::Pending { id: id.to_string() });
+        }
         if status.is_server_error() {
             return Some(PollOutcome::Pending { id: id.to_string() });
         }
 
-        None
+        tracing::warn!(job.id = %id, status = %status, "proxy received unexpected status");
+        Some(PollOutcome::Pending { id: id.to_string() })
     }
 
     pub(crate) fn start_broker_lease_heartbeat(&self, broker_lease_ttl: Duration) {
@@ -151,6 +206,7 @@ impl Bits {
         let store = Arc::clone(store);
         let broker_id = self.broker_id.clone();
         let base_url = self.internal_poll_base_url.clone();
+        let stop_flag = self.stop_flag.clone();
         std::thread::spawn(move || {
             let tick = broker_lease_ttl
                 .div_f64(2.0)
@@ -167,13 +223,34 @@ impl Bits {
             };
 
             loop {
-                if let Err(err) = runtime.block_on(store.upsert_broker_lease(
+                if stop_flag.load(Ordering::Relaxed) {
+                    let _ = runtime.block_on(store.delete_broker_lease(&broker_id));
+                    return;
+                }
+
+                match runtime.block_on(store.upsert_broker_lease(
                     &broker_id,
                     &base_url,
                     broker_lease_ttl,
                 )) {
-                    tracing::warn!(broker_id = %broker_id, error = %err, "broker lease upsert failed");
+                    Ok(()) => {}
+                    Err(err) => {
+                        tracing::warn!(broker_id = %broker_id, error = %err, "broker lease upsert failed; retrying");
+                        std::thread::sleep(Duration::from_millis(500).min(tick));
+                        if stop_flag.load(Ordering::Relaxed) {
+                            let _ = runtime.block_on(store.delete_broker_lease(&broker_id));
+                            return;
+                        }
+                        if let Err(retry_err) = runtime.block_on(store.upsert_broker_lease(
+                            &broker_id,
+                            &base_url,
+                            broker_lease_ttl,
+                        )) {
+                            tracing::warn!(broker_id = %broker_id, error = %retry_err, "broker lease retry also failed");
+                        }
+                    }
                 }
+
                 std::thread::sleep(tick);
             }
         });
@@ -183,4 +260,37 @@ impl Bits {
 pub(crate) fn owner_from_job_id(job_id: &str) -> Option<&str> {
     let (owner, _suffix) = job_id.split_once('~')?;
     if owner.is_empty() { None } else { Some(owner) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lease_stays_active_briefly_past_expiry() {
+        let updated_at = chrono::Utc::now();
+        let lease = BrokerLeaseRecord {
+            broker_id: "broker-a".into(),
+            internal_poll_base_url: "http://127.0.0.1:8080/job".into(),
+            updated_at,
+            lease_until: updated_at + chrono::Duration::milliseconds(500),
+        };
+
+        assert!(Bits::lease_is_active_with_grace(&lease));
+        let grace = Bits::lease_grace_duration(&lease);
+        assert_eq!(grace, chrono::Duration::milliseconds(50));
+    }
+
+    #[test]
+    fn lease_grace_is_capped() {
+        let updated_at = chrono::Utc::now();
+        let lease = BrokerLeaseRecord {
+            broker_id: "broker-a".into(),
+            internal_poll_base_url: "http://127.0.0.1:8080/job".into(),
+            updated_at,
+            lease_until: updated_at + chrono::Duration::seconds(30),
+        };
+
+        assert_eq!(Bits::lease_grace_duration(&lease), chrono::Duration::seconds(1));
+    }
 }

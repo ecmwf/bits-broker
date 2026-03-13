@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use tracing::Instrument;
@@ -28,7 +29,9 @@ pub(crate) fn spawn_job(
             let dispatch_fut = async move { dispatch(&router_for_dispatch, job_for_dispatch).await };
             tokio::pin!(dispatch_fut);
 
-            let mut persisted = already_persisted;
+            if already_persisted {
+                job.persisted.store(true, Ordering::Relaxed);
+            }
 
             let result = if let Some(delay) = persist_after {
                 tokio::select! {
@@ -46,7 +49,7 @@ pub(crate) fn spawn_job(
                                 created_at: job.created_at,
                             };
                             match store.upsert_job(record).await {
-                                Ok(_) => persisted = true,
+                                Ok(_) => job.persisted.store(true, Ordering::Relaxed),
                                 Err(err) => tracing::warn!(job.id = %job.id, error = %err, "delayed persist failed"),
                             }
                         }
@@ -69,12 +72,6 @@ pub(crate) fn spawn_job(
 
             *job.result.lock().unwrap() = Some(result);
             job.notify.notify_waiters();
-
-            if persisted
-                && let Some(store) = &store
-            {
-                let _ = store.delete_job(&job.id).await;
-            }
         }
         .instrument(span),
     );

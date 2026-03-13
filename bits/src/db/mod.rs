@@ -151,3 +151,16 @@ pub trait BrokerLeaseStore: Send + Sync {
 pub trait PersistenceStore: JobStore + BrokerLeaseStore {}
 
 impl<T: JobStore + BrokerLeaseStore> PersistenceStore for T {}
+
+pub async fn durable_job_present(
+    store: &dyn PersistenceStore,
+    job_id: &str,
+) -> Result<bool, DbError> {
+    match store
+        .claim_if_owner(job_id, "__never_expected__", "__presence_probe__")
+        .await?
+    {
+        ClaimResult::NotFound => Ok(false),
+        ClaimResult::Active { .. } | ClaimResult::Claimed(_) => Ok(true),
+    }
+}

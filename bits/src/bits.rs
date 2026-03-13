@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -47,6 +47,7 @@ pub struct Bits {
     pub(crate) persist_after: Option<Duration>,
     pub(crate) job_store: Option<Arc<dyn PersistenceStore>>,
     pub(crate) internal_client: reqwest::Client,
+    pub(crate) stop_flag: Arc<AtomicBool>,
 }
 
 impl Bits {
@@ -61,6 +62,7 @@ impl Bits {
         job_store: Option<Arc<dyn PersistenceStore>>,
         broker_lease_ttl: Duration,
     ) -> Self {
+        let stop_flag = Arc::new(AtomicBool::new(false));
         let bits = Bits {
             router: Arc::new(router),
             jobs: Arc::new(DashMap::new()),
@@ -73,8 +75,14 @@ impl Bits {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to build reqwest client"),
+            stop_flag: stop_flag.clone(),
         };
-        start_sweeper(bits.jobs.clone(), DEFAULT_SWEEP_INTERVAL);
+        start_sweeper(
+            bits.jobs.clone(),
+            DEFAULT_SWEEP_INTERVAL,
+            bits.job_store.clone(),
+            stop_flag,
+        );
         bits.start_broker_lease_heartbeat(broker_lease_ttl);
         bits
     }
@@ -89,6 +97,7 @@ impl Bits {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let sweep_interval = parsed.sweep_interval.unwrap_or(DEFAULT_SWEEP_INTERVAL);
         let instance_id = format!("{}-{}", parsed.broker_id, uuid::Uuid::new_v4());
+        let stop_flag = Arc::new(AtomicBool::new(false));
         let bits = Bits {
             router: Arc::new(parsed.router),
             jobs: Arc::new(DashMap::new()),
@@ -100,9 +109,15 @@ impl Bits {
             internal_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
+            stop_flag: stop_flag.clone(),
         };
 
-        start_sweeper(bits.jobs.clone(), sweep_interval);
+        start_sweeper(
+            bits.jobs.clone(),
+            sweep_interval,
+            bits.job_store.clone(),
+            stop_flag,
+        );
         bits.start_broker_lease_heartbeat(parsed.broker_lease_ttl);
 
         Ok(bits)
@@ -219,6 +234,20 @@ impl Bits {
         }
     }
 
+    fn schedule_durable_cleanup(&self, id: &str, job: &crate::job::Job) {
+        if job.persisted.load(Ordering::Relaxed) {
+            if let Some(store) = &self.job_store {
+                let store = store.clone();
+                let job_id = id.to_string();
+                tokio::spawn(async move {
+                    if let Err(err) = store.delete_job(&job_id).await {
+                        tracing::warn!(job.id = %job_id, error = %err, "durable record cleanup failed");
+                    }
+                });
+            }
+        }
+    }
+
     async fn poll_local(&self, id: &str, timeout: Option<Duration>) -> Option<PollOutcome> {
         let job = self.jobs.get(id).map(|r| r.clone())?;
 
@@ -230,6 +259,7 @@ impl Bits {
 
         if let Some(result) = job.result.lock().unwrap().take() {
             self.jobs.remove(id);
+            self.schedule_durable_cleanup(id, &job);
             return Some(PollOutcome::Ready(result));
         }
 
@@ -238,6 +268,7 @@ impl Bits {
                 Ok(()) => match job.result.lock().unwrap().take() {
                     Some(result) => {
                         self.jobs.remove(id);
+                        self.schedule_durable_cleanup(id, &job);
                         PollOutcome::Ready(result)
                     }
                     None => PollOutcome::Pending { id: id.to_string() },
@@ -249,6 +280,7 @@ impl Bits {
                 match job.result.lock().unwrap().take() {
                     Some(result) => {
                         self.jobs.remove(id);
+                        self.schedule_durable_cleanup(id, &job);
                         PollOutcome::Ready(result)
                     }
                     None => PollOutcome::Pending { id: id.to_string() },
@@ -263,5 +295,11 @@ impl Bits {
 
     fn new_job_id(&self) -> String {
         format!("{}~{}", self.broker_id, uuid::Uuid::new_v4())
+    }
+}
+
+impl Drop for Bits {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
     }
 }

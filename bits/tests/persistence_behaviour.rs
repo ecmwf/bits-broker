@@ -115,6 +115,120 @@ struct BackendFailingStore {
     attempts: AtomicUsize,
 }
 
+struct UpsertFailingStore {
+    inner: Arc<MemoryStore>,
+}
+
+impl UpsertFailingStore {
+    fn new(inner: Arc<MemoryStore>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl JobStore for UpsertFailingStore {
+    async fn upsert_job(&self, _record: PersistentJobRecord) -> Result<(), DbError> {
+        Err(DbError::Backend("simulated upsert failure".into()))
+    }
+
+    async fn delete_job(&self, job_id: &str) -> Result<(), DbError> {
+        self.inner.delete_job(job_id).await
+    }
+
+    async fn claim_if_owner(
+        &self,
+        job_id: &str,
+        expected_owner_broker_id: &str,
+        claimant_broker_id: &str,
+    ) -> Result<ClaimResult, DbError> {
+        self.inner
+            .claim_if_owner(job_id, expected_owner_broker_id, claimant_broker_id)
+            .await
+    }
+}
+
+#[async_trait]
+impl BrokerLeaseStore for UpsertFailingStore {
+    async fn upsert_broker_lease(
+        &self,
+        broker_id: &str,
+        internal_poll_base_url: &str,
+        ttl: Duration,
+    ) -> Result<(), DbError> {
+        self.inner
+            .upsert_broker_lease(broker_id, internal_poll_base_url, ttl)
+            .await
+    }
+
+    async fn get_broker_lease(
+        &self,
+        broker_id: &str,
+    ) -> Result<Option<BrokerLeaseRecord>, DbError> {
+        self.inner.get_broker_lease(broker_id).await
+    }
+
+    async fn delete_broker_lease(&self, broker_id: &str) -> Result<(), DbError> {
+        self.inner.delete_broker_lease(broker_id).await
+    }
+}
+
+struct DeleteFailingStore {
+    inner: Arc<MemoryStore>,
+}
+
+impl DeleteFailingStore {
+    fn new(inner: Arc<MemoryStore>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl JobStore for DeleteFailingStore {
+    async fn upsert_job(&self, record: PersistentJobRecord) -> Result<(), DbError> {
+        self.inner.upsert_job(record).await
+    }
+
+    async fn delete_job(&self, _job_id: &str) -> Result<(), DbError> {
+        Err(DbError::Backend("simulated delete failure".into()))
+    }
+
+    async fn claim_if_owner(
+        &self,
+        job_id: &str,
+        expected_owner_broker_id: &str,
+        claimant_broker_id: &str,
+    ) -> Result<ClaimResult, DbError> {
+        self.inner
+            .claim_if_owner(job_id, expected_owner_broker_id, claimant_broker_id)
+            .await
+    }
+}
+
+#[async_trait]
+impl BrokerLeaseStore for DeleteFailingStore {
+    async fn upsert_broker_lease(
+        &self,
+        broker_id: &str,
+        internal_poll_base_url: &str,
+        ttl: Duration,
+    ) -> Result<(), DbError> {
+        self.inner
+            .upsert_broker_lease(broker_id, internal_poll_base_url, ttl)
+            .await
+    }
+
+    async fn get_broker_lease(
+        &self,
+        broker_id: &str,
+    ) -> Result<Option<BrokerLeaseRecord>, DbError> {
+        self.inner.get_broker_lease(broker_id).await
+    }
+
+    async fn delete_broker_lease(&self, broker_id: &str) -> Result<(), DbError> {
+        self.inner.delete_broker_lease(broker_id).await
+    }
+}
+
 impl BackendFailingStore {
     fn new() -> Self {
         Self {
@@ -176,7 +290,7 @@ async fn threshold_persistence_and_cleanup() {
     // Verifies the threshold persistence lifecycle end-to-end:
     // 1) a long-running job crosses `persist_after` and is written to durable store,
     // 2) ownership can be observed in the store while in-flight,
-    // 3) durable record is removed after terminal completion.
+    // 3) durable record is removed after the result is consumed by polling.
     let store = Arc::new(MemoryStore::new());
     let bits = test_bits(
         "cleanup-broker",
@@ -188,7 +302,8 @@ async fn threshold_persistence_and_cleanup() {
     let handle = bits.submit(Job::new(json!({"kind": "cleanup"})));
     wait_for_owner(&store, &handle.id, "cleanup-broker", 300).await;
 
-    tokio::time::sleep(Duration::from_millis(220)).await;
+    let _ = bits.poll(&handle.id, Some(Duration::from_secs(1))).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(observed_owner(&store, &handle.id).await.is_none());
 }
 
@@ -370,4 +485,106 @@ async fn backend_claim_errors_backoff_within_single_poll() {
         "expected multiple claim attempts, got {}",
         store.attempts()
     );
+}
+
+#[tokio::test]
+async fn upsert_failure_does_not_set_persisted_flag() {
+    // A failed durable upsert should keep the job running in memory without creating a durable record.
+    let inner = Arc::new(MemoryStore::new());
+    let failing = Arc::new(UpsertFailingStore::new(Arc::clone(&inner)));
+    let router = Switch::new(vec![Route::new(
+        "default".into(),
+        vec![Action::Target(Arc::new(SleepTarget { ms: 200 }), None)],
+    )]);
+    let bits = Bits::from_router_for_tests(
+        router,
+        "upsert-failing".to_string(),
+        "http://127.0.0.1:9/job".to_string(),
+        Duration::from_millis(30),
+        Some(Duration::from_millis(20)),
+        Some(failing as Arc<dyn PersistenceStore>),
+        Duration::from_secs(5),
+    );
+
+    let handle = bits.submit(Job::new(json!({"kind": "upsert-failure"})));
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(matches!(
+        bits.poll(&handle.id, Some(Duration::from_millis(20))).await,
+        PollOutcome::Pending { .. }
+    ));
+    assert!(observed_owner(&inner, &handle.id).await.is_none());
+}
+
+#[tokio::test]
+async fn delete_failure_leaves_record_for_reclaim() {
+    // If durable cleanup delete fails after result consumption, the record must remain reclaimable.
+    let inner = Arc::new(MemoryStore::new());
+    let failing = Arc::new(DeleteFailingStore::new(Arc::clone(&inner)));
+    let router = Switch::new(vec![Route::new(
+        "default".into(),
+        vec![Action::Target(Arc::new(SleepTarget { ms: 80 }), None)],
+    )]);
+    let bits = Bits::from_router_for_tests(
+        router,
+        "delete-failing".to_string(),
+        "http://127.0.0.1:9/job".to_string(),
+        Duration::from_millis(30),
+        Some(Duration::from_millis(20)),
+        Some(failing as Arc<dyn PersistenceStore>),
+        Duration::from_secs(5),
+    );
+
+    let handle = bits.submit(Job::new(json!({"kind": "delete-failure"})));
+    wait_for_owner(&inner, &handle.id, "delete-failing", 300).await;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let _ = bits.poll(&handle.id, Some(Duration::from_secs(1))).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        observed_owner(&inner, &handle.id).await.as_deref(),
+        Some("delete-failing")
+    );
+}
+
+#[cfg(not(feature = "tikv"))]
+#[tokio::test]
+async fn config_rejects_tiny_broker_lease_ttl() {
+    // TiKV lease TTL values below one second must be rejected at config-parse time.
+    let cfg = r#"
+bits:
+  tikv:
+    endpoints:
+      - 127.0.0.1:2379
+    broker_lease_ttl_secs: 0.5
+routes:
+  default: []
+"#;
+    let err = Bits::from_config(cfg)
+        .err()
+        .expect("expected tiny lease TTL config to fail")
+        .to_string();
+    assert!(err.contains("at least 1 second"));
+}
+
+#[tokio::test]
+async fn durable_record_survives_until_poll_consumes_result() {
+    // Durable ownership should persist after completion and only be cleaned once polling consumes the result.
+    let store = Arc::new(MemoryStore::new());
+    let bits = test_bits(
+        "poll-consume-cleanup",
+        150,
+        Some(Duration::from_millis(20)),
+        Some(Arc::clone(&store)),
+    );
+
+    let handle = bits.submit(Job::new(json!({"kind": "durable-until-consume"})));
+    wait_for_owner(&store, &handle.id, "poll-consume-cleanup", 300).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        observed_owner(&store, &handle.id).await.as_deref(),
+        Some("poll-consume-cleanup")
+    );
+
+    let _ = bits.poll(&handle.id, Some(Duration::from_secs(1))).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(observed_owner(&store, &handle.id).await.is_none());
 }

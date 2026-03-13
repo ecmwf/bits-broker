@@ -1,10 +1,20 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use std::time::Duration;
 use tokio::sync::OnceCell;
 
 use crate::db::{
     BrokerLeaseRecord, BrokerLeaseStore, ClaimResult, DbError, JobStore, PersistentJobRecord,
 };
+
+fn is_write_conflict(err: &tikv_client::Error) -> bool {
+    match err {
+        tikv_client::Error::KeyError(key_err) => key_err.conflict.is_some(),
+        tikv_client::Error::MultipleKeyErrors(errs) => errs.iter().any(is_write_conflict),
+        tikv_client::Error::ExtractedErrors(errs) => errs.iter().any(is_write_conflict),
+        _ => false,
+    }
+}
 
 const JOB_PREFIX: &str = "jobs/";
 const BROKER_PREFIX: &str = "brokers/";
@@ -69,15 +79,18 @@ impl TiKvStore {
                 .await
                 .map_err(|err| DbError::Backend(format!("get failed: {err}")))?;
             let Some(current) = current else {
+                let _ = txn.rollback().await;
                 return Ok(ClaimResult::NotFound);
             };
 
             let mut record: PersistentJobRecord = Self::deserialize(current)?;
             if record.broker_id == claimant_broker_id {
+                let _ = txn.rollback().await;
                 return Ok(ClaimResult::Claimed(record));
             }
 
             if record.broker_id != expected_owner_broker_id {
+                let _ = txn.rollback().await;
                 return Ok(ClaimResult::Active {
                     owner_broker_id: record.broker_id.clone(),
                 });
@@ -90,7 +103,7 @@ impl TiKvStore {
             match txn.commit().await {
                 Ok(_) => return Ok(ClaimResult::Claimed(record)),
                 Err(err) => {
-                    if err.to_string().contains("conflict") {
+                    if is_write_conflict(&err) {
                         continue;
                     }
                     return Err(DbError::Backend(format!("commit failed: {err}")));
@@ -194,9 +207,7 @@ impl BrokerLeaseStore for TiKvStore {
             .get(key)
             .await
             .map_err(|err| DbError::Backend(format!("get failed: {err}")))?;
-        txn.commit()
-            .await
-            .map_err(|err| DbError::Backend(format!("commit failed: {err}")))?;
+        let _ = txn.rollback().await;
         value.map(Self::deserialize).transpose()
     }
 

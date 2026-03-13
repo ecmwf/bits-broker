@@ -148,6 +148,12 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             if tikv.endpoints.is_empty() {
                 return Err("bits.tikv.endpoints must not be empty".into());
             }
+            let ttl = Duration::from_secs_f64(tikv.broker_lease_ttl_secs);
+            if ttl < Duration::from_secs(1) {
+                return Err(
+                    "bits.tikv.broker_lease_ttl_secs must be at least 1 second".into(),
+                );
+            }
             #[cfg(not(feature = "tikv"))]
             {
                 return Err("bits.tikv configured but crate built without 'tikv' feature".into());
@@ -156,7 +162,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             {
                 (
                     Some(Arc::new(StoreFactory::new(tikv.endpoints)) as Arc<dyn PersistenceStore>),
-                    Duration::from_secs_f64(tikv.broker_lease_ttl_secs),
+                    ttl,
                 )
             }
         }

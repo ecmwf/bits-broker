@@ -16,12 +16,25 @@ use crate::actions::{ActionError, TargetResult};
 use crate::job::Job;
 
 /// Selects the executor implementation to construct from config.
+///
+/// Concurrency is specified per-executor because it only applies to local
+/// pool executors (`async_pool`, `thread_pool`).  `remote_pool` delegates to
+/// external workers and has no local concurrency knob.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutorKind {
-    AsyncPool,
-    ThreadPool,
-    RemotePool(RemotePoolConfig),
+    AsyncPool {
+        #[serde(default)]
+        concurrency: Option<usize>,
+    },
+    ThreadPool {
+        #[serde(default)]
+        concurrency: Option<usize>,
+    },
+    RemotePool {
+        #[serde(flatten)]
+        config: RemotePoolConfig,
+    },
 }
 
 /// A pending item is a work future paired with a reply channel.
@@ -83,24 +96,23 @@ pub enum DispatchGuard {
 
 impl<T: Send + 'static> Dispatcher<T> {
     /// Build a `Dispatcher` from config values, returning `None` if neither
-    /// queue nor concurrency is specified (no scheduling needed).
-    pub fn from_config(
-        queue: Option<&QueueKind>,
-        executor: Option<&ExecutorKind>,
-        concurrency: Option<usize>,
-    ) -> Option<Self> {
-        if queue.is_none() && concurrency.is_none() && executor.is_none() {
+    /// queue nor executor is specified (no scheduling needed).
+    pub fn from_config(queue: Option<&QueueKind>, executor: Option<&ExecutorKind>) -> Option<Self> {
+        if queue.is_none() && executor.is_none() {
             return None;
         }
-        let concurrency = concurrency.unwrap_or(tokio::sync::Semaphore::MAX_PERMITS);
+        const DEFAULT_POOL_SIZE: usize = 256;
         let executor: Arc<dyn Executor<T>> = match executor {
-            None | Some(ExecutorKind::AsyncPool) => Arc::new(AsyncPoolExecutor::new(concurrency)),
-            Some(ExecutorKind::ThreadPool) => Arc::new(ThreadPoolExecutor::new(concurrency)),
-            Some(ExecutorKind::RemotePool(cfg)) => {
-                // RemotePoolExecutor only implements Executor<TargetResult>.
-                // Config validation ensures this branch is only reached for
-                // target actions, so T == TargetResult. We construct the
-                // concrete type and downcast via Any.
+            None | Some(ExecutorKind::AsyncPool { concurrency: None }) => {
+                Arc::new(AsyncPoolExecutor::new(DEFAULT_POOL_SIZE))
+            }
+            Some(ExecutorKind::AsyncPool {
+                concurrency: Some(n),
+            }) => Arc::new(AsyncPoolExecutor::new(*n)),
+            Some(ExecutorKind::ThreadPool { concurrency }) => Arc::new(ThreadPoolExecutor::new(
+                concurrency.unwrap_or(DEFAULT_POOL_SIZE),
+            )),
+            Some(ExecutorKind::RemotePool { config: cfg }) => {
                 assert_eq!(
                     TypeId::of::<T>(),
                     TypeId::of::<TargetResult>(),
@@ -110,9 +122,6 @@ impl<T: Send + 'static> Dispatcher<T> {
                     &cfg.bind,
                     Duration::from_secs_f64(cfg.heartbeat_timeout_secs),
                 ));
-                // Safety: T == TargetResult verified by the assert above.
-                // Arc<dyn Executor<TargetResult>> and Arc<dyn Executor<T>>
-                // have identical layout when T == TargetResult.
                 let any: Box<dyn Any> = Box::new(concrete);
                 *any.downcast::<Arc<dyn Executor<T>>>()
                     .unwrap_or_else(|_| panic!("remote_pool: type mismatch (T != TargetResult)"))

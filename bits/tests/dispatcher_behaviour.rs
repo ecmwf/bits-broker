@@ -20,8 +20,9 @@ use bits::{Bits, PollOutcome};
 async fn thread_pool_runs_on_os_threads() {
     let dispatcher = Dispatcher::<CheckResult>::from_config(
         Some(&QueueKind::Fifo),
-        Some(&ExecutorKind::ThreadPool),
-        Some(2),
+        Some(&ExecutorKind::ThreadPool {
+            concurrency: Some(2),
+        }),
     )
     .unwrap();
 
@@ -62,8 +63,9 @@ async fn thread_pool_runs_on_os_threads() {
 async fn thread_pool_executes_concurrently() {
     let dispatcher = Dispatcher::<CheckResult>::from_config(
         Some(&QueueKind::Fifo),
-        Some(&ExecutorKind::ThreadPool),
-        Some(2),
+        Some(&ExecutorKind::ThreadPool {
+            concurrency: Some(2),
+        }),
     )
     .unwrap();
 
@@ -133,8 +135,9 @@ async fn check_dispatcher_cost_weighted_ordering() {
     let dispatcher = Arc::new(
         Dispatcher::<CheckResult>::from_config(
             Some(&QueueKind::CostWeighted),
-            Some(&ExecutorKind::AsyncPool),
-            Some(1),
+            Some(&ExecutorKind::AsyncPool {
+                concurrency: Some(1),
+            }),
         )
         .unwrap(),
     );
@@ -197,8 +200,9 @@ async fn target_dispatcher_cost_weighted_ordering() {
     let dispatcher = Arc::new(
         Dispatcher::<TargetResult>::from_config(
             Some(&QueueKind::CostWeighted),
-            Some(&ExecutorKind::AsyncPool),
-            Some(1),
+            Some(&ExecutorKind::AsyncPool {
+                concurrency: Some(1),
+            }),
         )
         .unwrap(),
     );
@@ -261,8 +265,9 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
     let dispatcher = Arc::new(
         Dispatcher::<TargetResult>::from_config(
             Some(&QueueKind::AgePriority),
-            Some(&ExecutorKind::AsyncPool),
-            Some(1),
+            Some(&ExecutorKind::AsyncPool {
+                concurrency: Some(1),
+            }),
         )
         .unwrap(),
     );

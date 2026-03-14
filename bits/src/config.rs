@@ -27,7 +27,6 @@ struct ParseContext {
 struct DispatcherSettings {
     queue: Option<QueueKind>,
     executor: Option<ExecutorKind>,
-    concurrency: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -361,10 +360,12 @@ fn parse_dispatcher_fields(
             .get("executor")
             .map(|v| serde_json::from_value(v.clone()))
             .transpose()?;
-        settings.concurrency = map
-            .get("concurrency")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize);
+        if map.contains_key("concurrency") {
+            return Err(
+                "dispatcher.concurrency removed; set concurrency inside the executor block instead"
+                    .into(),
+            );
+        }
         if map.contains_key("persistent") || map.contains_key("lock_ttl_secs") {
             return Err(
                 "dispatcher.persistent/lock_ttl_secs removed; use bits.persist_after_ms policy"
@@ -407,49 +408,38 @@ fn attach_dispatcher(
     mut settings: DispatcherSettings,
 ) -> Result<Action, Box<dyn std::error::Error>> {
     let is_remote_action = action_name == "remote";
-    let is_remote_pool = matches!(&settings.executor, Some(ExecutorKind::RemotePool(_)));
+    let is_remote_pool = matches!(&settings.executor, Some(ExecutorKind::RemotePool { .. }));
 
     if is_remote_action {
         match &settings.executor {
             None => {
-                settings.executor = Some(ExecutorKind::RemotePool(RemotePoolConfig {
-                    bind: "0.0.0.0:9001".into(),
-                    heartbeat_timeout_secs: 60.0,
-                }))
+                settings.executor = Some(ExecutorKind::RemotePool {
+                    config: RemotePoolConfig {
+                        bind: "0.0.0.0:9001".into(),
+                        heartbeat_timeout_secs: 60.0,
+                    },
+                })
             }
-            Some(ExecutorKind::RemotePool(_)) => {}
+            Some(ExecutorKind::RemotePool { .. }) => {}
             Some(_) => return Err("'remote' target requires executor: remote_pool".into()),
         }
     } else if is_remote_pool {
         return Err("executor: remote_pool requires a 'remote' target action".into());
     }
 
-    let has_dispatcher =
-        settings.queue.is_some() || settings.executor.is_some() || settings.concurrency.is_some();
+    let has_dispatcher = settings.queue.is_some() || settings.executor.is_some();
 
     match action {
         Action::Check(check, _) => {
-            let dispatcher = Dispatcher::from_config(
-                settings.queue.as_ref(),
-                settings.executor.as_ref(),
-                settings.concurrency,
-            );
+            let dispatcher = Dispatcher::from_config(settings.queue.as_ref(), settings.executor.as_ref());
             Ok(Action::Check(check, dispatcher))
         }
         Action::Transform(transform, _) => {
-            let dispatcher = Dispatcher::from_config(
-                settings.queue.as_ref(),
-                settings.executor.as_ref(),
-                settings.concurrency,
-            );
+            let dispatcher = Dispatcher::from_config(settings.queue.as_ref(), settings.executor.as_ref());
             Ok(Action::Transform(transform, dispatcher))
         }
         Action::Target(target, _) => {
-            let dispatcher = Dispatcher::from_config(
-                settings.queue.as_ref(),
-                settings.executor.as_ref(),
-                settings.concurrency,
-            );
+            let dispatcher = Dispatcher::from_config(settings.queue.as_ref(), settings.executor.as_ref());
             Ok(Action::Target(target, dispatcher))
         }
         _ if has_dispatcher => {

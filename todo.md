@@ -16,7 +16,9 @@
 - [ ] Load balancing of workers to brokers
 - [ ] Broker lease should be a thread, not an async task
 - [ ] Diagrams in the docs
+- [ ] Stress test
 - [ ] Consider memory fragmentation for long-running brokers
+- [ ] Review the whole build process. We should build from tags really, but would be good to maintain a development mode which uses local repos. skaffold build logic can be quite sophisiticated for this
 
 - [ ] Add ecmwf-specific match actions, schedule actions and authotron action
 - [ ] Think about metrics implementation, aggregate statistics
@@ -34,3 +36,8 @@
 # Optional:
 - [ ] Allow compile to WASM for interactive docs
 - [ ] Add a GUI for pipeline configuration and monitoringma
+
+
+# Fixes
+
+- [ ] mars worker images have not been built or tested

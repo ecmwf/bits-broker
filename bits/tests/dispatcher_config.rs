@@ -5,8 +5,30 @@ use bits::dispatcher::{ExecutorKind, QueueKind, RemotePoolConfig};
 
 #[test]
 fn executor_kind_deserializes_async_pool() {
-    let kind: ExecutorKind = serde_yaml::from_str("async_pool").unwrap();
-    assert!(matches!(kind, ExecutorKind::AsyncPool));
+    let kind: ExecutorKind = serde_yaml::from_str("type: async_pool").unwrap();
+    assert!(matches!(kind, ExecutorKind::AsyncPool { concurrency: None }));
+}
+
+#[test]
+fn executor_kind_deserializes_async_pool_with_concurrency() {
+    let kind: ExecutorKind = serde_yaml::from_str("type: async_pool\nconcurrency: 4").unwrap();
+    assert!(matches!(
+        kind,
+        ExecutorKind::AsyncPool {
+            concurrency: Some(4)
+        }
+    ));
+}
+
+#[test]
+fn executor_kind_deserializes_thread_pool_with_concurrency() {
+    let kind: ExecutorKind = serde_yaml::from_str("type: thread_pool\nconcurrency: 8").unwrap();
+    assert!(matches!(
+        kind,
+        ExecutorKind::ThreadPool {
+            concurrency: Some(8)
+        }
+    ));
 }
 
 #[test]
@@ -46,7 +68,7 @@ routes:
         url: "http://example.com"
       dispatcher:
         executor:
-          remote_pool: {}
+          type: remote_pool
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
@@ -63,12 +85,31 @@ routes:
   default:
     - target::remote: ~
       dispatcher:
-        executor: thread_pool
+        executor:
+          type: thread_pool
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(
         err.contains("'remote' target requires executor: remote_pool"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn concurrency_at_dispatcher_level_is_rejected() {
+    let config = r#"
+routes:
+  default:
+    - target::http:
+        url: "http://example.com"
+      dispatcher:
+        concurrency: 4
+"#;
+
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("dispatcher.concurrency removed"),
         "unexpected error: {err}"
     );
 }

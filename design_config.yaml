@@ -1,6 +1,6 @@
 # Example ECMWF routing config demonstrating the full dispatcher architecture.
 #
-# Dispatcher config (queue, executor, concurrency) lives inside a `dispatcher:`
+# Dispatcher config (queue, executor) lives inside a `dispatcher:`
 # key within the registry entry, or as a sibling `dispatcher:` key for inline steps.
 #
 # queue:
@@ -8,12 +8,10 @@
 #   cost_weighted — cheaper jobs (lower metadata["cost"]) run first
 #
 # executor:
-#   semaphore     — inline async, bounded by concurrency (default)
+#   async_pool    — inline async, bounded by executor.concurrency (default)
 #   thread_pool   — offload to dedicated OS threads (CPU/blocking work)
 #   remote_pool   — hand off to external workers via HTTP long-poll
 #                   (only valid with target::remote)
-#
-# concurrency: <n>  — max simultaneous executions
 
 bits:
   # For long-running jobs: persist once after this threshold.
@@ -42,7 +40,9 @@ transforms:
     type: metkit_expansion
     expand_parameters: true
     dispatcher:
-      concurrency: 16           # limit concurrent calls to the expansion service
+      executor:
+        type: async_pool
+        concurrency: 16           # limit concurrent calls to the expansion service
 
 targets:
 
@@ -62,7 +62,7 @@ targets:
     dispatcher:
       queue: fifo
       executor:
-        type: semaphore
+        type: async_pool
         concurrency: 8
 
   fdb_worker:
@@ -71,9 +71,8 @@ targets:
       queue: cost_weighted
       executor:
         type: remote_pool
-        remote_pool:
-          bind: "0.0.0:9001"
-          heartbeat_timeout_secs: 60
+        bind: "0.0.0:9001"
+        heartbeat_timeout_secs: 60
 
 
 routes:
@@ -99,7 +98,7 @@ routes:
             dispatcher:
               queue: fifo
               executor:
-                type: semaphore
+                type: async_pool
                 concurrency: 400
           - target::dss_od
         era5_public:

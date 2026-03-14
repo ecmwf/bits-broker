@@ -7,13 +7,15 @@ targets:
     type: http
     url: "http://httpbin.org/post"
 
-  # Semaphore executor (default) with a FIFO queue and bounded concurrency.
+  # Async-pool executor (default) with a FIFO queue and bounded concurrency.
   backend_bounded:
     type: http
     url: "http://httpbin.org/post"
     dispatcher:
       queue: fifo
-      concurrency: 4
+      executor:
+        type: async_pool
+        concurrency: 4
 
   # Cost-weighted queue: cheaper jobs are promoted ahead of expensive ones.
   backend_priority:
@@ -21,27 +23,29 @@ targets:
     url: "http://httpbin.org/post"
     dispatcher:
       queue: cost_weighted
-      concurrency: 8
+      executor:
+        type: async_pool
+        concurrency: 8
 
   # Thread-pool executor: each job runs on a dedicated OS thread.
   backend_threads:
     type: http
     url: "http://httpbin.org/post"
     dispatcher:
-      executor: thread_pool
-      concurrency: 2
+      executor:
+        type: thread_pool
+        concurrency: 2
 
   # Remote-pool executor: jobs are handed off to external workers over HTTP.
   # The `remote` target type is required — it does nothing locally.
   backend_remote:
     type: remote
     dispatcher:
-      executor:
-        remote_pool:
-          bind: "0.0.0.0:9001"
-          heartbeat_timeout_secs: 60
       queue: fifo
-      concurrency: 16
+      executor:
+        type: remote_pool
+        bind: "0.0.0.0:9001"
+        heartbeat_timeout_secs: 60
 
 routes:
   default:

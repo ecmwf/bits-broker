@@ -392,12 +392,16 @@ fn action_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::e
         .ok_or("registry entry must have a 'type' field")?;
     let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
 
-    let config: serde_json::Value = map
+    let remaining: serde_json::Map<_, _> = map
         .iter()
         .filter(|(k, _)| !matches!(k.as_str(), "type" | "dispatcher"))
         .map(|(k, v)| (k.clone(), v.clone()))
-        .collect::<serde_json::Map<_, _>>()
-        .into();
+        .collect();
+    let config = if remaining.is_empty() {
+        serde_json::Value::Null
+    } else {
+        remaining.into()
+    };
     let action = create_action(type_name, config)?;
     attach_dispatcher(type_name, action, settings)
 }

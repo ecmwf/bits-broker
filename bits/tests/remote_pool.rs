@@ -41,9 +41,9 @@ routes:
     - target::remote: ~
       dispatcher:
         executor:
-          remote_pool:
-            bind: "127.0.0.1:{port}"
-            heartbeat_timeout_secs: {heartbeat_timeout_secs}
+          type: remote_pool
+          bind: "127.0.0.1:{port}"
+          heartbeat_timeout_secs: {heartbeat_timeout_secs}
 "#
     );
     Bits::from_config(&config).expect("config error")
@@ -58,9 +58,9 @@ routes:
       dispatcher:
         queue: {queue}
         executor:
-          remote_pool:
-            bind: "127.0.0.1:{port}"
-            heartbeat_timeout_secs: {heartbeat_timeout_secs}
+          type: remote_pool
+          bind: "127.0.0.1:{port}"
+          heartbeat_timeout_secs: {heartbeat_timeout_secs}
 "#
     );
     Bits::from_config(&config).expect("config error")

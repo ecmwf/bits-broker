@@ -8,34 +8,58 @@
 - [x] Build an FDB worker (new repo)
 - [x] Add an age-based priority queue
 - [ ] Add a throttle-proxy
-- [ ] Implement a MARS library and worker (new repo)
-- [ ] Allow dynamic configuration of routes
+- [x] Implement a MARS library API
 - [ ] Clean up unwraps and expect, add better error handling
-- [ ] Migrate rules from polytope to BITS
-- [ ] Add tier-based token bucket implementation for rate-limiting
-- [ ] Consider anonymous access
-- [ ] Load balancing of workers to brokers
 - [ ] Broker lease should be a thread, not an async task
-- [ ] Diagrams in the docs
-- [ ] Stress test
 - [ ] Consider memory fragmentation for long-running brokers
 - [ ] Review the whole build process. We should build from tags really, but would be good to maintain a development mode which uses local repos. skaffold build logic can be quite sophisiticated for this
 
-- [ ] Add ecmwf-specific match actions, schedule actions and authotron action
-- [ ] Think about metrics implementation, aggregate statistics
-- [ ] Consider if in-flight jobs should be cancellable
 - [x] change /test to /health in v2
 
 - [ ] test stream failure modes: before sending bytes, in the middle of sending bytes, at the end.
 
-# Human TODO:
-- [ ] Set up a k8s cluster for prototype of polytope
+# MVP to replace existing Polytope infrastructure:
+
+- [ ] Fix deployment to use git tags/commits for versioning
+- [ ] CICD for image building
+- [ ] SD: TiKV deployment testing / implementing nats-kv
+- [ ] JH: Allow multiple worker pools
+- [ ] JH: Load balancing of workers to brokers
+- [ ] JH: MARS worker pool, check interpolation and regridding
+- [ ] JH: Check we clean up jobs from the database
+- [ ] PT: Authotron integration on the frontend
+- [ ] PT: Actions for checking roles
+- [ ] SD: Logging format
+- [ ] SD: Stress test
+- [ ] AW: Remove reference to list_collections in docs
+- [ ] AI: Implement list_requests (from local state and DB)
+- [ ] SD: Reimplement metrics
+- [ ] __: S3 support for indirect responses (unreliable networks, stream restarts, relieve load on MARS/workers)
+- [ ] __: Garbage collector
+
+## Nice to haves
+
+- [ ] PT: split config
+- [ ] JH: Maybe BOBS
+- [ ] __: Workers test themselves in CICD (maybe via docker-compose)
+
+# Validation against existing polytope:
+- [ ] Check all the examples repos work correctly
+
+# People to talk to:
+- [ ] EUMETSAT using v1 directly
 
 # Advanced
+- [ ] Consider if in-flight jobs should be cancellable
+- [ ] Diagrams in the docs
+- [ ] Consider anonymous access
+- [ ] Add tier-based token bucket implementation for rate-limiting
 - [ ] Tiered token bucket implementation for rate-limiting
 - [ ] Dehogger implementation to handle access to shared resources
 - [ ] For slow jobs we might want a globally-synchronised queue
 - [ ] Add a post-processing hook. Consider how this will interact with BOBS and indirect responses.
+- [ ] Allow dynamic configuration of routes
+- [ ] Autoscaling of workers intelligently
 
 
 # Optional:

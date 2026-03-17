@@ -13,12 +13,12 @@ async fn cancel_stops_job_before_target() {
     // The check runs for 100ms, giving us a window to cancel before the target is reached.
     let config = r#"
 routes:
-  default:
-    - check::dummy_delay:
-        duration_ms: 100
-    - target::dummy_dispatch:
-        duration_ms: 0
-        concurrency: 1
+  - default:
+      - check::dummy_delay:
+          duration_ms: 100
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
 "#;
 
     let bits = Arc::new(Bits::from_config(config).unwrap());

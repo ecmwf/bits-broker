@@ -60,9 +60,9 @@ targets:
         heartbeat_timeout_secs: 120
 
 routes:
-  default:
-    - target::backend_inline
-  fast_remote:
-    - target::backend_remote
-  slow_remote:
-    - target::backend_remote_slow
+  - default:
+      - target::backend_inline
+  - fast_remote:
+      - target::backend_remote
+  - slow_remote:
+      - target::backend_remote_slow

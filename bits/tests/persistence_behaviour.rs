@@ -442,7 +442,7 @@ bits:
   persist_after_ms: 900
   persist_guard_ms: 200
 routes:
-  default: []
+  - default: []
 "#;
     let err = Bits::from_config(cfg)
         .err()
@@ -556,7 +556,7 @@ bits:
       - 127.0.0.1:2379
     broker_lease_ttl_secs: 0.5
 routes:
-  default: []
+  - default: []
 "#;
     let err = Bits::from_config(cfg)
         .err()

@@ -234,23 +234,12 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
         worker_server: worker_server.clone(),
     };
 
-    let routes = raw
-        .get("routes")
-        .ok_or("config must have a 'routes' section")?
-        .as_object()
-        .ok_or("routes must be an object")?;
-
-    let mut branches = Vec::new();
-    for (name, route_val) in routes {
-        let action_values = route_val
-            .as_array()
-            .ok_or_else(|| format!("route '{name}' must be an array"))?;
-        let actions = action_values
-            .iter()
-            .map(|v| parse_action(v, &parse_ctx))
-            .collect::<Result<Vec<_>, _>>()?;
-        branches.push(Route::new(name.clone(), actions));
-    }
+    let branches = parse_routes(
+        raw.get("routes")
+            .ok_or("config must have a 'routes' section")?,
+        "routes",
+        &parse_ctx,
+    )?;
 
     let router = Switch::new(branches);
     router
@@ -276,6 +265,51 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
     })
 }
 
+/// Parses an ordered list of named routes from a JSON array of single-key objects.
+///
+/// Each element must be a JSON object with exactly one key, where the key is the
+/// route name and the value is the array of actions for that route.
+///
+/// ```yaml
+/// routes:
+///   - my_route:
+///       - action1
+///       - action2
+/// ```
+fn parse_routes(
+    value: &serde_json::Value,
+    section: &str,
+    ctx: &ParseContext,
+) -> Result<Vec<Route>, Box<dyn std::error::Error>> {
+    let entries = value
+        .as_array()
+        .ok_or_else(|| format!("{section} must be an array"))?;
+
+    let mut routes = Vec::new();
+    for entry in entries {
+        let map = entry
+            .as_object()
+            .ok_or_else(|| format!("each {section} entry must be an object"))?;
+        if map.len() != 1 {
+            return Err(format!(
+                "each {section} entry must have exactly one key (the route name), got {}",
+                map.len()
+            )
+            .into());
+        }
+        let (name, route_val) = map.iter().next().unwrap();
+        let action_values = route_val
+            .as_array()
+            .ok_or_else(|| format!("{section} route '{name}' must be an array of actions"))?;
+        let actions = action_values
+            .iter()
+            .map(|v| parse_action(v, ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+        routes.push(Route::new(name.clone(), actions));
+    }
+    Ok(routes)
+}
+
 fn parse_action(
     value: &serde_json::Value,
     ctx: &ParseContext,
@@ -292,18 +326,7 @@ fn parse_action(
         }
         serde_json::Value::Object(map) => {
             if let Some(switch_val) = map.get("switch") {
-                let branches = switch_val.as_object().ok_or("switch must be an object")?;
-                let mut routes = Vec::new();
-                for (route_name, route_val) in branches {
-                    let action_list = route_val
-                        .as_array()
-                        .ok_or_else(|| format!("switch route '{route_name}' must be an array"))?;
-                    let actions = action_list
-                        .iter()
-                        .map(|v| parse_action(v, ctx))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    routes.push(Route::new(route_name.clone(), actions));
-                }
+                let routes = parse_routes(switch_val, "switch", ctx)?;
                 let switch = Switch::new(routes);
                 switch
                     .validate()
@@ -548,7 +571,7 @@ mod tests {
     async fn test_empty_pipeline() {
         let config = r#"
 routes:
-  test_pipeline: []
+  - test_pipeline: []
 "#;
         let err = Bits::from_config(config)
             .err()

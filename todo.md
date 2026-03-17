@@ -24,7 +24,6 @@
 - [ ] CICD for image building
 - [ ] SD: TiKV deployment testing / implementing nats-kv
 - [x] JH: Allow multiple worker pools
-- [ ] JH: Load balancing of workers to brokers
 - [ ] JH: MARS worker pool, check interpolation and regridding
 - [ ] JH: Check we clean up jobs from the database
 - [ ] PT: Authotron integration on the frontend
@@ -40,11 +39,14 @@
 - [ ] JH: Consider long-term log of requests for metrics and debugging
 - [ ] __: DynamoDB support for persistence? / Consider how much we R/W to DB for dynamoDB
 - [ ] __: CICD of FDB worker based on release of fdb repo
+- [ ] JH: Load balancing of workers to brokers
+- [ ] JH: Reimplement collections
 
 ## Nice to haves
 
 - [ ] PT: split config
 - [ ] JH: Maybe BOBS
+- [ ] JH: Check anonymous user info
 - [ ] __: Workers test themselves in CICD (maybe via docker-compose)
 
 # Validation against existing polytope:

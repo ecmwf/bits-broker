@@ -47,8 +47,8 @@ targets:
         type: remote_pool
         heartbeat_timeout_secs: {heartbeat_timeout_secs}
 routes:
-  default:
-    - target::test_pool
+  - default:
+      - target::test_pool
 "#
     );
     Bits::from_config(&config).expect("config error")
@@ -70,8 +70,8 @@ targets:
         type: remote_pool
         heartbeat_timeout_secs: {heartbeat_timeout_secs}
 routes:
-  default:
-    - target::test_pool
+  - default:
+      - target::test_pool
 "#
     );
     Bits::from_config(&config).expect("config error")

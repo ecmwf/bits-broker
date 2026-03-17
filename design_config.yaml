@@ -79,40 +79,40 @@ targets:
 
 routes:
 
-  operational_forecast:
-    - transform::expand
-    - check::valid_data
-    - transform::uses_tapes_or_not
-    - transform::tape_cost_estimation: ~
-      dispatcher:
-        queue: cost_weighted
-        executor:
-          type: thread_pool
-          concurrency: 20
-    - target::mars_od
+  - operational_forecast:
+      - transform::expand
+      - check::valid_data
+      - transform::uses_tapes_or_not
+      - transform::tape_cost_estimation: ~
+        dispatcher:
+          queue: cost_weighted
+          executor:
+            type: thread_pool
+            concurrency: 20
+      - target::mars_od
 
-  era5_reanalysis:
-    - transform::expand
-    - switch:
-        era5_privileged:
-          - check::era5_data
-          - check::era5_license: ~
-            dispatcher:
-              queue: fifo
-              executor:
-                type: async_pool
-                concurrency: 400
-          - target::dss_od
-        era5_public:
-          - check::era5_data
-          - target::dss_od
+  - era5_reanalysis:
+      - transform::expand
+      - switch:
+          - era5_privileged:
+              - check::era5_data
+              - check::era5_license: ~
+                dispatcher:
+                  queue: fifo
+                  executor:
+                    type: async_pool
+                    concurrency: 400
+              - target::dss_od
+          - era5_public:
+              - check::era5_data
+              - target::dss_od
 
-  extremes_dt:
-    - check::valid_data
-    - transform::expand
-    - target::fdb_worker
+  - extremes_dt:
+      - check::valid_data
+      - transform::expand
+      - target::fdb_worker
 
-  extremes_fc:
-    - check::valid_data
-    - transform::expand
-    - target::fdb_worker
+  - extremes_fc:
+      - check::valid_data
+      - transform::expand
+      - target::fdb_worker

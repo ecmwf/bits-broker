@@ -89,10 +89,10 @@ async fn post_job_returns_result() {
 
     let config = r#"
 routes:
-  default:
-    - target::dummy_dispatch:
-        duration_ms: 10
-        concurrency: 1
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 10
+          concurrency: 1
 "#;
 
     let port = start_server(config, Duration::from_secs(25)).await;
@@ -123,10 +123,10 @@ async fn poll_redirect_resolves_to_final_result() {
     // so the second GET returns the final result.
     let config = r#"
 routes:
-  default:
-    - target::dummy_dispatch:
-        duration_ms: 100
-        concurrency: 1
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 100
+          concurrency: 1
 "#;
 
     let port = start_server(config, Duration::from_millis(50)).await;

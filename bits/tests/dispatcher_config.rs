@@ -70,8 +70,8 @@ targets:
   my_pool:
     type: remote
 routes:
-  default:
-    - target::my_pool
+  - default:
+      - target::my_pool
 "#;
 
     let bits = Bits::from_config(config);
@@ -95,8 +95,8 @@ targets:
       executor:
         type: remote_pool
 routes:
-  default:
-    - target::mars
+  - default:
+      - target::mars
 "#;
     assert!(Bits::from_config(config).is_ok(), "valid config should parse");
 }
@@ -109,8 +109,8 @@ bits:
     host: "127.0.0.1"
     port: 0
 routes:
-  default:
-    - target::remote: ~
+  - default:
+      - target::remote: ~
 "#;
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(err.contains("named registry entry"), "unexpected: {err}");
@@ -123,8 +123,8 @@ targets:
   mars:
     type: remote
 routes:
-  default:
-    - target::mars
+  - default:
+      - target::mars
 "#;
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(err.contains("bits.worker_server"), "unexpected: {err}");
@@ -134,12 +134,12 @@ routes:
 fn remote_pool_rejected_for_non_remote_target() {
     let config = r#"
 routes:
-  default:
-    - target::http:
-        url: "http://example.com"
-      dispatcher:
-        executor:
-          type: remote_pool
+  - default:
+      - target::http:
+          url: "http://example.com"
+        dispatcher:
+          executor:
+            type: remote_pool
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
@@ -163,8 +163,8 @@ targets:
       executor:
         type: thread_pool
 routes:
-  default:
-    - target::mars
+  - default:
+      - target::mars
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
@@ -178,11 +178,11 @@ routes:
 fn concurrency_at_dispatcher_level_is_rejected() {
     let config = r#"
 routes:
-  default:
-    - target::http:
-        url: "http://example.com"
-      dispatcher:
-        concurrency: 4
+  - default:
+      - target::http:
+          url: "http://example.com"
+        dispatcher:
+          concurrency: 4
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
@@ -196,7 +196,7 @@ routes:
 fn empty_route_is_rejected() {
     let config = r#"
 routes:
-  default: []
+  - default: []
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
@@ -212,9 +212,9 @@ fn route_must_end_in_terminal_action() {
 
     let config = r#"
 routes:
-  default:
-    - check::dummy_delay:
-        duration_ms: 1
+  - default:
+      - check::dummy_delay:
+          duration_ms: 1
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
@@ -228,11 +228,11 @@ routes:
 fn action_after_target_is_rejected() {
     let config = r#"
 routes:
-  default:
-    - target::http:
-        url: "http://example.com"
-    - target::http:
-        url: "http://example.com/after"
+  - default:
+      - target::http:
+          url: "http://example.com"
+      - target::http:
+          url: "http://example.com/after"
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
@@ -246,13 +246,13 @@ routes:
 fn action_after_switch_is_rejected() {
     let config = r#"
 routes:
-  default:
-    - switch:
-        nested:
-          - target::http:
-              url: "http://example.com"
-    - target::http:
-        url: "http://example.com/after"
+  - default:
+      - switch:
+          - nested:
+              - target::http:
+                  url: "http://example.com"
+      - target::http:
+          url: "http://example.com/after"
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
@@ -268,11 +268,11 @@ fn nested_switch_routes_are_validated_recursively() {
 
     let config = r#"
 routes:
-  default:
-    - switch:
-        nested:
-          - check::dummy_delay:
-              duration_ms: 1
+  - default:
+      - switch:
+          - nested:
+              - check::dummy_delay:
+                  duration_ms: 1
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();

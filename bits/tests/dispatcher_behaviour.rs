@@ -99,13 +99,13 @@ async fn pipeline_check_transform_target() {
 
     let config = r#"
 routes:
-  default:
-    - check::dummy_delay:
-        duration_ms: 10
-    - transform::dummy_cost:
-        cost: 1
-    - target::dummy_dispatch:
-        duration_ms: 10
+  - default:
+      - check::dummy_delay:
+          duration_ms: 10
+      - transform::dummy_cost:
+          cost: 1
+      - target::dummy_dispatch:
+          duration_ms: 10
 "#;
 
     let bits = Bits::from_config(config).unwrap();

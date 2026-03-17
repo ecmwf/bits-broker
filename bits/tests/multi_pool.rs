@@ -83,16 +83,16 @@ targets:
         type: remote_pool
         heartbeat_timeout_secs: {hb_b}
 routes:
-  default:
-    - switch:
-        for_a:
-          - check::test_match_class:
-              class: a
-          - target::pool_a
-        for_b:
-          - check::test_match_class:
-              class: b
-          - target::pool_b
+  - default:
+      - switch:
+          - for_a:
+              - check::test_match_class:
+                  class: a
+              - target::pool_a
+          - for_b:
+              - check::test_match_class:
+                  class: b
+              - target::pool_b
 "#
     );
     Bits::from_config(&config).expect("config error")
@@ -109,10 +109,10 @@ targets:
   pool_a:
     type: remote
 routes:
-  route1:
-    - target::pool_a
-  route2:
-    - target::pool_a
+  - route1:
+      - target::pool_a
+  - route2:
+      - target::pool_a
 "#
     );
     Bits::from_config(&config).expect("config error")

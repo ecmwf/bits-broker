@@ -38,6 +38,8 @@
 - [ ] __: Garbage collector
 - [ ] JH: Check the persistence is working
 - [ ] JH: Consider long-term log of requests for metrics and debugging
+- [ ] __: DynamoDB support for persistence? / Consider how much we R/W to DB for dynamoDB
+- [ ] __: CICD of FDB worker based on release of fdb repo
 
 ## Nice to haves
 

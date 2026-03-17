@@ -26,15 +26,18 @@ use tokio::net::TcpListener;
 
 use crate::{Bits, Job, JobResult, PollOutcome};
 
-const DEFAULT_BIND: &str = "0.0.0.0:8080";
 const DEFAULT_POLL_TIMEOUT_MS: u64 = 25_000;
 
 /// Configuration for the built-in HTTP server.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
-    /// Socket address to bind to (e.g. `"0.0.0.0:8080"`).
-    #[serde(default = "default_bind")]
-    pub bind: String,
+    /// Host interface to bind to (e.g. `"0.0.0.0"`).
+    #[serde(default = "default_server_host")]
+    pub host: String,
+
+    /// TCP port to bind to (e.g. `8080`).
+    #[serde(default = "default_server_port")]
+    pub port: u16,
 
     /// Long-poll timeout in milliseconds for the initial submit response
     /// and reconnect polls.
@@ -42,8 +45,12 @@ pub struct ServerConfig {
     pub poll_timeout_ms: u64,
 }
 
-fn default_bind() -> String {
-    DEFAULT_BIND.to_string()
+fn default_server_host() -> String {
+    "0.0.0.0".into()
+}
+
+fn default_server_port() -> u16 {
+    8080
 }
 
 fn default_poll_timeout_ms() -> u64 {
@@ -53,7 +60,8 @@ fn default_poll_timeout_ms() -> u64 {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind: default_bind(),
+            host: default_server_host(),
+            port: default_server_port(),
             poll_timeout_ms: default_poll_timeout_ms(),
         }
     }
@@ -83,6 +91,9 @@ pub async fn serve(
     bits: Arc<Bits>,
     config: ServerConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let broker_id = bits.broker_id().to_string();
+    let routes = bits.route_names().join(", ");
+
     let state = AppState {
         bits,
         poll_timeout: config.poll_timeout(),
@@ -93,8 +104,17 @@ pub async fn serve(
         .route("/job/{id}", get(poll_job))
         .with_state(state);
 
-    let listener = TcpListener::bind(&config.bind).await?;
-    tracing::info!(address = %listener.local_addr()?, "bits server listening");
+    let bind_addr = format!("{}:{}", config.host, config.port);
+    let listener = TcpListener::bind(&bind_addr).await?;
+    let local_addr = listener.local_addr()?;
+
+    eprintln!();
+    eprintln!("  \x1b[1m\x1b[96mbits\x1b[0m");
+    eprintln!("  \x1b[2mbroker\x1b[0m  {broker_id}");
+    eprintln!("  \x1b[2mserver\x1b[0m  {local_addr}");
+    eprintln!("  \x1b[2mroutes\x1b[0m  {routes}");
+    eprintln!();
+
     axum::serve(listener, app).await?;
     Ok(())
 }

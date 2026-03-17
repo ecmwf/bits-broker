@@ -23,7 +23,7 @@
 - [ ] Fix deployment to use git tags/commits for versioning
 - [ ] CICD for image building
 - [ ] SD: TiKV deployment testing / implementing nats-kv
-- [ ] JH: Allow multiple worker pools
+- [x] JH: Allow multiple worker pools
 - [ ] JH: Load balancing of workers to brokers
 - [ ] JH: MARS worker pool, check interpolation and regridding
 - [ ] JH: Check we clean up jobs from the database
@@ -36,6 +36,8 @@
 - [ ] SD: Reimplement metrics
 - [ ] __: S3 support for indirect responses (unreliable networks, stream restarts, relieve load on MARS/workers)
 - [ ] __: Garbage collector
+- [ ] JH: Check the persistence is working
+- [ ] JH: Consider long-term log of requests for metrics and debugging
 
 ## Nice to haves
 

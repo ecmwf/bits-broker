@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 
 use crate::actions::{ActionError, TargetResult};
 use crate::job::Job;
+use crate::worker_server::WorkerServer;
 
 /// Selects the executor implementation to construct from config.
 ///
@@ -97,7 +98,12 @@ pub enum DispatchGuard {
 impl<T: Send + 'static> Dispatcher<T> {
     /// Build a `Dispatcher` from config values, returning `None` if neither
     /// queue nor executor is specified (no scheduling needed).
-    pub fn from_config(queue: Option<&QueueKind>, executor: Option<&ExecutorKind>) -> Option<Self> {
+    pub fn from_config(
+        queue: Option<&QueueKind>,
+        executor: Option<&ExecutorKind>,
+        pool_name: Option<&str>,
+        worker_server: Option<Arc<WorkerServer>>,
+    ) -> Option<Self> {
         if queue.is_none() && executor.is_none() {
             return None;
         }
@@ -118,9 +124,14 @@ impl<T: Send + 'static> Dispatcher<T> {
                     TypeId::of::<TargetResult>(),
                     "remote_pool executor requires T == TargetResult"
                 );
+                let pool_name = pool_name
+                    .expect("remote_pool executor requires target registry entry name (pool name)");
+                let worker_server = worker_server
+                    .expect("remote_pool executor requires configured WorkerServer");
                 let concrete: Arc<dyn Executor<TargetResult>> = Arc::new(RemotePoolExecutor::new(
-                    &cfg.bind,
+                    pool_name,
                     Duration::from_secs_f64(cfg.heartbeat_timeout_secs),
+                    worker_server,
                 ));
                 let any: Box<dyn Any> = Box::new(concrete);
                 *any.downcast::<Arc<dyn Executor<T>>>()

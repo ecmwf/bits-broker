@@ -208,18 +208,46 @@ reaches this step, the dispatcher holds the caller suspended and hands the job t
 worker via HTTP long-poll. The worker posts the result back; the caller is woken and the result
 is returned to the client.
 
+**Worker server**: All remote pools share a single HTTP server configured at
+`bits.worker_server.bind`. Each pool's endpoints are namespaced under `/{pool_name}/`:
+
+- `GET  /{pool_name}/work?timeout_ms=N`           — long-poll; returns job JSON or 204
+- `POST /{pool_name}/heartbeat/{job_id}`           — worker keepalive
+- `POST /{pool_name}/complete/data/{job_id}`       — stream result body
+- `POST /{pool_name}/complete/redirect/{job_id}`   — redirect outcome
+- `POST /{pool_name}/complete/reject/{job_id}`     — rejection outcome
+- `POST /{pool_name}/complete/error/{job_id}`      — error outcome
+
+The pool name is derived from the target's registry entry name. `target::remote` must be
+defined as a **named registry entry** (not inline) so the pool name can be derived.
+
 ```yaml
+bits:
+  worker_server:
+    bind: "0.0.0.0:9001"   # single shared server for all remote pools
+
 targets:
-  fdb_workers:
-    type: remote
+  mars:
+    type: remote            # pool name = "mars" → endpoints at /mars/work etc.
     dispatcher:
       queue: cost_weighted
-      concurrency: 50
+      executor:
+        type: remote_pool
+        heartbeat_timeout_secs: 60
+
+  fdb_workers:
+    type: remote            # pool name = "fdb_workers" → /fdb_workers/work etc.
+    dispatcher:
+      queue: cost_weighted
+      executor:
+        type: remote_pool
+        heartbeat_timeout_secs: 60
 ```
 
 `remote` always implies `executor: remote_pool` — it is auto-inserted if not specified. Any
 other executor paired with `remote`, or `remote_pool` paired with a non-`remote` action, is
-rejected at config parse time.
+rejected at config parse time. `bits.worker_server` must be configured whenever any `remote`
+target is present.
 
 ---
 

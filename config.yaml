@@ -1,5 +1,8 @@
 bits:
   job_cleanup_interval_ms: 5000
+  worker_server:
+    host: "0.0.0.0"        # shared server for all remote pools
+    port: 9001
 
 targets:
   # Plain HTTP target — no dispatcher, runs inline with no concurrency limit.
@@ -38,15 +41,28 @@ targets:
 
   # Remote-pool executor: jobs are handed off to external workers over HTTP.
   # The `remote` target type is required — it does nothing locally.
+  # Pool name is derived from the registry entry name ("backend_remote").
   backend_remote:
     type: remote
     dispatcher:
       queue: fifo
       executor:
         type: remote_pool
-        bind: "0.0.0.0:9001"
         heartbeat_timeout_secs: 60
+
+  # Second remote pool — shares the same HTTP server, different path prefix.
+  backend_remote_slow:
+    type: remote
+    dispatcher:
+      queue: cost_weighted
+      executor:
+        type: remote_pool
+        heartbeat_timeout_secs: 120
 
 routes:
   default:
     - target::backend_inline
+  fast_remote:
+    - target::backend_remote
+  slow_remote:
+    - target::backend_remote_slow

@@ -17,25 +17,74 @@ use crate::actions::{ActionError, TargetResult};
 use crate::dispatcher::queue::Queue;
 use crate::dispatcher::{DispatchGuard, Executor, PendingMap};
 use crate::result::JobResult;
-
-fn default_remote_bind() -> String {
-    "0.0.0.0:9001".into()
-}
+use crate::worker_server::WorkerServer;
 
 fn default_heartbeat_timeout_secs() -> f64 {
     60.0
 }
 
 /// Configuration for the remote-pool executor.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RemotePoolConfig {
-    /// Address the long-poll HTTP server binds to.
-    #[serde(default = "default_remote_bind")]
-    pub bind: String,
     /// Seconds without a heartbeat before an in-progress job is evicted.
     /// Fractional values are supported (e.g. 0.1 for 100 ms).
-    #[serde(default = "default_heartbeat_timeout_secs")]
     pub heartbeat_timeout_secs: f64,
+}
+
+impl<'de> serde::Deserialize<'de> for RemotePoolConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+        use std::fmt;
+
+        struct RemotePoolConfigVisitor;
+
+        impl<'de> Visitor<'de> for RemotePoolConfigVisitor {
+            type Value = RemotePoolConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a RemotePoolConfig object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut heartbeat_timeout_secs = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "heartbeat_timeout_secs" => {
+                            if heartbeat_timeout_secs.is_some() {
+                                return Err(de::Error::duplicate_field("heartbeat_timeout_secs"));
+                            }
+                            heartbeat_timeout_secs = Some(map.next_value()?);
+                        }
+                        "bind" => {
+                            return Err(de::Error::custom(
+                                "remote_pool.bind has been removed; configure host and port at bits.worker_server instead",
+                            ));
+                        }
+                        _ => {
+                            return Err(de::Error::unknown_field(
+                                &key,
+                                &["heartbeat_timeout_secs"],
+                            ));
+                        }
+                    }
+                }
+
+                Ok(RemotePoolConfig {
+                    heartbeat_timeout_secs: heartbeat_timeout_secs
+                        .unwrap_or_else(default_heartbeat_timeout_secs),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(RemotePoolConfigVisitor)
+    }
 }
 
 // ─── worker outcome ───────────────────────────────────────────────────────────
@@ -366,15 +415,17 @@ async fn handle_complete_error(
 ///
 /// This executor must always be paired with a `remote` target action.
 pub struct RemotePoolExecutor {
-    bind: String,
+    pool_name: String,
     heartbeat_timeout: Duration,
+    worker_server: Arc<WorkerServer>,
 }
 
 impl RemotePoolExecutor {
-    pub fn new(bind: &str, heartbeat_timeout: Duration) -> Self {
+    pub fn new(pool_name: &str, heartbeat_timeout: Duration, worker_server: Arc<WorkerServer>) -> Self {
         Self {
-            bind: bind.to_string(),
+            pool_name: pool_name.to_string(),
             heartbeat_timeout,
+            worker_server,
         }
     }
 }
@@ -401,19 +452,14 @@ impl Executor<TargetResult> for RemotePoolExecutor {
             .route("/complete/error/{job_id}", post(handle_complete_error))
             .with_state(Arc::clone(&state));
 
-        let bind_addr = self.bind.clone();
-        tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(&bind_addr)
-                .await
-                .unwrap_or_else(|e| panic!("remote_pool: failed to bind to {bind_addr}: {e}"));
-            tracing::info!(
-                addr = %listener.local_addr().unwrap(),
-                "remote_pool HTTP server listening"
-            );
-            axum::serve(listener, app)
-                .await
-                .unwrap_or_else(|e| panic!("remote_pool: server error: {e}"));
-        });
+        self.worker_server
+            .register_pool(&self.pool_name, app)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "remote_pool: failed to register pool '{}': {e}",
+                    self.pool_name
+                )
+            });
 
         // Heartbeat reaper task.
         let heartbeat_timeout = self.heartbeat_timeout;

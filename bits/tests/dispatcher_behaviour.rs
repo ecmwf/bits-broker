@@ -18,12 +18,9 @@ use bits::{Bits, PollOutcome};
 /// Work futures run on OS threads when using the thread_pool executor.
 #[tokio::test]
 async fn thread_pool_runs_on_os_threads() {
-    let dispatcher = Dispatcher::<CheckResult>::from_config(
-        Some(&QueueKind::Fifo),
-        Some(&ExecutorKind::ThreadPool {
-            concurrency: Some(2),
-        }),
-    )
+    let dispatcher = Dispatcher::<CheckResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::ThreadPool {
+        concurrency: Some(2),
+    }), None, None)
     .unwrap();
 
     let test_thread = std::thread::current().id();
@@ -61,12 +58,9 @@ async fn thread_pool_runs_on_os_threads() {
 /// them concurrently. Would deadlock if only one thread ran at a time.
 #[tokio::test]
 async fn thread_pool_executes_concurrently() {
-    let dispatcher = Dispatcher::<CheckResult>::from_config(
-        Some(&QueueKind::Fifo),
-        Some(&ExecutorKind::ThreadPool {
-            concurrency: Some(2),
-        }),
-    )
+    let dispatcher = Dispatcher::<CheckResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::ThreadPool {
+        concurrency: Some(2),
+    }), None, None)
     .unwrap();
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -133,12 +127,9 @@ routes:
 #[tokio::test]
 async fn check_dispatcher_cost_weighted_ordering() {
     let dispatcher = Arc::new(
-        Dispatcher::<CheckResult>::from_config(
-            Some(&QueueKind::CostWeighted),
-            Some(&ExecutorKind::AsyncPool {
-                concurrency: Some(1),
-            }),
-        )
+        Dispatcher::<CheckResult>::from_config(Some(&QueueKind::CostWeighted), Some(&ExecutorKind::AsyncPool {
+            concurrency: Some(1),
+        }), None, None)
         .unwrap(),
     );
 
@@ -198,12 +189,9 @@ async fn check_dispatcher_cost_weighted_ordering() {
 #[tokio::test]
 async fn target_dispatcher_cost_weighted_ordering() {
     let dispatcher = Arc::new(
-        Dispatcher::<TargetResult>::from_config(
-            Some(&QueueKind::CostWeighted),
-            Some(&ExecutorKind::AsyncPool {
-                concurrency: Some(1),
-            }),
-        )
+        Dispatcher::<TargetResult>::from_config(Some(&QueueKind::CostWeighted), Some(&ExecutorKind::AsyncPool {
+            concurrency: Some(1),
+        }), None, None)
         .unwrap(),
     );
 
@@ -263,12 +251,9 @@ async fn target_dispatcher_cost_weighted_ordering() {
 #[tokio::test]
 async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
     let dispatcher = Arc::new(
-        Dispatcher::<TargetResult>::from_config(
-            Some(&QueueKind::AgePriority),
-            Some(&ExecutorKind::AsyncPool {
-                concurrency: Some(1),
-            }),
-        )
+        Dispatcher::<TargetResult>::from_config(Some(&QueueKind::AgePriority), Some(&ExecutorKind::AsyncPool {
+            concurrency: Some(1),
+        }), None, None)
         .unwrap(),
     );
 

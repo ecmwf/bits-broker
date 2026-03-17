@@ -40,23 +40,94 @@ fn queue_kind_deserializes_age_priority() {
 #[test]
 fn remote_pool_config_defaults_apply() {
     let cfg: RemotePoolConfig = serde_yaml::from_str("{}").unwrap();
-    assert_eq!(cfg.bind, "0.0.0.0:9001");
     assert_eq!(cfg.heartbeat_timeout_secs, 60.0);
 }
 
+#[test]
+fn remote_pool_config_bind_field_is_rejected() {
+    let result: Result<RemotePoolConfig, _> = serde_yaml::from_str("bind: \"0.0.0.0:9001\"");
+    let err = result.err().unwrap().to_string();
+    assert!(
+        err.contains("bits.worker_server"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn remote_pool_config_accepts_heartbeat_timeout() {
+    let cfg: RemotePoolConfig = serde_yaml::from_str("heartbeat_timeout_secs: 30.5").unwrap();
+    assert_eq!(cfg.heartbeat_timeout_secs, 30.5);
+}
+
 #[tokio::test]
-async fn remote_target_without_executor_injects_default_remote_pool() {
+async fn named_remote_target_without_executor_injects_default_remote_pool() {
     let config = r#"
+bits:
+  worker_server:
+    host: "127.0.0.1"
+    port: 0
+targets:
+  my_pool:
+    type: remote
 routes:
   default:
-    - target::remote: ~
+    - target::my_pool
 "#;
 
     let bits = Bits::from_config(config);
     assert!(
         bits.is_ok(),
-        "target::remote without executor should parse successfully"
+        "named remote target without executor should parse successfully"
     );
+}
+
+#[tokio::test]
+async fn named_remote_target_with_worker_server_parses() {
+    let config = r#"
+bits:
+  worker_server:
+    host: "127.0.0.1"
+    port: 0
+targets:
+  mars:
+    type: remote
+    dispatcher:
+      executor:
+        type: remote_pool
+routes:
+  default:
+    - target::mars
+"#;
+    assert!(Bits::from_config(config).is_ok(), "valid config should parse");
+}
+
+#[test]
+fn inline_remote_target_is_rejected() {
+    let config = r#"
+bits:
+  worker_server:
+    host: "127.0.0.1"
+    port: 0
+routes:
+  default:
+    - target::remote: ~
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(err.contains("named registry entry"), "unexpected: {err}");
+}
+
+#[test]
+fn remote_target_without_worker_server_is_rejected() {
+    let config = r#"
+targets:
+  mars:
+    type: remote
+routes:
+  default:
+    - target::mars
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(err.contains("bits.worker_server"), "unexpected: {err}");
 }
 
 #[test]
@@ -81,12 +152,19 @@ routes:
 #[test]
 fn remote_target_rejected_with_non_remote_executor() {
     let config = r#"
+bits:
+  worker_server:
+    host: "127.0.0.1"
+    port: 0
+targets:
+  mars:
+    type: remote
+    dispatcher:
+      executor:
+        type: thread_pool
 routes:
   default:
-    - target::remote: ~
-      dispatcher:
-        executor:
-          type: thread_pool
+    - target::mars
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();

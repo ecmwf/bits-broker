@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,10 +8,12 @@ use serde::Deserialize;
 use crate::Bits;
 use crate::actions::Action;
 use crate::actions::registry::create_action;
+use crate::actions::{TargetAction, TargetResult};
 use crate::db::PersistenceStore;
 use crate::dispatcher::{Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig};
 use crate::routing::{Route, switch::Switch};
 use crate::server::ServerConfig;
+use crate::worker_server::WorkerServer;
 
 struct Registries {
     checks: HashMap<String, serde_json::Value>,
@@ -18,15 +21,34 @@ struct Registries {
     targets: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Clone)]
 struct ParseContext {
     registries: Registries,
+    resolved_targets: RefCell<
+        HashMap<String, (Arc<dyn TargetAction>, Option<Dispatcher<TargetResult>>)>,
+    >,
+    worker_server: Option<Arc<WorkerServer>>,
 }
 
 #[derive(Default)]
 struct DispatcherSettings {
     queue: Option<QueueKind>,
     executor: Option<ExecutorKind>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerServerConfig {
+    #[serde(default = "default_worker_server_host")]
+    host: String,
+    #[serde(default = "default_worker_server_port")]
+    port: u16,
+}
+
+fn default_worker_server_host() -> String {
+    "0.0.0.0".into()
+}
+
+fn default_worker_server_port() -> u16 {
+    9001
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +69,8 @@ struct BitsConfig {
     persist_guard_ms: Option<u64>,
     #[serde(default)]
     tikv: Option<TiKvConfig>,
+    #[serde(default)]
+    worker_server: Option<WorkerServerConfig>,
 }
 
 #[cfg_attr(not(feature = "tikv"), allow(dead_code))]
@@ -117,7 +141,13 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             poll_timeout_ms: None,
             persist_guard_ms: None,
             tikv: None,
+            worker_server: None,
         });
+
+    let worker_server: Option<Arc<WorkerServer>> = bits_cfg
+        .worker_server
+        .as_ref()
+        .map(|ws_cfg| Arc::new(WorkerServer::new(&ws_cfg.host, ws_cfg.port)));
 
     let broker_id = bits_cfg
         .broker_id
@@ -200,6 +230,8 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             transforms,
             targets,
         },
+        resolved_targets: RefCell::new(HashMap::new()),
+        worker_server: worker_server.clone(),
     };
 
     let routes = raw
@@ -224,6 +256,10 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
     router
         .validate()
         .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+
+    if let Some(ws) = &worker_server {
+        ws.start();
+    }
 
     Ok(Bootstrap {
         runtime_config: RuntimeConfig {
@@ -278,10 +314,13 @@ fn parse_action(
             for (key, config) in map {
                 if key.contains("::") {
                     let (ns, action_name) = split_ns(key)?;
+                    if action_name == "remote" {
+                        return Err("target::remote must be defined as a named registry entry (not inline); the pool name is derived from the registry entry name".into());
+                    }
                     let action = create_action(action_name, config.clone())?;
                     let action = validate_inline_action(ns, action)?;
                     let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
-                    return attach_dispatcher(action_name, action, settings);
+                    return attach_dispatcher(action_name, action_name, action, settings, ctx);
                 }
             }
 
@@ -314,7 +353,7 @@ fn resolve_named(
                 .checks
                 .get(name)
                 .ok_or_else(|| format!("unknown check '{name}'"))?;
-            action_from_entry(entry)
+            action_from_entry(name, entry, ctx)
         }
         "transform" => {
             let entry = ctx
@@ -322,15 +361,25 @@ fn resolve_named(
                 .transforms
                 .get(name)
                 .ok_or_else(|| format!("unknown transform '{name}'"))?;
-            action_from_entry(entry)
+            action_from_entry(name, entry, ctx)
         }
         "target" => {
+            if let Some((target, dispatcher)) = ctx.resolved_targets.borrow().get(name) {
+                return Ok(Action::Target(Arc::clone(target), dispatcher.clone()));
+            }
             let entry = ctx
                 .registries
                 .targets
                 .get(name)
                 .ok_or_else(|| format!("unknown target '{name}'"))?;
-            action_from_entry(entry)
+            let action = action_from_entry(name, entry, ctx)?;
+            if let Action::Target(target, dispatcher) = &action {
+                ctx.resolved_targets.borrow_mut().insert(
+                    name.to_string(),
+                    (Arc::clone(target), dispatcher.clone()),
+                );
+            }
+            Ok(action)
         }
         _ => Err(format!("unknown namespace '{ns}' in '{ns}::{name}'").into()),
     }
@@ -377,7 +426,11 @@ fn parse_dispatcher_fields(
     Ok(settings)
 }
 
-fn action_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::error::Error>> {
+fn action_from_entry(
+    entry_name: &str,
+    entry: &serde_json::Value,
+    ctx: &ParseContext,
+) -> Result<Action, Box<dyn std::error::Error>> {
     let map = entry
         .as_object()
         .ok_or("registry entry must be an object")?;
@@ -403,13 +456,15 @@ fn action_from_entry(entry: &serde_json::Value) -> Result<Action, Box<dyn std::e
         remaining.into()
     };
     let action = create_action(type_name, config)?;
-    attach_dispatcher(type_name, action, settings)
+    attach_dispatcher(entry_name, type_name, action, settings, ctx)
 }
 
 fn attach_dispatcher(
+    entry_name: &str,
     action_name: &str,
     action: Action,
     mut settings: DispatcherSettings,
+    ctx: &ParseContext,
 ) -> Result<Action, Box<dyn std::error::Error>> {
     let is_remote_action = action_name == "remote";
     let is_remote_pool = matches!(&settings.executor, Some(ExecutorKind::RemotePool { .. }));
@@ -419,13 +474,15 @@ fn attach_dispatcher(
             None => {
                 settings.executor = Some(ExecutorKind::RemotePool {
                     config: RemotePoolConfig {
-                        bind: "0.0.0.0:9001".into(),
                         heartbeat_timeout_secs: 60.0,
                     },
                 })
             }
             Some(ExecutorKind::RemotePool { .. }) => {}
             Some(_) => return Err("'remote' target requires executor: remote_pool".into()),
+        }
+        if ctx.worker_server.is_none() {
+            return Err("remote_pool executor requires bits.worker_server to be configured (add 'worker_server: { host: ..., port: ... }' under 'bits:')".into());
         }
     } else if is_remote_pool {
         return Err("executor: remote_pool requires a 'remote' target action".into());
@@ -435,15 +492,35 @@ fn attach_dispatcher(
 
     match action {
         Action::Check(check, _) => {
-            let dispatcher = Dispatcher::from_config(settings.queue.as_ref(), settings.executor.as_ref());
+            let dispatcher = Dispatcher::from_config(
+                settings.queue.as_ref(),
+                settings.executor.as_ref(),
+                None,
+                None,
+            );
             Ok(Action::Check(check, dispatcher))
         }
         Action::Transform(transform, _) => {
-            let dispatcher = Dispatcher::from_config(settings.queue.as_ref(), settings.executor.as_ref());
+            let dispatcher = Dispatcher::from_config(
+                settings.queue.as_ref(),
+                settings.executor.as_ref(),
+                None,
+                None,
+            );
             Ok(Action::Transform(transform, dispatcher))
         }
         Action::Target(target, _) => {
-            let dispatcher = Dispatcher::from_config(settings.queue.as_ref(), settings.executor.as_ref());
+            let pool_name = if is_remote_action {
+                Some(entry_name)
+            } else {
+                None
+            };
+            let dispatcher = Dispatcher::from_config(
+                settings.queue.as_ref(),
+                settings.executor.as_ref(),
+                pool_name,
+                ctx.worker_server.clone(),
+            );
             Ok(Action::Target(target, dispatcher))
         }
         _ if has_dispatcher => {

@@ -18,12 +18,9 @@ use bits::job::Job;
 #[tokio::test]
 async fn async_pool_respects_concurrency_limit() {
     let dispatcher = Arc::new(
-        Dispatcher::<CheckResult>::from_config(
-            Some(&QueueKind::Fifo),
-            Some(&ExecutorKind::AsyncPool {
-                concurrency: Some(2),
-            }),
-        )
+        Dispatcher::<CheckResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::AsyncPool {
+            concurrency: Some(2),
+        }), None, None)
         .unwrap(),
     );
 
@@ -64,12 +61,9 @@ async fn async_pool_respects_concurrency_limit() {
 #[tokio::test]
 async fn thread_pool_respects_concurrency_limit() {
     let dispatcher = Arc::new(
-        Dispatcher::<CheckResult>::from_config(
-            Some(&QueueKind::Fifo),
-            Some(&ExecutorKind::ThreadPool {
-                concurrency: Some(2),
-            }),
-        )
+        Dispatcher::<CheckResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::ThreadPool {
+            concurrency: Some(2),
+        }), None, None)
         .unwrap(),
     );
 
@@ -114,12 +108,9 @@ async fn thread_pool_respects_concurrency_limit() {
 #[tokio::test]
 async fn async_pool_fifo_preserves_order() {
     let dispatcher = Arc::new(
-        Dispatcher::<CheckResult>::from_config(
-            Some(&QueueKind::Fifo),
-            Some(&ExecutorKind::AsyncPool {
-                concurrency: Some(1),
-            }),
-        )
+        Dispatcher::<CheckResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::AsyncPool {
+            concurrency: Some(1),
+        }), None, None)
         .unwrap(),
     );
 
@@ -157,12 +148,9 @@ async fn async_pool_fifo_preserves_order() {
 #[tokio::test]
 async fn thread_pool_fifo_preserves_order() {
     let dispatcher = Arc::new(
-        Dispatcher::<CheckResult>::from_config(
-            Some(&QueueKind::Fifo),
-            Some(&ExecutorKind::ThreadPool {
-                concurrency: Some(1),
-            }),
-        )
+        Dispatcher::<CheckResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::ThreadPool {
+            concurrency: Some(1),
+        }), None, None)
         .unwrap(),
     );
 
@@ -203,12 +191,9 @@ async fn thread_pool_fifo_preserves_order() {
 #[tokio::test]
 async fn thread_pool_cost_weighted_ordering() {
     let dispatcher = Arc::new(
-        Dispatcher::<CheckResult>::from_config(
-            Some(&QueueKind::CostWeighted),
-            Some(&ExecutorKind::ThreadPool {
-                concurrency: Some(1),
-            }),
-        )
+        Dispatcher::<CheckResult>::from_config(Some(&QueueKind::CostWeighted), Some(&ExecutorKind::ThreadPool {
+            concurrency: Some(1),
+        }), None, None)
         .unwrap(),
     );
 
@@ -262,12 +247,9 @@ async fn thread_pool_cost_weighted_ordering() {
 #[tokio::test]
 async fn thread_pool_age_priority_ordering() {
     let dispatcher = Arc::new(
-        Dispatcher::<CheckResult>::from_config(
-            Some(&QueueKind::AgePriority),
-            Some(&ExecutorKind::ThreadPool {
-                concurrency: Some(1),
-            }),
-        )
+        Dispatcher::<CheckResult>::from_config(Some(&QueueKind::AgePriority), Some(&ExecutorKind::ThreadPool {
+            concurrency: Some(1),
+        }), None, None)
         .unwrap(),
     );
 
@@ -327,7 +309,7 @@ async fn thread_pool_age_priority_ordering() {
 /// from_config returns None when no settings are provided.
 #[tokio::test]
 async fn dispatcher_from_config_none_when_no_settings() {
-    let result = Dispatcher::<CheckResult>::from_config(None, None);
+    let result = Dispatcher::<CheckResult>::from_config(None, None, None, None);
     assert!(result.is_none(), "expected None when all settings are None");
 }
 
@@ -338,6 +320,8 @@ async fn dispatcher_default_executor_is_async_pool() {
     let dispatcher = Dispatcher::<CheckResult>::from_config(
         Some(&QueueKind::Fifo),
         None, // default executor
+        None,
+        None,
     )
     .unwrap();
 
@@ -361,6 +345,8 @@ async fn dispatcher_default_queue_is_fifo() {
             Some(&ExecutorKind::AsyncPool {
                 concurrency: Some(1),
             }),
+            None,
+            None,
         )
         .unwrap(),
     );
@@ -403,12 +389,9 @@ async fn dispatcher_default_queue_is_fifo() {
 #[tokio::test]
 async fn async_pool_skips_work_if_caller_drops_before_dequeue() {
     let dispatcher = Arc::new(
-        Dispatcher::<CheckResult>::from_config(
-            Some(&QueueKind::Fifo),
-            Some(&ExecutorKind::AsyncPool {
-                concurrency: Some(1),
-            }),
-        )
+        Dispatcher::<CheckResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::AsyncPool {
+            concurrency: Some(1),
+        }), None, None)
         .unwrap(),
     );
 
@@ -469,12 +452,9 @@ async fn async_pool_skips_work_if_caller_drops_before_dequeue() {
 #[tokio::test]
 async fn thread_pool_skips_work_if_caller_drops_before_dequeue() {
     let dispatcher = Arc::new(
-        Dispatcher::<CheckResult>::from_config(
-            Some(&QueueKind::Fifo),
-            Some(&ExecutorKind::ThreadPool {
-                concurrency: Some(1),
-            }),
-        )
+        Dispatcher::<CheckResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::ThreadPool {
+            concurrency: Some(1),
+        }), None, None)
         .unwrap(),
     );
 

@@ -123,6 +123,16 @@ impl Bits {
         Ok(bits)
     }
 
+    /// Returns the broker instance identifier.
+    pub fn broker_id(&self) -> &str {
+        &self.broker_id
+    }
+
+    /// Returns the names of the top-level routes configured on this broker.
+    pub fn route_names(&self) -> Vec<&str> {
+        self.router.route_names()
+    }
+
     /// Submits a job for routing and execution.
     pub fn submit(&self, job: Job) -> JobHandle {
         self.submit_with_state(job, false)

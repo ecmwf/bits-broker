@@ -24,7 +24,7 @@
 - [ ] CICD for image building
 - [ ] SD: TiKV deployment testing / implementing nats-kv
 - [x] JH: Allow multiple worker pools
-- [ ] JH: MARS worker pool, check interpolation and regridding
+- [x] JH: MARS worker pool, check interpolation and regridding
 - [ ] JH: Check we clean up jobs from the database
 - [ ] PT: Authotron integration on the frontend
 - [ ] PT: Actions for checking roles

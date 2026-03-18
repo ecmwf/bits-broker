@@ -1,29 +1,39 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use bits::Job;
 use bits::actions::{ActionError, CheckAction, CheckResult};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::date_check::date_check;
 use crate::schedule::{ScheduleCatalog, ScheduleReleased};
 
-/// Check if a job matches a specific MARS class (e.g. "od", "ea").
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Match {
-    pub class: String,
+    #[serde(flatten)]
+    pub fields: HashMap<String, Value>,
 }
 
 #[async_trait]
 impl CheckAction for Match {
     async fn evaluate(&self, job: &Job) -> Result<CheckResult, ActionError> {
-        match job.request.get("class").and_then(|v| v.as_str()) {
-            Some(c) if c == self.class => Ok(CheckResult::Pass),
-            Some(c) => Ok(CheckResult::Reject {
-                reason: format!("class '{}' does not match required '{}'", c, self.class),
-            }),
-            None => Ok(CheckResult::Reject {
-                reason: "no class field found".to_string(),
-            }),
+        for (key, expected) in &self.fields {
+            let Some(actual) = job.request.get(key) else {
+                return Ok(CheckResult::Reject {
+                    reason: format!("request missing key '{key}'"),
+                });
+            };
+            if actual != expected {
+                return Ok(CheckResult::Reject {
+                    reason: format!(
+                        "{key}: '{}' does not match required '{}'",
+                        actual, expected
+                    ),
+                });
+            }
         }
+        Ok(CheckResult::Pass)
     }
 }
 

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use bits::actions::{CheckAction, CheckResult, TransformAction, TransformResult};
 use bits::job::Job;
 use bits_ecmwf::check::{DateChecker, Match};
+use bits_ecmwf::transform_patch::PatchRequest;
 use bits_ecmwf::schedule::{ScheduleCatalog, ScheduleReleased};
 use bits_ecmwf::transform_request_coercion::RequestCoercion;
 use chrono::{TimeZone, Utc};
@@ -20,6 +21,19 @@ fn fixture_path(name: &str) -> PathBuf {
             .as_nanos()
     ));
     path
+}
+
+#[test]
+fn request_coercion_deserialises_from_null() {
+    let action: RequestCoercion = serde_json::from_value(serde_json::Value::Null).unwrap();
+    assert_eq!(action.config.allow_ranges, bits_ecmwf::coercion::CoercionConfig::default().allow_ranges);
+    assert_eq!(action.config.allow_lists, bits_ecmwf::coercion::CoercionConfig::default().allow_lists);
+}
+
+#[test]
+fn request_coercion_deserialises_from_empty_object() {
+    let action: RequestCoercion = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(action.config.allow_ranges, bits_ecmwf::coercion::CoercionConfig::default().allow_ranges);
 }
 
 #[tokio::test]
@@ -165,11 +179,65 @@ async fn schedule_released_action_reads_raw_xml_file() {
 }
 
 #[tokio::test]
-async fn legacy_match_check_still_works() {
-    let action = Match { class: "od".into() };
-    let result = action
+async fn match_single_field() {
+    let action: Match = serde_json::from_value(json!({"class": "od"})).unwrap();
+    let pass = action
+        .evaluate(&Job::new(json!({"class": "od", "stream": "oper"})))
+        .await
+        .unwrap();
+    assert!(matches!(pass, CheckResult::Pass));
+
+    let reject = action
+        .evaluate(&Job::new(json!({"class": "ea"})))
+        .await
+        .unwrap();
+    assert!(matches!(reject, CheckResult::Reject { .. }));
+}
+
+#[tokio::test]
+async fn match_multiple_fields() {
+    let action: Match =
+        serde_json::from_value(json!({"class": "od", "stream": "oper"})).unwrap();
+
+    let pass = action
+        .evaluate(&Job::new(json!({"class": "od", "stream": "oper", "type": "fc"})))
+        .await
+        .unwrap();
+    assert!(matches!(pass, CheckResult::Pass));
+
+    let reject = action
+        .evaluate(&Job::new(json!({"class": "od", "stream": "enfo"})))
+        .await
+        .unwrap();
+    assert!(matches!(reject, CheckResult::Reject { .. }));
+}
+
+#[tokio::test]
+async fn match_rejects_missing_key() {
+    let action: Match = serde_json::from_value(json!({"domain": "g"})).unwrap();
+    let reject = action
         .evaluate(&Job::new(json!({"class": "od"})))
         .await
         .unwrap();
-    assert!(matches!(result, CheckResult::Pass));
+    assert!(matches!(reject, CheckResult::Reject { .. }));
+}
+
+#[tokio::test]
+async fn patch_request_sets_fields() {
+    let action: PatchRequest =
+        serde_json::from_value(json!({"set": {"domain": "g", "class": "od"}})).unwrap();
+    let mut job = Job::new(json!({"param": "2t"}));
+    action.execute(&mut job).await.unwrap();
+    assert_eq!(job.request["domain"], "g");
+    assert_eq!(job.request["class"], "od");
+    assert_eq!(job.request["param"], "2t");
+}
+
+#[tokio::test]
+async fn patch_request_overwrites_existing() {
+    let action: PatchRequest =
+        serde_json::from_value(json!({"set": {"domain": "g"}})).unwrap();
+    let mut job = Job::new(json!({"domain": "m"}));
+    action.execute(&mut job).await.unwrap();
+    assert_eq!(job.request["domain"], "g");
 }

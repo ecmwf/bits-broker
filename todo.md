@@ -25,9 +25,12 @@
 - [ ] SD: TiKV deployment testing / implementing nats-kv
 - [x] JH: Allow multiple worker pools
 - [x] JH: MARS worker pool, check interpolation and regridding
+- [ ] JH: Add ingress with sticky sessions on Auth header or IP
 - [ ] JH: Check we clean up jobs from the database
+- [ ] JH: Error messages from config arent clear: frontend-df6b7bc66-m7b9h polytope-server Failed to initialise bits: registry entry must have a 'type' field
 - [ ] PT: Authotron integration on the frontend
 - [ ] PT: Actions for checking roles
+- [ ] __: Test suite
 - [ ] SD: Logging format
 - [ ] SD: Stress test
 - [ ] AW: Remove reference to list_collections in docs
@@ -35,12 +38,17 @@
 - [ ] SD: Reimplement metrics
 - [ ] __: S3 support for indirect responses (unreliable networks, stream restarts, relieve load on MARS/workers)
 - [ ] __: Garbage collector
-- [ ] JH: Check the persistence is working
+- [ ] JH: Check the persistence is working (add a flexible python worker)
 - [ ] JH: Consider long-term log of requests for metrics and debugging
+- [ ] JH: Update main actions (match, collections, etc.)
+- [ ] JH: Check date-limiting of requests is working
+- [ ] JH: Check schedule limiting is working
 - [ ] __: DynamoDB support for persistence? / Consider how much we R/W to DB for dynamoDB
 - [ ] __: CICD of FDB worker based on release of fdb repo
-- [ ] JH: Load balancing of workers to brokers
+- [~] JH: Load balancing of workers to brokers // Don't think this is an issue at the moment, as long as N workers >> M brokers.
 - [ ] JH: Reimplement collections
+- [ ] JH: EDR
+- [ ] __: Error when no routes match isnt nice {"error":"All pipelines rejected: No route matched the job"}
 
 ## Nice to haves
 
@@ -48,6 +56,7 @@
 - [ ] JH: Maybe BOBS
 - [ ] JH: Check anonymous user info
 - [ ] __: Workers test themselves in CICD (maybe via docker-compose)
+- [ ] __: Compression and modularity of worker responses (covjson, openmeteo, etc.)
 
 # Validation against existing polytope:
 - [ ] Check all the examples repos work correctly

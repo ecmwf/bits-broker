@@ -376,7 +376,7 @@ fn resolve_named(
                 .checks
                 .get(name)
                 .ok_or_else(|| format!("unknown check '{name}'"))?;
-            action_from_entry(name, entry, ctx)
+            action_from_entry(ns, name, entry, ctx)
         }
         "transform" => {
             let entry = ctx
@@ -384,7 +384,7 @@ fn resolve_named(
                 .transforms
                 .get(name)
                 .ok_or_else(|| format!("unknown transform '{name}'"))?;
-            action_from_entry(name, entry, ctx)
+            action_from_entry(ns, name, entry, ctx)
         }
         "target" => {
             if let Some((target, dispatcher)) = ctx.resolved_targets.borrow().get(name) {
@@ -395,7 +395,7 @@ fn resolve_named(
                 .targets
                 .get(name)
                 .ok_or_else(|| format!("unknown target '{name}'"))?;
-            let action = action_from_entry(name, entry, ctx)?;
+            let action = action_from_entry(ns, name, entry, ctx)?;
             if let Action::Target(target, dispatcher) = &action {
                 ctx.resolved_targets.borrow_mut().insert(
                     name.to_string(),
@@ -450,22 +450,24 @@ fn parse_dispatcher_fields(
 }
 
 fn action_from_entry(
+    ns: &str,
     entry_name: &str,
     entry: &serde_json::Value,
     ctx: &ParseContext,
 ) -> Result<Action, Box<dyn std::error::Error>> {
     let map = entry
         .as_object()
-        .ok_or("registry entry must be an object")?;
+        .ok_or_else(|| format!("{ns} '{entry_name}' must be an object, got: {entry}"))?;
     if map.contains_key("persistent") || map.contains_key("lock_ttl_secs") {
-        return Err(
-            "registry-level persistent/lock_ttl_secs removed; use bits.persist_after_ms".into(),
-        );
+        return Err(format!(
+            "{ns} '{entry_name}': persistent/lock_ttl_secs removed; use bits.persist_after_ms"
+        )
+        .into());
     }
     let type_name = map
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or("registry entry must have a 'type' field")?;
+        .ok_or_else(|| format!("{ns} '{entry_name}' is missing a 'type' field (got: {entry})"))?;
     let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
 
     let remaining: serde_json::Map<_, _> = map

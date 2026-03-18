@@ -67,9 +67,11 @@ pub fn create_action(name: &str, config: Value) -> Result<Action, ActionError> {
         }
     }
 
+    let available = list_actions();
     Err(ActionError::ConfigError(format!(
-        "Unknown action: '{}'",
-        name
+        "Unknown action: '{}'. Available actions: [{}]",
+        name,
+        available.join(", "),
     )))
 }
 
@@ -149,9 +151,16 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_action_errors() {
+    fn test_unknown_action_errors_with_available_list() {
         let result = create_action("nonexistent", json!({}));
-        assert!(matches!(result, Err(ActionError::ConfigError(_))));
+        match &result {
+            Err(ActionError::ConfigError(msg)) => {
+                assert!(msg.contains("Unknown action: 'nonexistent'"), "{msg}");
+                assert!(msg.contains("Available actions:"), "{msg}");
+                assert!(msg.contains("http"), "should list built-in actions: {msg}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     #[test]

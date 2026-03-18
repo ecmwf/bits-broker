@@ -5,10 +5,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::coercion::{CoercionConfig, coerce_request};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Request coercion transform action.
+///
+/// Accepts `null` or `{}` config (uses defaults), or an explicit [`CoercionConfig`].
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct RequestCoercion {
     #[serde(flatten)]
     pub config: CoercionConfig,
+}
+
+impl<'de> Deserialize<'de> for RequestCoercion {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Option::<CoercionConfig>::deserialize(deserializer)
+            .map(|opt| Self {
+                config: opt.unwrap_or_default(),
+            })
+    }
 }
 
 #[async_trait]

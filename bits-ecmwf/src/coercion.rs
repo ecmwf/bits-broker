@@ -464,3 +464,361 @@ pub fn parse_request_class_like(value: &Value) -> Vec<String> {
 pub fn date_to_ymd(date: NaiveDate) -> String {
     format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn default_config() -> CoercionConfig {
+        CoercionConfig::default()
+    }
+
+    #[test]
+    fn date_iso_string() {
+        let result = coerce_date(json!("2024-01-15")).unwrap();
+        assert_eq!(result, json!("20240115"));
+    }
+
+    #[test]
+    fn date_compact_string() {
+        let result = coerce_date(json!("20240115")).unwrap();
+        assert_eq!(result, json!("20240115"));
+    }
+
+    #[test]
+    fn date_integer() {
+        let result = coerce_date(json!(20240115)).unwrap();
+        assert_eq!(result, json!("20240115"));
+    }
+
+    #[test]
+    fn date_negative_offset() {
+        let result = coerce_date(json!(-1)).unwrap();
+        let yesterday = (Local::now().date_naive() + Duration::days(-1))
+            .format("%Y%m%d")
+            .to_string();
+        assert_eq!(result, json!(yesterday));
+    }
+
+    #[test]
+    fn date_zero_offset() {
+        let result = coerce_date(json!(0)).unwrap();
+        let today = Local::now().date_naive().format("%Y%m%d").to_string();
+        assert_eq!(result, json!(today));
+    }
+
+    #[test]
+    fn date_invalid_string() {
+        assert!(coerce_date(json!("not-a-date")).is_err());
+    }
+
+    #[test]
+    fn date_invalid_type() {
+        assert!(coerce_date(json!(true)).is_err());
+    }
+
+    #[test]
+    fn time_integer_hour() {
+        assert_eq!(coerce_time(json!(12)).unwrap(), json!("1200"));
+    }
+
+    #[test]
+    fn time_integer_zero() {
+        assert_eq!(coerce_time(json!(0)).unwrap(), json!("0000"));
+    }
+
+    #[test]
+    fn time_four_digit_integer() {
+        assert_eq!(coerce_time(json!(1200)).unwrap(), json!("1200"));
+    }
+
+    #[test]
+    fn time_colon_string() {
+        assert_eq!(coerce_time(json!("12:00")).unwrap(), json!("1200"));
+    }
+
+    #[test]
+    fn time_four_digit_string() {
+        assert_eq!(coerce_time(json!("1200")).unwrap(), json!("1200"));
+    }
+
+    #[test]
+    fn time_two_digit_string() {
+        assert_eq!(coerce_time(json!("12")).unwrap(), json!("1200"));
+    }
+
+    #[test]
+    fn time_single_digit_string() {
+        assert_eq!(coerce_time(json!("0")).unwrap(), json!("0000"));
+    }
+
+    #[test]
+    fn time_hour_out_of_range() {
+        assert!(coerce_time(json!(25)).is_err());
+    }
+
+    #[test]
+    fn time_negative() {
+        assert!(coerce_time(json!(-1)).is_err());
+    }
+
+    #[test]
+    fn time_nonzero_minutes_rejected() {
+        assert!(coerce_time(json!(1230)).is_err());
+    }
+
+    #[test]
+    fn time_invalid_type() {
+        assert!(coerce_time(json!(true)).is_err());
+    }
+
+    #[test]
+    fn step_integer() {
+        assert_eq!(coerce_step(json!(6)).unwrap(), json!("6"));
+    }
+
+    #[test]
+    fn step_zero() {
+        assert_eq!(coerce_step(json!(0)).unwrap(), json!("0"));
+    }
+
+    #[test]
+    fn step_negative_rejected() {
+        assert!(coerce_step(json!(-1)).is_err());
+    }
+
+    #[test]
+    fn step_string_integer() {
+        assert_eq!(coerce_step(json!("6")).unwrap(), json!("6"));
+    }
+
+    #[test]
+    fn step_duration_format_rejected() {
+        assert!(coerce_step(json!("1h30m")).is_err());
+    }
+
+    #[test]
+    fn step_range_format() {
+        assert_eq!(coerce_step(json!("0-12")).unwrap(), json!("0-12"));
+    }
+
+    #[test]
+    fn step_invalid_string() {
+        assert!(coerce_step(json!("abc")).is_err());
+    }
+
+    #[test]
+    fn step_invalid_type() {
+        assert!(coerce_step(json!(true)).is_err());
+    }
+
+    #[test]
+    fn expver_integer_padded() {
+        assert_eq!(coerce_expver(json!(7)).unwrap(), json!("0007"));
+    }
+
+    #[test]
+    fn expver_zero() {
+        assert_eq!(coerce_expver(json!(0)).unwrap(), json!("0000"));
+    }
+
+    #[test]
+    fn expver_four_digit() {
+        assert_eq!(coerce_expver(json!(9999)).unwrap(), json!("9999"));
+    }
+
+    #[test]
+    fn expver_too_large() {
+        assert!(coerce_expver(json!(10000)).is_err());
+    }
+
+    #[test]
+    fn expver_numeric_string_padded() {
+        assert_eq!(coerce_expver(json!("0007")).unwrap(), json!("0007"));
+    }
+
+    #[test]
+    fn expver_numeric_string_unpadded() {
+        assert_eq!(coerce_expver(json!("7")).unwrap(), json!("0007"));
+    }
+
+    #[test]
+    fn expver_alpha_four_chars() {
+        assert_eq!(coerce_expver(json!("abcd")).unwrap(), json!("abcd"));
+    }
+
+    #[test]
+    fn expver_alpha_wrong_length() {
+        assert!(coerce_expver(json!("ab")).is_err());
+    }
+
+    #[test]
+    fn expver_invalid_type() {
+        assert!(coerce_expver(json!(true)).is_err());
+    }
+
+    #[test]
+    fn number_valid_integer() {
+        assert_eq!(coerce_number(json!(1), false).unwrap(), json!("1"));
+    }
+
+    #[test]
+    fn number_zero_rejected_by_default() {
+        assert!(coerce_number(json!(0), false).is_err());
+    }
+
+    #[test]
+    fn number_zero_allowed() {
+        assert_eq!(coerce_number(json!(0), true).unwrap(), json!("0"));
+    }
+
+    #[test]
+    fn number_negative_rejected() {
+        assert!(coerce_number(json!(-1), true).is_err());
+    }
+
+    #[test]
+    fn number_string() {
+        assert_eq!(coerce_number(json!("5"), false).unwrap(), json!("5"));
+    }
+
+    #[test]
+    fn number_invalid_type() {
+        assert!(coerce_number(json!(true), false).is_err());
+    }
+
+    #[test]
+    fn param_string_passthrough() {
+        assert_eq!(coerce_passthrough(json!("2t")).unwrap(), json!("2t"));
+    }
+
+    #[test]
+    fn param_numeric_passthrough() {
+        assert_eq!(coerce_passthrough(json!(167)).unwrap(), json!("167"));
+    }
+
+    #[test]
+    fn param_invalid_type() {
+        assert!(coerce_passthrough(json!(true)).is_err());
+    }
+
+    #[test]
+    fn lowercase_upper() {
+        assert_eq!(
+            coerce_lowercase(json!("SCENARIOMIP")).unwrap(),
+            json!("scenariomip")
+        );
+    }
+
+    #[test]
+    fn lowercase_mixed() {
+        assert_eq!(coerce_lowercase(json!("Mixed")).unwrap(), json!("mixed"));
+    }
+
+    #[test]
+    fn lowercase_invalid_type() {
+        assert!(coerce_lowercase(json!(123)).is_err());
+    }
+
+    #[test]
+    fn slash_list_on_allowed_key() {
+        let cfg = default_config();
+        let result = coerce_value("param", json!("2t/msl"), &cfg).unwrap();
+        assert_eq!(result, json!(["2t", "msl"]));
+    }
+
+    #[test]
+    fn slash_list_not_split_on_disallowed_key() {
+        let cfg = CoercionConfig {
+            allow_lists: vec![],
+            ..Default::default()
+        };
+        let result = coerce_value("param", json!("2t/msl"), &cfg).unwrap();
+        assert_eq!(result, json!("2t/msl"));
+    }
+
+    #[test]
+    fn range_date() {
+        let cfg = default_config();
+        let result = coerce_value("date", json!("20240101/to/20240105"), &cfg).unwrap();
+        assert_eq!(result, json!("20240101/to/20240105"));
+    }
+
+    #[test]
+    fn range_date_with_by() {
+        let cfg = default_config();
+        let result = coerce_value("date", json!("20240101/to/20240105/by/2"), &cfg).unwrap();
+        assert_eq!(result, json!("20240101/to/20240105/by/2"));
+    }
+
+    #[test]
+    fn range_not_expanded_on_disallowed_key() {
+        let cfg = CoercionConfig {
+            allow_ranges: vec![],
+            allow_lists: vec!["date".into()],
+            ..Default::default()
+        };
+        let result = coerce_value("date", json!("20240101/to/20240105"), &cfg);
+        assert!(result.is_err() || result.unwrap() != json!("20240101/to/20240105"));
+    }
+
+    #[test]
+    fn array_values_coerced_individually() {
+        let cfg = default_config();
+        let result = coerce_value("step", json!([1, 2, 3]), &cfg).unwrap();
+        assert_eq!(result, json!(["1", "2", "3"]));
+    }
+
+    #[test]
+    fn array_unknown_key_rendered_as_strings() {
+        let cfg = default_config();
+        let result = coerce_value("levtype", json!([1, "sfc"]), &cfg).unwrap();
+        assert_eq!(result, json!(["1", "sfc"]));
+    }
+
+    #[test]
+    fn request_non_object_wrapped() {
+        let cfg = default_config();
+        let result = coerce_request(&json!("just a string"), &cfg).unwrap();
+        assert_eq!(result, json!({"data": "just a string"}));
+    }
+
+    #[test]
+    fn request_unknown_keys_pass_through() {
+        let cfg = default_config();
+        let result = coerce_request(&json!({"levtype": "sfc", "domain": "g"}), &cfg).unwrap();
+        assert_eq!(result["levtype"], json!("sfc"));
+        assert_eq!(result["domain"], json!("g"));
+    }
+
+    #[test]
+    fn request_duplicate_list_rejected() {
+        let cfg = default_config();
+        let err = coerce_request(&json!({"param": "2t/2t"}), &cfg).unwrap_err();
+        assert!(err.to_string().contains("Duplicate values"));
+    }
+
+    #[test]
+    fn request_multiple_errors_aggregated() {
+        let cfg = default_config();
+        let err = coerce_request(
+            &json!({"date": "bad", "time": "bad"}),
+            &cfg,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("date"), "should mention date: {msg}");
+        assert!(msg.contains("time"), "should mention time: {msg}");
+    }
+
+    #[test]
+    fn request_custom_allow_lists() {
+        let cfg = CoercionConfig {
+            allow_lists: vec![],
+            ..Default::default()
+        };
+        let result = coerce_request(&json!({"param": "2t/msl"}), &cfg).unwrap();
+        assert_eq!(result["param"], json!("2t/msl"), "slash should not be split");
+    }
+}

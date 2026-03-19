@@ -406,11 +406,7 @@ async fn recently_expired_lease_stays_pending_within_clock_skew_buffer() {
     let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
     insert_job_record(&store, &job_id, owner_id, json!({"job": "skew-buffer"})).await;
     store
-        .upsert_broker_lease(
-            owner_id,
-            "http://127.0.0.1:1/job",
-            Duration::from_secs(1),
-        )
+        .upsert_broker_lease(owner_id, "http://127.0.0.1:1/job", Duration::from_secs(1))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(1030)).await;

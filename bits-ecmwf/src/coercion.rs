@@ -802,11 +802,7 @@ mod tests {
     #[test]
     fn request_multiple_errors_aggregated() {
         let cfg = default_config();
-        let err = coerce_request(
-            &json!({"date": "bad", "time": "bad"}),
-            &cfg,
-        )
-        .unwrap_err();
+        let err = coerce_request(&json!({"date": "bad", "time": "bad"}), &cfg).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("date"), "should mention date: {msg}");
         assert!(msg.contains("time"), "should mention time: {msg}");
@@ -819,6 +815,10 @@ mod tests {
             ..Default::default()
         };
         let result = coerce_request(&json!({"param": "2t/msl"}), &cfg).unwrap();
-        assert_eq!(result["param"], json!("2t/msl"), "slash should not be split");
+        assert_eq!(
+            result["param"],
+            json!("2t/msl"),
+            "slash should not be split"
+        );
     }
 }

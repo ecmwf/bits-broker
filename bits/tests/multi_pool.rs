@@ -1,7 +1,7 @@
 use bits::{Bits, Job, JobResult, PollOutcome};
 use reqwest::Client;
-use std::time::Duration;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -136,7 +136,9 @@ async fn two_pools_jobs_are_isolated() {
     assert_eq!(empty_a.status(), 204);
 
     let work_b = client
-        .get(format!("http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -146,7 +148,9 @@ async fn two_pools_jobs_are_isolated() {
 
     let job_id = work["job_id"].as_str().unwrap();
     let done = client
-        .post(format!("http://127.0.0.1:{port}/pool_b/complete/data/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/pool_b/complete/data/{job_id}"
+        ))
         .header("content-type", "application/json")
         .body(r#"{"ok": true}"#)
         .send()
@@ -175,10 +179,14 @@ async fn both_pools_concurrent() {
 
     let (r_a, r_b) = tokio::join!(
         client
-            .get(format!("http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"))
+            .get(format!(
+                "http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"
+            ))
             .send(),
         client
-            .get(format!("http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"))
+            .get(format!(
+                "http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"
+            ))
             .send(),
     );
 
@@ -197,13 +205,17 @@ async fn both_pools_concurrent() {
     assert_ne!(id_a, id_b);
 
     let done_a = client
-        .post(format!("http://127.0.0.1:{port}/pool_a/complete/reject/{id_a}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/pool_a/complete/reject/{id_a}"
+        ))
         .json(&serde_json::json!({"reason": "done a"}))
         .send()
         .await
         .unwrap();
     let done_b = client
-        .post(format!("http://127.0.0.1:{port}/pool_b/complete/reject/{id_b}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/pool_b/complete/reject/{id_b}"
+        ))
         .json(&serde_json::json!({"reason": "done b"}))
         .send()
         .await
@@ -247,7 +259,9 @@ async fn per_pool_queue_policy() {
     let client = Client::new();
 
     let a_first: serde_json::Value = client
-        .get(format!("http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap()
@@ -255,7 +269,9 @@ async fn per_pool_queue_policy() {
         .await
         .unwrap();
     let a_second: serde_json::Value = client
-        .get(format!("http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap()
@@ -266,7 +282,9 @@ async fn per_pool_queue_policy() {
     assert_eq!(a_second["request"]["label"], "a_expensive");
 
     let b_first: serde_json::Value = client
-        .get(format!("http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap()
@@ -274,7 +292,9 @@ async fn per_pool_queue_policy() {
         .await
         .unwrap();
     let b_second: serde_json::Value = client
-        .get(format!("http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap()
@@ -316,12 +336,16 @@ async fn per_pool_heartbeat_timeout() {
     wait_for_pool(port, "pool_a").await;
     wait_for_pool(port, "pool_b").await;
 
-    let h_a = bits.submit(Job::new(serde_json::json!({"class": "a", "job": "timeout"})));
+    let h_a = bits.submit(Job::new(
+        serde_json::json!({"class": "a", "job": "timeout"}),
+    ));
     let h_b = bits.submit(Job::new(serde_json::json!({"class": "b", "job": "alive"})));
     let client = Client::new();
 
     let w_a: serde_json::Value = client
-        .get(format!("http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap()
@@ -329,7 +353,9 @@ async fn per_pool_heartbeat_timeout() {
         .await
         .unwrap();
     let w_b: serde_json::Value = client
-        .get(format!("http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/pool_b/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap()
@@ -350,7 +376,9 @@ async fn per_pool_heartbeat_timeout() {
 
     let id_b = w_b["job_id"].as_str().unwrap();
     let done_b = client
-        .post(format!("http://127.0.0.1:{port}/pool_b/complete/reject/{id_b}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/pool_b/complete/reject/{id_b}"
+        ))
         .json(&serde_json::json!({"reason": "cleanup"}))
         .send()
         .await
@@ -399,7 +427,9 @@ async fn same_target_referenced_twice_creates_one_pool() {
     let handle = bits.submit(Job::new(serde_json::json!({"class": "x"})));
 
     let work = client
-        .get(format!("http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/pool_a/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();

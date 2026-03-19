@@ -130,8 +130,8 @@ impl WorkerServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, routing::get};
     use axum::http::StatusCode;
+    use axum::{Router, routing::get};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -158,9 +158,7 @@ mod tests {
     #[test]
     fn register_pool_rejects_slash() {
         let ws = WorkerServer::new("127.0.0.1", 0);
-        let err = ws
-            .register_pool("invalid/name", Router::new())
-            .unwrap_err();
+        let err = ws.register_pool("invalid/name", Router::new()).unwrap_err();
         assert!(
             err.to_string().contains("invalid character '/'"),
             "unexpected error: {err}"
@@ -170,9 +168,7 @@ mod tests {
     #[test]
     fn register_pool_rejects_space() {
         let ws = WorkerServer::new("127.0.0.1", 0);
-        let err = ws
-            .register_pool("invalid name", Router::new())
-            .unwrap_err();
+        let err = ws.register_pool("invalid name", Router::new()).unwrap_err();
         assert!(
             err.to_string().contains("invalid character ' '"),
             "unexpected error: {err}"

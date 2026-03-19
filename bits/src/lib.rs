@@ -17,10 +17,10 @@ pub mod routing;
 mod runtime;
 /// Built-in Axum HTTP server for submitting and polling jobs.
 pub mod server;
-/// Shared HTTP server for all remote worker pools.
-pub mod worker_server;
 /// Telemetry helpers and configuration.
 pub mod telemetry;
+/// Shared HTTP server for all remote worker pools.
+pub mod worker_server;
 
 pub use actions::registry::{
     RuntimeActionFactory, create_action, list_actions, register_runtime_action,

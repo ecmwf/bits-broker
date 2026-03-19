@@ -421,7 +421,11 @@ pub struct RemotePoolExecutor {
 }
 
 impl RemotePoolExecutor {
-    pub fn new(pool_name: &str, heartbeat_timeout: Duration, worker_server: Arc<WorkerServer>) -> Self {
+    pub fn new(
+        pool_name: &str,
+        heartbeat_timeout: Duration,
+        worker_server: Arc<WorkerServer>,
+    ) -> Self {
         Self {
             pool_name: pool_name.to_string(),
             heartbeat_timeout,

@@ -23,9 +23,8 @@ struct Registries {
 
 struct ParseContext {
     registries: Registries,
-    resolved_targets: RefCell<
-        HashMap<String, (Arc<dyn TargetAction>, Option<Dispatcher<TargetResult>>)>,
-    >,
+    resolved_targets:
+        RefCell<HashMap<String, (Arc<dyn TargetAction>, Option<Dispatcher<TargetResult>>)>>,
     worker_server: Option<Arc<WorkerServer>>,
 }
 
@@ -179,9 +178,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             }
             let ttl = Duration::from_secs_f64(tikv.broker_lease_ttl_secs);
             if ttl < Duration::from_secs(1) {
-                return Err(
-                    "bits.tikv.broker_lease_ttl_secs must be at least 1 second".into(),
-                );
+                return Err("bits.tikv.broker_lease_ttl_secs must be at least 1 second".into());
             }
             #[cfg(not(feature = "tikv"))]
             {
@@ -397,10 +394,9 @@ fn resolve_named(
                 .ok_or_else(|| format!("unknown target '{name}'"))?;
             let action = action_from_entry(ns, name, entry, ctx)?;
             if let Action::Target(target, dispatcher) = &action {
-                ctx.resolved_targets.borrow_mut().insert(
-                    name.to_string(),
-                    (Arc::clone(target), dispatcher.clone()),
-                );
+                ctx.resolved_targets
+                    .borrow_mut()
+                    .insert(name.to_string(), (Arc::clone(target), dispatcher.clone()));
             }
             Ok(action)
         }

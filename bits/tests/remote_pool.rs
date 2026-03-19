@@ -20,7 +20,9 @@ async fn wait_for_server(port: u16) {
     let client = Client::new();
     for _ in 0..100 {
         if client
-            .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=0"))
+            .get(format!(
+                "http://127.0.0.1:{port}/test_pool/work?timeout_ms=0"
+            ))
             .send()
             .await
             .is_ok()
@@ -91,7 +93,9 @@ async fn worker_completes_job() {
 
     // Long-poll until the job is available.
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -106,7 +110,9 @@ async fn worker_completes_job() {
 
     // Heartbeat while "working".
     let hb = client
-        .post(format!("http://127.0.0.1:{port}/test_pool/heartbeat/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/heartbeat/{job_id}"
+        ))
         .send()
         .await
         .unwrap();
@@ -114,7 +120,9 @@ async fn worker_completes_job() {
 
     // Complete the job.
     let done = client
-        .post(format!("http://127.0.0.1:{port}/test_pool/complete/data/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/data/{job_id}"
+        ))
         .header("content-type", "application/json")
         .body(r#"{"result": 42}"#)
         .send()
@@ -153,7 +161,9 @@ async fn worker_streams_binary_job_chunks() {
     let client = Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -166,7 +176,9 @@ async fn worker_streams_binary_job_chunks() {
     ]));
 
     let done = client
-        .post(format!("http://127.0.0.1:{port}/test_pool/complete/data/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/data/{job_id}"
+        ))
         .header("content-type", "application/x-grib")
         .body(upload)
         .send()
@@ -206,7 +218,9 @@ async fn worker_rejects_job() {
     let client = Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -215,7 +229,9 @@ async fn worker_rejects_job() {
     let job_id = work["job_id"].as_str().unwrap();
 
     client
-        .post(format!("http://127.0.0.1:{port}/test_pool/complete/reject/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/reject/{job_id}"
+        ))
         .json(&serde_json::json!({
             "reason": "unsupported request"
         }))
@@ -242,7 +258,9 @@ async fn worker_reports_error() {
     let client = Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -251,7 +269,9 @@ async fn worker_reports_error() {
     let job_id = work["job_id"].as_str().unwrap();
 
     client
-        .post(format!("http://127.0.0.1:{port}/test_pool/complete/error/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/error/{job_id}"
+        ))
         .json(&serde_json::json!({
             "message": "internal worker failure"
         }))
@@ -281,7 +301,9 @@ async fn worker_requests_redirect() {
     let client = Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -319,7 +341,9 @@ async fn long_poll_returns_204_when_no_work() {
     wait_for_server(port).await;
 
     let resp = Client::new()
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=50"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=50"
+        ))
         .send()
         .await
         .unwrap();
@@ -334,7 +358,9 @@ async fn heartbeat_unknown_job_returns_404() {
     wait_for_server(port).await;
 
     let resp = Client::new()
-        .post(format!("http://127.0.0.1:{port}/test_pool/heartbeat/no-such-job"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/heartbeat/no-such-job"
+        ))
         .send()
         .await
         .unwrap();
@@ -373,7 +399,9 @@ async fn heartbeat_timeout_evicts_job() {
 
     // Pick up the job but never heartbeat or complete it.
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -401,10 +429,14 @@ async fn multiple_workers_polling_get_distinct_jobs() {
 
     let (r1, r2) = tokio::join!(
         client
-            .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+            .get(format!(
+                "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+            ))
             .send(),
         client
-            .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+            .get(format!(
+                "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+            ))
             .send(),
     );
 
@@ -416,13 +448,17 @@ async fn multiple_workers_polling_get_distinct_jobs() {
     assert_ne!(id1, id2, "two workers should not receive the same job");
 
     client
-        .post(format!("http://127.0.0.1:{port}/test_pool/complete/reject/{id1}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/reject/{id1}"
+        ))
         .json(&serde_json::json!({"reason": "done"}))
         .send()
         .await
         .unwrap();
     client
-        .post(format!("http://127.0.0.1:{port}/test_pool/complete/reject/{id2}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/reject/{id2}"
+        ))
         .json(&serde_json::json!({"reason": "done"}))
         .send()
         .await
@@ -442,7 +478,9 @@ async fn worker_cannot_complete_same_job_twice() {
     let client = Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -450,7 +488,9 @@ async fn worker_cannot_complete_same_job_twice() {
     let job_id = work["job_id"].as_str().unwrap();
 
     let first = client
-        .post(format!("http://127.0.0.1:{port}/test_pool/complete/reject/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/reject/{job_id}"
+        ))
         .json(&serde_json::json!({"reason": "first"}))
         .send()
         .await
@@ -458,7 +498,9 @@ async fn worker_cannot_complete_same_job_twice() {
     assert_eq!(first.status(), 200);
 
     let second = client
-        .post(format!("http://127.0.0.1:{port}/test_pool/complete/reject/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/reject/{job_id}"
+        ))
         .json(&serde_json::json!({"reason": "second"}))
         .send()
         .await
@@ -478,7 +520,9 @@ async fn heartbeat_after_completion_returns_404() {
     let client = Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -486,14 +530,18 @@ async fn heartbeat_after_completion_returns_404() {
     let job_id = work["job_id"].as_str().unwrap();
 
     client
-        .post(format!("http://127.0.0.1:{port}/test_pool/complete/reject/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/reject/{job_id}"
+        ))
         .json(&serde_json::json!({"reason": "done"}))
         .send()
         .await
         .unwrap();
 
     let hb = client
-        .post(format!("http://127.0.0.1:{port}/test_pool/heartbeat/{job_id}"))
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/heartbeat/{job_id}"
+        ))
         .send()
         .await
         .unwrap();
@@ -512,7 +560,9 @@ async fn remote_pool_preserves_cost_weighted_ordering() {
     let client = Client::new();
 
     let blocker_resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -539,12 +589,16 @@ async fn remote_pool_preserves_cost_weighted_ordering() {
         .unwrap();
 
     let first = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
     let second = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -591,7 +645,9 @@ async fn remote_pool_preserves_age_priority_ordering() {
     let client = Client::new();
 
     let blocker_resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -620,12 +676,16 @@ async fn remote_pool_preserves_age_priority_ordering() {
         .unwrap();
 
     let first = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
     let second = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
         .send()
         .await
         .unwrap();
@@ -675,7 +735,9 @@ async fn remote_pool_skips_claimed_job_if_caller_dropped() {
     let _ = bits.poll(&handle.id, Some(Duration::from_secs(5))).await;
 
     let resp = client
-        .get(format!("http://127.0.0.1:{port}/test_pool/work?timeout_ms=50"))
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=50"
+        ))
         .send()
         .await
         .unwrap();

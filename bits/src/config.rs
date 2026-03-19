@@ -476,7 +476,7 @@ fn action_from_entry(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let config = if remaining.is_empty() {
-        serde_json::Value::Null
+        serde_json::Value::Object(serde_json::Map::new())
     } else {
         remaining.into()
     };

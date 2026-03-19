@@ -11,7 +11,7 @@ use crate::job::Job;
 /// If this action is ever dispatched directly (i.e., without a `remote_pool`
 /// dispatcher), it returns a `ConfigError` immediately.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RemoteTarget;
+pub struct RemoteTarget {}
 
 #[async_trait]
 impl TargetAction for RemoteTarget {

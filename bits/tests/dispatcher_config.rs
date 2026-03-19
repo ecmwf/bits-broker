@@ -6,7 +6,10 @@ use bits::dispatcher::{ExecutorKind, QueueKind, RemotePoolConfig};
 #[test]
 fn executor_kind_deserializes_async_pool() {
     let kind: ExecutorKind = serde_yaml::from_str("type: async_pool").unwrap();
-    assert!(matches!(kind, ExecutorKind::AsyncPool { concurrency: None }));
+    assert!(matches!(
+        kind,
+        ExecutorKind::AsyncPool { concurrency: None }
+    ));
 }
 
 #[test]
@@ -98,7 +101,10 @@ routes:
   - default:
       - target::mars
 "#;
-    assert!(Bits::from_config(config).is_ok(), "valid config should parse");
+    assert!(
+        Bits::from_config(config).is_ok(),
+        "valid config should parse"
+    );
 }
 
 #[test]

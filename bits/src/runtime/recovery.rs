@@ -74,7 +74,9 @@ impl Bits {
             return LeaseLookup::Unknown;
         };
         match store.get_broker_lease(owner_broker_id).await {
-            Ok(Some(lease)) if Self::lease_is_active_with_grace(&lease) => LeaseLookup::Active(lease),
+            Ok(Some(lease)) if Self::lease_is_active_with_grace(&lease) => {
+                LeaseLookup::Active(lease)
+            }
             Ok(_) => LeaseLookup::MissingOrExpired,
             Err(err) => {
                 tracing::warn!(owner = %owner_broker_id, error = %err, "broker lease lookup failed");
@@ -181,9 +183,7 @@ impl Bits {
         if status == reqwest::StatusCode::GONE {
             return Some(PollOutcome::Ready(JobResult::Cancelled));
         }
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             tracing::warn!(job.id = %id, status = %status, "proxy auth error from owner");
             return Some(PollOutcome::Pending { id: id.to_string() });
         }
@@ -291,6 +291,9 @@ mod tests {
             lease_until: updated_at + chrono::Duration::seconds(30),
         };
 
-        assert_eq!(Bits::lease_grace_duration(&lease), chrono::Duration::seconds(1));
+        assert_eq!(
+            Bits::lease_grace_duration(&lease),
+            chrono::Duration::seconds(1)
+        );
     }
 }

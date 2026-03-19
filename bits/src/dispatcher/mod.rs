@@ -126,8 +126,8 @@ impl<T: Send + 'static> Dispatcher<T> {
                 );
                 let pool_name = pool_name
                     .expect("remote_pool executor requires target registry entry name (pool name)");
-                let worker_server = worker_server
-                    .expect("remote_pool executor requires configured WorkerServer");
+                let worker_server =
+                    worker_server.expect("remote_pool executor requires configured WorkerServer");
                 let concrete: Arc<dyn Executor<TargetResult>> = Arc::new(RemotePoolExecutor::new(
                     pool_name,
                     Duration::from_secs_f64(cfg.heartbeat_timeout_secs),

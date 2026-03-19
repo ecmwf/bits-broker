@@ -204,9 +204,14 @@ mod tests {
 
     #[tokio::test]
     async fn queued_target_rechecks_client_presence_before_execution() {
-        let dispatcher = Dispatcher::<TargetResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::AsyncPool {
-            concurrency: Some(1),
-        }), None, None)
+        let dispatcher = Dispatcher::<TargetResult>::from_config(
+            Some(&QueueKind::Fifo),
+            Some(&ExecutorKind::AsyncPool {
+                concurrency: Some(1),
+            }),
+            None,
+            None,
+        )
         .unwrap();
         let ran = Arc::new(AtomicUsize::new(0));
 
@@ -291,9 +296,14 @@ mod tests {
 
     #[tokio::test]
     async fn queued_check_rechecks_cancellation_before_execution() {
-        let dispatcher = Dispatcher::<CheckResult>::from_config(Some(&QueueKind::Fifo), Some(&ExecutorKind::AsyncPool {
-            concurrency: Some(1),
-        }), None, None)
+        let dispatcher = Dispatcher::<CheckResult>::from_config(
+            Some(&QueueKind::Fifo),
+            Some(&ExecutorKind::AsyncPool {
+                concurrency: Some(1),
+            }),
+            None,
+            None,
+        )
         .unwrap();
 
         struct BlockingCheck {

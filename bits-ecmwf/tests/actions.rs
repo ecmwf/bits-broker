@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use bits::actions::{CheckAction, CheckResult, TransformAction, TransformResult};
 use bits::job::Job;
 use bits_ecmwf::check::{DateChecker, Match};
-use bits_ecmwf::transform_patch::PatchRequest;
 use bits_ecmwf::schedule::{ScheduleCatalog, ScheduleReleased};
+use bits_ecmwf::transform_patch::PatchRequest;
 use bits_ecmwf::transform_request_coercion::RequestCoercion;
 use chrono::{TimeZone, Utc};
 use serde_json::json;
@@ -26,14 +26,23 @@ fn fixture_path(name: &str) -> PathBuf {
 #[test]
 fn request_coercion_deserialises_from_null() {
     let action: RequestCoercion = serde_json::from_value(serde_json::Value::Null).unwrap();
-    assert_eq!(action.config.allow_ranges, bits_ecmwf::coercion::CoercionConfig::default().allow_ranges);
-    assert_eq!(action.config.allow_lists, bits_ecmwf::coercion::CoercionConfig::default().allow_lists);
+    assert_eq!(
+        action.config.allow_ranges,
+        bits_ecmwf::coercion::CoercionConfig::default().allow_ranges
+    );
+    assert_eq!(
+        action.config.allow_lists,
+        bits_ecmwf::coercion::CoercionConfig::default().allow_lists
+    );
 }
 
 #[test]
 fn request_coercion_deserialises_from_empty_object() {
     let action: RequestCoercion = serde_json::from_value(json!({})).unwrap();
-    assert_eq!(action.config.allow_ranges, bits_ecmwf::coercion::CoercionConfig::default().allow_ranges);
+    assert_eq!(
+        action.config.allow_ranges,
+        bits_ecmwf::coercion::CoercionConfig::default().allow_ranges
+    );
 }
 
 #[tokio::test]
@@ -196,11 +205,12 @@ async fn match_single_field() {
 
 #[tokio::test]
 async fn match_multiple_fields() {
-    let action: Match =
-        serde_json::from_value(json!({"class": "od", "stream": "oper"})).unwrap();
+    let action: Match = serde_json::from_value(json!({"class": "od", "stream": "oper"})).unwrap();
 
     let pass = action
-        .evaluate(&Job::new(json!({"class": "od", "stream": "oper", "type": "fc"})))
+        .evaluate(&Job::new(
+            json!({"class": "od", "stream": "oper", "type": "fc"}),
+        ))
         .await
         .unwrap();
     assert!(matches!(pass, CheckResult::Pass));
@@ -235,8 +245,7 @@ async fn patch_request_sets_fields() {
 
 #[tokio::test]
 async fn patch_request_overwrites_existing() {
-    let action: PatchRequest =
-        serde_json::from_value(json!({"set": {"domain": "g"}})).unwrap();
+    let action: PatchRequest = serde_json::from_value(json!({"set": {"domain": "g"}})).unwrap();
     let mut job = Job::new(json!({"domain": "m"}));
     action.execute(&mut job).await.unwrap();
     assert_eq!(job.request["domain"], "g");

@@ -16,10 +16,9 @@ pub struct RequestCoercion {
 
 impl<'de> Deserialize<'de> for RequestCoercion {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Option::<CoercionConfig>::deserialize(deserializer)
-            .map(|opt| Self {
-                config: opt.unwrap_or_default(),
-            })
+        Option::<CoercionConfig>::deserialize(deserializer).map(|opt| Self {
+            config: opt.unwrap_or_default(),
+        })
     }
 }
 

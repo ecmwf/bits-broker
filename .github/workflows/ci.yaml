@@ -29,6 +29,9 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Run tests
         env:
           NO_PROXY: "127.0.0.1,localhost"

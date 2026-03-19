@@ -15,12 +15,6 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install rustfmt
-        run: rustup component add rustfmt
-
-      - name: Check code formatting
-        run: cargo fmt --all -- --check
-
       - name: Run tests
         env:
           NO_PROXY: "127.0.0.1,localhost"

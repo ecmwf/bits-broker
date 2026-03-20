@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::coercion::{
-    as_object, date_to_ymd, max_request_date, max_request_u32, parse_request_class_like,
-    parse_request_time,
+    as_object, max_request_date, max_request_u32, parse_request_class_like, parse_request_time,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -55,20 +55,19 @@ pub fn date_check_single_rule(
 fn expand_date_rule_input(value: &serde_json::Value) -> Result<Vec<String>, DateCheckError> {
     let raw = request_field_as_strings(value).join("/");
     let split: Vec<&str> = raw.split('/').collect();
-    if split.len() == 3 || split.len() == 5 {
-        if split
+    if (split.len() == 3 || split.len() == 5)
+        && split
             .get(1)
             .is_some_and(|part| part.eq_ignore_ascii_case("to"))
+    {
+        if split.len() == 5
+            && !split
+                .get(3)
+                .is_some_and(|part| part.eq_ignore_ascii_case("by"))
         {
-            if split.len() == 5
-                && !split
-                    .get(3)
-                    .is_some_and(|part| part.eq_ignore_ascii_case("by"))
-            {
-                return Err(DateCheckError("Invalid date range".into()));
-            }
-            return Ok(vec![split[0].to_string(), split[2].to_string()]);
+            return Err(DateCheckError("Invalid date range".into()));
         }
+        return Ok(vec![split[0].to_string(), split[2].to_string()]);
     }
     Ok(split.into_iter().map(str::to_string).collect())
 }
@@ -119,17 +118,16 @@ fn parse_relative_delta(value: &str) -> Result<Duration, DateCheckError> {
         let unit = chars
             .next()
             .ok_or_else(|| DateCheckError(format!("Invalid relative date offset: {value}")))?;
-        duration = duration
-            + match unit {
-                'd' => Duration::days(amount),
-                'h' => Duration::hours(amount),
-                'm' => Duration::minutes(amount),
-                _ => {
-                    return Err(DateCheckError(format!(
-                        "Invalid relative date offset: {value}"
-                    )));
-                }
-            };
+        duration += match unit {
+            'd' => Duration::days(amount),
+            'h' => Duration::hours(amount),
+            'm' => Duration::minutes(amount),
+            _ => {
+                return Err(DateCheckError(format!(
+                    "Invalid relative date offset: {value}"
+                )));
+            }
+        };
         seen = true;
     }
 

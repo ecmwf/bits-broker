@@ -44,7 +44,11 @@ fn test_bits(
 ) -> Bits {
     let router = Switch::new(vec![Route::new(
         "default".into(),
-        vec![Action::Target(Arc::new(SleepTarget { ms: sleep_ms }), None, None)],
+        vec![Action::Target(
+            Arc::new(SleepTarget { ms: sleep_ms }),
+            None,
+            None,
+        )],
     )]);
     Bits::from_router_for_tests(
         router,
@@ -494,7 +498,11 @@ async fn upsert_failure_does_not_set_persisted_flag() {
     let failing = Arc::new(UpsertFailingStore::new(Arc::clone(&inner)));
     let router = Switch::new(vec![Route::new(
         "default".into(),
-        vec![Action::Target(Arc::new(SleepTarget { ms: 200 }), None, None)],
+        vec![Action::Target(
+            Arc::new(SleepTarget { ms: 200 }),
+            None,
+            None,
+        )],
     )]);
     let bits = Bits::from_router_for_tests(
         router,

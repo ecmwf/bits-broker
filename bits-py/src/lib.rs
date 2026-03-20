@@ -657,11 +657,15 @@ fn register_action(py: Python<'_>, name: String, cls: Bound<'_, PyAny>) -> PyRes
                 .map_err(|e| ActionError::ConfigError(format!("__init__ failed: {}", e)))?;
 
             Ok(match kind {
-                ActionKind::Check => Action::Check(Arc::new(PyCheckAdapter { instance }), None, None),
+                ActionKind::Check => {
+                    Action::Check(Arc::new(PyCheckAdapter { instance }), None, None)
+                }
                 ActionKind::Transform => {
                     Action::Transform(Arc::new(PyTransformAdapter { instance }), None, None)
                 }
-                ActionKind::Target => Action::Target(Arc::new(PyTargetAdapter { instance }), None, None),
+                ActionKind::Target => {
+                    Action::Target(Arc::new(PyTargetAdapter { instance }), None, None)
+                }
             })
         })
     });

@@ -27,10 +27,7 @@ impl CheckAction for Match {
             };
             if actual != expected {
                 return Ok(CheckResult::Reject {
-                    reason: format!(
-                        "{key}: '{}' does not match required '{}'",
-                        actual, expected
-                    ),
+                    reason: format!("{key}: '{}' does not match required '{}'", actual, expected),
                     silent: true,
                 });
             }

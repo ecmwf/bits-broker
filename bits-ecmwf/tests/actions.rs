@@ -330,7 +330,10 @@ async fn schedule_rejects_missing_step_without_feature() {
     });
     let now = Utc.with_ymd_and_hms(2024, 1, 15, 14, 0, 0).unwrap();
     let err = catalog.assert_request_released(&request, now).unwrap_err();
-    assert!(err.to_string().contains("step"), "expected step error, got: {err}");
+    assert!(
+        err.to_string().contains("step"),
+        "expected step error, got: {err}"
+    );
 }
 
 #[tokio::test]

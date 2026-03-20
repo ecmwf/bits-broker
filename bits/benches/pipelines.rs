@@ -119,7 +119,9 @@ routes:
 // Benchmarks
 // ---------------------------------------------------------------------------
 
-const CONFIGS: &[(&str, fn() -> &'static str)] = &[
+type BenchConfig = (&'static str, fn() -> &'static str);
+
+const CONFIGS: &[BenchConfig] = &[
     ("target_only", config_target_only as fn() -> &'static str),
     ("check_target", config_check_target),
     ("transform_target", config_transform_target),

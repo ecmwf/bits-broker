@@ -125,10 +125,9 @@ pub fn coerce_value(key: &str, value: Value, config: &CoercionConfig) -> Result<
     }
 }
 
-fn coercer_for<'a>(
-    key: &'a str,
-    config: &'a CoercionConfig,
-) -> Option<Box<dyn Fn(Value) -> Result<Value, String> + 'a>> {
+type Coercer<'a> = Box<dyn Fn(Value) -> Result<Value, String> + 'a>;
+
+fn coercer_for<'a>(key: &'a str, config: &'a CoercionConfig) -> Option<Coercer<'a>> {
     match key {
         "date" => Some(Box::new(coerce_date)),
         "step" => Some(Box::new(coerce_step)),

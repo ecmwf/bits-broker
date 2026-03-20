@@ -23,7 +23,7 @@ impl std::fmt::Debug for AgePriorityQueue {
 }
 
 enum WorkerCmd {
-    Enqueue(Entry),
+    Enqueue(Box<Entry>),
     Dequeue(oneshot::Sender<Job>),
 }
 
@@ -83,7 +83,7 @@ fn integer_sqrt(value: u128) -> u128 {
     x.max(1)
 }
 
-fn rebalance(entries: &mut Vec<Entry>) {
+fn rebalance(entries: &mut [Entry]) {
     if entries.len() < 2 {
         return;
     }
@@ -119,7 +119,7 @@ fn handle_cmd(
     waiters: &mut VecDeque<oneshot::Sender<Job>>,
 ) {
     match cmd {
-        WorkerCmd::Enqueue(entry) => entries.push(entry),
+        WorkerCmd::Enqueue(entry) => entries.push(*entry),
         WorkerCmd::Dequeue(reply) => waiters.push_back(reply),
     }
 }
@@ -159,12 +159,18 @@ impl Queue for AgePriorityQueue {
     fn enqueue(&self, job: Job) {
         let cost = job.metadata["cost"].as_u64().unwrap_or(1);
         let seq = self.seq.fetch_add(1, AtomicOrdering::Relaxed);
-        let _ = self.tx.send(WorkerCmd::Enqueue(Entry {
-            cost,
-            seq,
-            enqueued_at: Instant::now(),
-            job,
-        }));
+        if self
+            .tx
+            .send(WorkerCmd::Enqueue(Box::new(Entry {
+                cost,
+                seq,
+                enqueued_at: Instant::now(),
+                job,
+            })))
+            .is_err()
+        {
+            tracing::debug!("age_priority queue closed; job dropped");
+        }
     }
 
     async fn dequeue(&self) -> Option<Job> {

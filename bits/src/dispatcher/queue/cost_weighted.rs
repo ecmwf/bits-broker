@@ -117,11 +117,17 @@ impl Queue for CostWeightedQueue {
     fn enqueue(&self, job: Job) {
         let cost = job.metadata["cost"].as_u64().unwrap_or(0);
         let seq = self.seq.fetch_add(1, AtomicOrdering::Relaxed);
-        let _ = self.tx.send(WorkerCmd::Enqueue {
-            cost,
-            seq,
-            job: Box::new(job),
-        });
+        if self
+            .tx
+            .send(WorkerCmd::Enqueue {
+                cost,
+                seq,
+                job: Box::new(job),
+            })
+            .is_err()
+        {
+            tracing::debug!("cost_weighted queue closed; job dropped");
+        }
     }
 
     async fn dequeue(&self) -> Option<Job> {

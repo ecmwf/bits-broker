@@ -149,7 +149,9 @@ impl Bits {
         }
         let job_id = job.id.clone();
 
-        *job.reconnect_deadline.lock().unwrap() = Instant::now() + RECONNECT_BUFFER;
+        *job.reconnect_deadline
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Instant::now() + RECONNECT_BUFFER;
 
         let job = Arc::new(job);
         self.jobs.insert(job_id.clone(), job.clone());
@@ -250,16 +252,16 @@ impl Bits {
     }
 
     fn schedule_durable_cleanup(&self, id: &str, job: &crate::job::Job) {
-        if job.persisted.load(Ordering::Relaxed) {
-            if let Some(store) = &self.job_store {
-                let store = store.clone();
-                let job_id = id.to_string();
-                tokio::spawn(async move {
-                    if let Err(err) = store.delete_job(&job_id).await {
-                        tracing::warn!(job.id = %job_id, error = %err, "durable record cleanup failed");
-                    }
-                });
-            }
+        if job.persisted.load(Ordering::Relaxed)
+            && let Some(store) = &self.job_store
+        {
+            let store = store.clone();
+            let job_id = id.to_string();
+            tokio::spawn(async move {
+                if let Err(err) = store.delete_job(&job_id).await {
+                    tracing::warn!(job.id = %job_id, error = %err, "durable record cleanup failed");
+                }
+            });
         }
     }
 
@@ -272,7 +274,7 @@ impl Bits {
         tokio::pin!(notified);
         notified.as_mut().enable();
 
-        if let Some(result) = job.result.lock().unwrap().take() {
+        if let Some(result) = job.result.lock().unwrap_or_else(|p| p.into_inner()).take() {
             self.jobs.remove(id);
             self.schedule_durable_cleanup(id, &job);
             return Some(PollOutcome::Ready(result));
@@ -280,7 +282,7 @@ impl Bits {
 
         let outcome = match timeout {
             Some(t) => match tokio::time::timeout(t, notified).await {
-                Ok(()) => match job.result.lock().unwrap().take() {
+                Ok(()) => match job.result.lock().unwrap_or_else(|p| p.into_inner()).take() {
                     Some(result) => {
                         self.jobs.remove(id);
                         self.schedule_durable_cleanup(id, &job);
@@ -292,7 +294,7 @@ impl Bits {
             },
             None => {
                 notified.await;
-                match job.result.lock().unwrap().take() {
+                match job.result.lock().unwrap_or_else(|p| p.into_inner()).take() {
                     Some(result) => {
                         self.jobs.remove(id);
                         self.schedule_durable_cleanup(id, &job);
@@ -303,7 +305,9 @@ impl Bits {
             }
         };
 
-        *job.reconnect_deadline.lock().unwrap() = Instant::now() + RECONNECT_BUFFER;
+        *job.reconnect_deadline
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Instant::now() + RECONNECT_BUFFER;
 
         Some(outcome)
     }

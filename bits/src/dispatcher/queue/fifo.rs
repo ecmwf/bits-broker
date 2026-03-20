@@ -30,7 +30,9 @@ impl Default for FifoQueue {
 #[async_trait]
 impl Queue for FifoQueue {
     fn enqueue(&self, job: Job) {
-        let _ = self.tx.send(job);
+        if self.tx.send(job).is_err() {
+            tracing::debug!("fifo queue closed; job dropped");
+        }
     }
 
     async fn dequeue(&self) -> Option<Job> {

@@ -161,7 +161,7 @@ impl Bits {
                 .next()
                 .unwrap_or(&location)
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or_default();
             if last_segment == id {
                 return Some(PollOutcome::Pending { id: id.to_string() });
@@ -224,7 +224,9 @@ impl Bits {
 
             loop {
                 if stop_flag.load(Ordering::Relaxed) {
-                    let _ = runtime.block_on(store.delete_broker_lease(&broker_id));
+                    if let Err(err) = runtime.block_on(store.delete_broker_lease(&broker_id)) {
+                        tracing::debug!(broker_id = %broker_id, error = %err, "lease cleanup on shutdown failed");
+                    }
                     return;
                 }
 
@@ -238,7 +240,11 @@ impl Bits {
                         tracing::warn!(broker_id = %broker_id, error = %err, "broker lease upsert failed; retrying");
                         std::thread::sleep(Duration::from_millis(500).min(tick));
                         if stop_flag.load(Ordering::Relaxed) {
-                            let _ = runtime.block_on(store.delete_broker_lease(&broker_id));
+                            if let Err(err) =
+                                runtime.block_on(store.delete_broker_lease(&broker_id))
+                            {
+                                tracing::debug!(broker_id = %broker_id, error = %err, "lease cleanup on shutdown failed");
+                            }
                             return;
                         }
                         if let Err(retry_err) = runtime.block_on(store.upsert_broker_lease(

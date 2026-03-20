@@ -114,7 +114,11 @@ impl Job {
     /// Returns true if the client is currently polling or is within the reconnect window.
     pub fn client_present(&self) -> bool {
         self.client_connected.load(Ordering::Relaxed)
-            || Instant::now() < *self.reconnect_deadline.lock().unwrap()
+            || Instant::now()
+                < *self
+                    .reconnect_deadline
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
     }
 }
 

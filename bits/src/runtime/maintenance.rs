@@ -47,7 +47,11 @@ pub(crate) fn start_sweeper(
 
             for entry in jobs.iter() {
                 let job = entry.value();
-                let has_result = job.result.lock().unwrap().is_some();
+                let has_result = job
+                    .result
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_some();
 
                 if has_result && !job.client_present() {
                     expired.push(entry.key().clone());
@@ -55,14 +59,12 @@ pub(crate) fn start_sweeper(
             }
 
             for id in expired {
-                if let Some((_, job)) = jobs.remove(&id) {
-                    if job.persisted.load(Ordering::Relaxed) {
-                        if let (Some(store), Some(rt)) = (&job_store, &runtime) {
-                            if let Err(err) = rt.block_on(store.delete_job(&id)) {
-                                tracing::warn!(job.id = %id, error = %err, "sweeper durable cleanup failed");
-                            }
-                        }
-                    }
+                if let Some((_, job)) = jobs.remove(&id)
+                    && job.persisted.load(Ordering::Relaxed)
+                    && let (Some(store), Some(rt)) = (&job_store, &runtime)
+                    && let Err(err) = rt.block_on(store.delete_job(&id))
+                {
+                    tracing::warn!(job.id = %id, error = %err, "sweeper durable cleanup failed");
                 }
             }
         }

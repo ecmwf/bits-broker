@@ -38,7 +38,7 @@ pub(crate) fn spawn_job(
                     result = &mut dispatch_fut => result,
                     _ = tokio::time::sleep(delay) => {
                         if let Some(store) = &store
-                            && job.result.lock().unwrap().is_none()
+                            && job.result.lock().unwrap_or_else(|p| p.into_inner()).is_none()
                         {
                             let record = PersistentJobRecord {
                                 job_id: job.id.clone(),
@@ -70,7 +70,7 @@ pub(crate) fn spawn_job(
                 JobResult::ClientGone => tracing::info!(duration_ms = ms, "job abandoned: client gone"),
             }
 
-            *job.result.lock().unwrap() = Some(result);
+            *job.result.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
             job.notify.notify_waiters();
         }
         .instrument(span),

@@ -86,7 +86,10 @@ async fn execute(
         }))
     } else if status.is_client_error() {
         let reason = response.text().await.unwrap_or_else(|_| status.to_string());
-        Ok(TargetResult::Reject { reason, silent: true })
+        Ok(TargetResult::Reject {
+            reason,
+            silent: true,
+        })
     } else {
         Err(ActionError::NetworkError(format!(
             "HTTP {} from {}",

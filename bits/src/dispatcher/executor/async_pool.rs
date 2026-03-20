@@ -20,14 +20,21 @@ impl AsyncPoolExecutor {
 }
 
 impl<T: Send + 'static> Executor<T> for AsyncPoolExecutor {
-    fn start_scheduler(&self, queue: Arc<dyn Queue>, pending: Arc<PendingMap<T>>) {
+    fn start_scheduler(
+        &self,
+        queue: Arc<dyn Queue>,
+        pending: Arc<PendingMap<T>>,
+    ) -> Result<(), String> {
         for _ in 0..self.concurrency {
             let queue = Arc::clone(&queue);
             let pending = Arc::clone(&pending);
 
             tokio::spawn(async move {
                 while let Some(job) = queue.dequeue().await {
-                    let item = pending.lock().unwrap().remove(&job.id);
+                    let item = pending
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&job.id);
                     let Some((_guard, work, reply_tx)) = item else {
                         continue;
                     };
@@ -37,9 +44,12 @@ impl<T: Send + 'static> Executor<T> for AsyncPoolExecutor {
                     }
 
                     let result = work.await;
-                    let _ = reply_tx.send(result);
+                    if reply_tx.send(result).is_err() {
+                        tracing::debug!("async_pool: caller dropped before result delivery");
+                    }
                 }
             });
         }
+        Ok(())
     }
 }

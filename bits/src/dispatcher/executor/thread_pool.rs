@@ -26,7 +26,11 @@ impl ThreadPoolExecutor {
 }
 
 impl<T: Send + 'static> Executor<T> for ThreadPoolExecutor {
-    fn start_scheduler(&self, queue: Arc<dyn Queue>, pending: Arc<PendingMap<T>>) {
+    fn start_scheduler(
+        &self,
+        queue: Arc<dyn Queue>,
+        pending: Arc<PendingMap<T>>,
+    ) -> Result<(), String> {
         let handle = tokio::runtime::Handle::current();
 
         for _ in 0..self.concurrency {
@@ -41,7 +45,10 @@ impl<T: Send + 'static> Executor<T> for ThreadPoolExecutor {
                         None => break, // queue closed
                     };
 
-                    let item = pending.lock().unwrap().remove(&job.id);
+                    let item = pending
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&job.id);
                     let Some((_guard, work, reply_tx)) = item else {
                         // Caller cancelled before we dequeued — skip.
                         continue;
@@ -53,9 +60,12 @@ impl<T: Send + 'static> Executor<T> for ThreadPoolExecutor {
                     }
 
                     let result = handle.block_on(work);
-                    let _ = reply_tx.send(result);
+                    if reply_tx.send(result).is_err() {
+                        tracing::debug!("thread_pool: caller dropped before result delivery");
+                    }
                 }
             });
         }
+        Ok(())
     }
 }

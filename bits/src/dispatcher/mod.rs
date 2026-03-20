@@ -58,7 +58,11 @@ pub type PendingMap<T> = Mutex<HashMap<String, PendingItem<T>>>;
 /// The executor is then responsible for pulling jobs from the queue, resolving
 /// the corresponding work future from the pending map, and running it.
 pub trait Executor<T: Send + 'static>: Send + Sync {
-    fn start_scheduler(&self, queue: Arc<dyn Queue>, pending: Arc<PendingMap<T>>);
+    fn start_scheduler(
+        &self,
+        queue: Arc<dyn Queue>,
+        pending: Arc<PendingMap<T>>,
+    ) -> Result<(), String>;
 }
 
 // ================================
@@ -96,16 +100,19 @@ pub enum DispatchGuard {
 }
 
 impl<T: Send + 'static> Dispatcher<T> {
-    /// Build a `Dispatcher` from config values, returning `None` if neither
+    /// Build a `Dispatcher` from config values, returning `Ok(None)` if neither
     /// queue nor executor is specified (no scheduling needed).
+    ///
+    /// Returns `Err` when the configuration is internally inconsistent (e.g.
+    /// `remote_pool` executor without a `remote` target or missing worker server).
     pub fn from_config(
         queue: Option<&QueueKind>,
         executor: Option<&ExecutorKind>,
         pool_name: Option<&str>,
         worker_server: Option<Arc<WorkerServer>>,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, String> {
         if queue.is_none() && executor.is_none() {
-            return None;
+            return Ok(None);
         }
         const DEFAULT_POOL_SIZE: usize = 256;
         let executor: Arc<dyn Executor<T>> = match executor {
@@ -119,23 +126,27 @@ impl<T: Send + 'static> Dispatcher<T> {
                 concurrency.unwrap_or(DEFAULT_POOL_SIZE),
             )),
             Some(ExecutorKind::RemotePool { config: cfg }) => {
-                assert_eq!(
-                    TypeId::of::<T>(),
-                    TypeId::of::<TargetResult>(),
-                    "remote_pool executor requires T == TargetResult"
-                );
-                let pool_name = pool_name
-                    .expect("remote_pool executor requires target registry entry name (pool name)");
-                let worker_server =
-                    worker_server.expect("remote_pool executor requires configured WorkerServer");
+                if TypeId::of::<T>() != TypeId::of::<TargetResult>() {
+                    return Err(
+                        "remote_pool executor can only be used with target actions".to_string()
+                    );
+                }
+                let pool_name = pool_name.ok_or_else(|| {
+                    "remote_pool executor requires a named target registry entry (pool name)"
+                        .to_string()
+                })?;
+                let worker_server = worker_server.ok_or_else(|| {
+                    "remote_pool executor requires bits.worker_server to be configured".to_string()
+                })?;
                 let concrete: Arc<dyn Executor<TargetResult>> = Arc::new(RemotePoolExecutor::new(
                     pool_name,
                     Duration::from_secs_f64(cfg.heartbeat_timeout_secs),
                     worker_server,
                 ));
                 let any: Box<dyn Any> = Box::new(concrete);
-                *any.downcast::<Arc<dyn Executor<T>>>()
-                    .unwrap_or_else(|_| panic!("remote_pool: type mismatch (T != TargetResult)"))
+                *any.downcast::<Arc<dyn Executor<T>>>().map_err(|_| {
+                    "remote_pool: internal type mismatch (T != TargetResult)".to_string()
+                })?
             }
         };
         let queue: Arc<dyn Queue> = match queue.unwrap_or(&QueueKind::Fifo) {
@@ -143,15 +154,15 @@ impl<T: Send + 'static> Dispatcher<T> {
             QueueKind::CostWeighted => Arc::new(CostWeightedQueue::new()),
             QueueKind::AgePriority => Arc::new(AgePriorityQueue::new()),
         };
-        Some(Self::new(queue, executor))
+        Ok(Some(Self::new(queue, executor)?))
     }
 
-    pub fn new(queue: Arc<dyn Queue>, executor: Arc<dyn Executor<T>>) -> Self {
+    pub fn new(queue: Arc<dyn Queue>, executor: Arc<dyn Executor<T>>) -> Result<Self, String> {
         let pending: Arc<PendingMap<T>> = Arc::new(Mutex::new(HashMap::new()));
 
-        executor.start_scheduler(Arc::clone(&queue), Arc::clone(&pending));
+        executor.start_scheduler(Arc::clone(&queue), Arc::clone(&pending))?;
 
-        Self { queue, pending }
+        Ok(Self { queue, pending })
     }
 
     pub fn dispatch(
@@ -190,7 +201,7 @@ impl<T: Send + 'static> Dispatcher<T> {
             // Insert before enqueue so the scheduler always finds the entry.
             pending
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|p| p.into_inner())
                 .insert(job_to_enqueue.id.clone(), (guard, guarded_work, reply_tx));
             queue.enqueue(job_to_enqueue.clone());
 

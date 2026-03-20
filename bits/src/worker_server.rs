@@ -85,7 +85,7 @@ impl WorkerServer {
         validate_pool_name(pool_name)?;
         self.pools
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .push((pool_name.to_string(), router));
         Ok(())
     }
@@ -95,15 +95,16 @@ impl WorkerServer {
     /// If no pools have been registered, this is a no-op — no listener is
     /// bound and no task is spawned.
     ///
+    /// Returns an error if the TCP listener cannot bind (e.g. port in use).
     /// Panics if called more than once.
-    pub fn start(&self) {
+    pub fn start(&self) -> Result<(), String> {
         self.started
             .set(())
             .expect("WorkerServer::start called more than once");
 
-        let pools = self.pools.lock().unwrap();
+        let pools = self.pools.lock().unwrap_or_else(|p| p.into_inner());
         if pools.is_empty() {
-            return;
+            return Ok(());
         }
 
         let mut app = Router::new();
@@ -112,18 +113,30 @@ impl WorkerServer {
         }
 
         let bind_addr = format!("{}:{}", self.host, self.port);
+        let std_listener = std::net::TcpListener::bind(&bind_addr)
+            .map_err(|e| format!("worker server failed to bind to {bind_addr}: {e}"))?;
+        std_listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("worker server: failed to set non-blocking on listener: {e}"))?;
+        let local_addr = std_listener.local_addr();
+
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(&bind_addr)
-                .await
-                .unwrap_or_else(|e| panic!("worker_server: failed to bind to {bind_addr}: {e}"));
-            tracing::info!(
-                address = %listener.local_addr().unwrap(),
-                "worker server listening"
-            );
-            axum::serve(listener, app)
-                .await
-                .unwrap_or_else(|e| panic!("worker_server: server error: {e}"));
+            let listener = match tokio::net::TcpListener::from_std(std_listener) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!(error = %e, "worker server: failed to convert listener to async");
+                    return;
+                }
+            };
+            match local_addr {
+                Ok(addr) => tracing::info!(address = %addr, "worker server listening"),
+                Err(_) => tracing::info!(address = %bind_addr, "worker server listening"),
+            }
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!(error = %e, "worker server exited with error");
+            }
         });
+        Ok(())
     }
 }
 
@@ -203,7 +216,7 @@ mod tests {
         // to the same port would fail; if it didn't, the subsequent bind succeeds.
         let port = free_port().await;
         let ws = WorkerServer::new("127.0.0.1", port);
-        ws.start();
+        ws.start().expect("start with no pools should succeed");
         // Give any async tasks a chance to run (should be none).
         tokio::time::sleep(Duration::from_millis(20)).await;
         // The port should be free because no server was started.
@@ -215,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn start_panics_if_called_twice() {
         let ws = Arc::new(WorkerServer::new("127.0.0.1", 0));
-        ws.start(); // first call — ok (no pools, no-op)
+        ws.start().expect("first start should succeed");
         let ws2 = ws.clone();
         let result = std::panic::catch_unwind(move || ws2.start());
         assert!(result.is_err(), "second call to start() should panic");
@@ -230,7 +243,7 @@ mod tests {
 
         let pool_router = Router::new().route("/ping", get(|| async { StatusCode::OK }));
         ws.register_pool("mypool", pool_router).unwrap();
-        ws.start();
+        ws.start().expect("worker server should bind successfully");
 
         // Wait for server to be ready.
         let client = reqwest::Client::new();
@@ -278,7 +291,7 @@ mod tests {
             Router::new().route("/ping", get(|| async { "beta" })),
         )
         .unwrap();
-        ws.start();
+        ws.start().expect("worker server should bind successfully");
 
         let client = reqwest::Client::new();
         // Wait for ready.

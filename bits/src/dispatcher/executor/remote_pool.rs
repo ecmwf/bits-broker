@@ -196,7 +196,11 @@ async fn handle_get_work(
     };
 
     // Resolve the pending entry for this job.
-    let item = state.pending.lock().unwrap().remove(&job.id);
+    let item = state
+        .pending
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&job.id);
     let Some((guard, _work, reply_tx)) = item else {
         // Caller cancelled before the work handler picked it up — skip.
         // Return 204 to tell the worker to poll again.
@@ -212,17 +216,23 @@ async fn handle_get_work(
         DispatchGuard::None => {}
         DispatchGuard::Cancelled => {
             if job.is_cancelled() {
-                let _ = reply_tx.send(Err(ActionError::Cancelled));
+                if reply_tx.send(Err(ActionError::Cancelled)).is_err() {
+                    tracing::debug!(job.id = %job.id, "cancelled job: caller already dropped");
+                }
                 return Err(StatusCode::NO_CONTENT);
             }
         }
         DispatchGuard::CancelledOrClientGone => {
             if job.is_cancelled() {
-                let _ = reply_tx.send(Err(ActionError::Cancelled));
+                if reply_tx.send(Err(ActionError::Cancelled)).is_err() {
+                    tracing::debug!(job.id = %job.id, "cancelled job: caller already dropped");
+                }
                 return Err(StatusCode::NO_CONTENT);
             }
             if !job.client_present() {
-                let _ = reply_tx.send(Err(ActionError::ClientGone));
+                if reply_tx.send(Err(ActionError::ClientGone)).is_err() {
+                    tracing::debug!(job.id = %job.id, "client gone: caller already dropped");
+                }
                 return Err(StatusCode::NO_CONTENT);
             }
         }
@@ -259,14 +269,19 @@ async fn handle_get_work(
                         message,
                     }))
                 }
-                WorkerOutcome::Reject { reason } => Ok(TargetResult::Reject { reason, silent: true }),
+                WorkerOutcome::Reject { reason } => Ok(TargetResult::Reject {
+                    reason,
+                    silent: true,
+                }),
                 WorkerOutcome::Error { message } => Err(ActionError::ResourceError(message)),
             },
             Err(_) => Err(ActionError::ResourceError(
                 "worker heartbeat timeout or disconnect".into(),
             )),
         };
-        let _ = reply_tx.send(result);
+        if reply_tx.send(result).is_err() {
+            tracing::debug!("remote_pool: caller dropped before worker result delivery");
+        }
     });
 
     let resp = WorkResponse {
@@ -339,7 +354,9 @@ async fn handle_complete_data(
                 size,
                 stream: Box::new(tokio_stream::wrappers::ReceiverStream::new(rx)),
             };
-            let _ = entry.result_tx.send(outcome);
+            if entry.result_tx.send(outcome).is_err() {
+                tracing::debug!(job_id, "remote_pool: data completion dropped; caller gone");
+            }
             StatusCode::OK
         }
         None => StatusCode::NOT_FOUND,
@@ -353,10 +370,19 @@ async fn handle_complete_redirect(
 ) -> StatusCode {
     match state.in_progress.remove(&job_id) {
         Some((_, entry)) => {
-            let _ = entry.result_tx.send(WorkerOutcome::Redirect {
-                location: req.location,
-                message: req.message,
-            });
+            if entry
+                .result_tx
+                .send(WorkerOutcome::Redirect {
+                    location: req.location,
+                    message: req.message,
+                })
+                .is_err()
+            {
+                tracing::debug!(
+                    job_id,
+                    "remote_pool: redirect completion dropped; caller gone"
+                );
+            }
             StatusCode::OK
         }
         None => StatusCode::NOT_FOUND,
@@ -370,9 +396,16 @@ async fn handle_complete_reject(
 ) -> StatusCode {
     match state.in_progress.remove(&job_id) {
         Some((_, entry)) => {
-            let _ = entry
+            if entry
                 .result_tx
-                .send(WorkerOutcome::Reject { reason: req.reason });
+                .send(WorkerOutcome::Reject { reason: req.reason })
+                .is_err()
+            {
+                tracing::debug!(
+                    job_id,
+                    "remote_pool: reject completion dropped; caller gone"
+                );
+            }
             StatusCode::OK
         }
         None => StatusCode::NOT_FOUND,
@@ -386,9 +419,15 @@ async fn handle_complete_error(
 ) -> StatusCode {
     match state.in_progress.remove(&job_id) {
         Some((_, entry)) => {
-            let _ = entry.result_tx.send(WorkerOutcome::Error {
-                message: req.message,
-            });
+            if entry
+                .result_tx
+                .send(WorkerOutcome::Error {
+                    message: req.message,
+                })
+                .is_err()
+            {
+                tracing::debug!(job_id, "remote_pool: error completion dropped; caller gone");
+            }
             StatusCode::OK
         }
         None => StatusCode::NOT_FOUND,
@@ -435,7 +474,11 @@ impl RemotePoolExecutor {
 }
 
 impl Executor<TargetResult> for RemotePoolExecutor {
-    fn start_scheduler(&self, queue: Arc<dyn Queue>, pending: Arc<PendingMap<TargetResult>>) {
+    fn start_scheduler(
+        &self,
+        queue: Arc<dyn Queue>,
+        pending: Arc<PendingMap<TargetResult>>,
+    ) -> Result<(), String> {
         let state = Arc::new(RemotePoolState {
             queue,
             pending,
@@ -458,12 +501,12 @@ impl Executor<TargetResult> for RemotePoolExecutor {
 
         self.worker_server
             .register_pool(&self.pool_name, app)
-            .unwrap_or_else(|e| {
-                panic!(
+            .map_err(|e| {
+                format!(
                     "remote_pool: failed to register pool '{}': {e}",
                     self.pool_name
                 )
-            });
+            })?;
 
         // Heartbeat reaper task.
         let heartbeat_timeout = self.heartbeat_timeout;
@@ -486,5 +529,6 @@ impl Executor<TargetResult> for RemotePoolExecutor {
                 });
             }
         });
+        Ok(())
     }
 }

@@ -21,18 +21,15 @@ struct Registries {
     targets: HashMap<String, serde_json::Value>,
 }
 
+type ResolvedTarget = (
+    Arc<dyn TargetAction>,
+    Option<Dispatcher<TargetResult>>,
+    Option<bool>,
+);
+
 struct ParseContext {
     registries: Registries,
-    resolved_targets: RefCell<
-        HashMap<
-            String,
-            (
-                Arc<dyn TargetAction>,
-                Option<Dispatcher<TargetResult>>,
-                Option<bool>,
-            ),
-        >,
-    >,
+    resolved_targets: RefCell<HashMap<String, ResolvedTarget>>,
     worker_server: Option<Arc<WorkerServer>>,
 }
 
@@ -252,7 +249,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
         .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
 
     if let Some(ws) = &worker_server {
-        ws.start();
+        ws.start()?;
     }
 
     Ok(Bootstrap {
@@ -302,7 +299,9 @@ fn parse_routes(
             )
             .into());
         }
-        let (name, route_val) = map.iter().next().unwrap();
+        let (name, route_val) = map.iter().next().ok_or_else(|| {
+            format!("each {section} entry must have exactly one key (the route name)")
+        })?;
         let action_values = route_val
             .as_array()
             .ok_or_else(|| format!("{section} route '{name}' must be an array of actions"))?;
@@ -351,9 +350,8 @@ fn parse_action(
                     let silent = map
                         .get("silent")
                         .map(|v| {
-                            v.as_bool().ok_or_else(|| {
-                                format!("{key}: silent must be a boolean")
-                            })
+                            v.as_bool()
+                                .ok_or_else(|| format!("{key}: silent must be a boolean"))
                         })
                         .transpose()?;
                     return attach_dispatcher(
@@ -554,7 +552,7 @@ fn attach_dispatcher(
                 settings.executor.as_ref(),
                 None,
                 None,
-            );
+            )?;
             Ok(Action::Check(check, dispatcher, silent))
         }
         Action::Transform(transform, _, _) => {
@@ -563,7 +561,7 @@ fn attach_dispatcher(
                 settings.executor.as_ref(),
                 None,
                 None,
-            );
+            )?;
             Ok(Action::Transform(transform, dispatcher, silent))
         }
         Action::Target(target, _, _) => {
@@ -577,7 +575,7 @@ fn attach_dispatcher(
                 settings.executor.as_ref(),
                 pool_name,
                 ctx.worker_server.clone(),
-            );
+            )?;
             Ok(Action::Target(target, dispatcher, silent))
         }
         _ if has_dispatcher => {

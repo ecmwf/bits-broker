@@ -26,7 +26,8 @@ async fn thread_pool_runs_on_os_threads() {
         None,
         None,
     )
-    .unwrap();
+    .expect("dispatcher config should not error")
+    .expect("dispatcher should be created");
 
     let test_thread = std::thread::current().id();
     let thread_ids: Arc<Mutex<Vec<std::thread::ThreadId>>> = Arc::new(Mutex::new(Vec::new()));
@@ -71,7 +72,8 @@ async fn thread_pool_executes_concurrently() {
         None,
         None,
     )
-    .unwrap();
+    .expect("dispatcher config should not error")
+    .expect("dispatcher should be created");
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
@@ -145,7 +147,8 @@ async fn check_dispatcher_cost_weighted_ordering() {
             None,
             None,
         )
-        .unwrap(),
+        .expect("dispatcher config should not error")
+        .expect("dispatcher should be created"),
     );
 
     let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
@@ -212,7 +215,8 @@ async fn target_dispatcher_cost_weighted_ordering() {
             None,
             None,
         )
-        .unwrap(),
+        .expect("dispatcher config should not error")
+        .expect("dispatcher should be created"),
     );
 
     let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
@@ -279,7 +283,8 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
             None,
             None,
         )
-        .unwrap(),
+        .expect("dispatcher config should not error")
+        .expect("dispatcher should be created"),
     );
 
     let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));

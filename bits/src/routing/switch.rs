@@ -35,10 +35,10 @@ impl Switch {
         for route in &self.routes {
             for action in &route.actions {
                 let desc = action.describe();
-                if let serde_json::Value::Object(ref map) = desc {
-                    if !map.is_empty() {
-                        out.push(desc);
-                    }
+                if let serde_json::Value::Object(ref map) = desc
+                    && !map.is_empty()
+                {
+                    out.push(desc);
                 }
                 if let Action::Switch(switch) = action {
                     out.extend(switch.describe_actions());
@@ -264,7 +264,8 @@ mod tests {
             None,
             None,
         )
-        .unwrap();
+        .expect("dispatcher config should not error")
+        .expect("dispatcher should be created");
         let ran = Arc::new(AtomicUsize::new(0));
 
         struct CountingTarget {
@@ -358,7 +359,8 @@ mod tests {
             None,
             None,
         )
-        .unwrap();
+        .expect("dispatcher config should not error")
+        .expect("dispatcher should be created");
 
         struct BlockingCheck {
             release_rx: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,

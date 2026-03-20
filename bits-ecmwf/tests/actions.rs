@@ -244,6 +244,96 @@ async fn patch_request_sets_fields() {
 }
 
 #[tokio::test]
+async fn schedule_extracts_step_from_timeseries_feature() {
+    let xml = r#"
+<schedule>
+  <product>
+    <class>od</class>
+    <stream>enfo</stream>
+    <time>00:00</time>
+    <release_time>06:40:00</release_time>
+    <release_delta_day>1</release_delta_day>
+  </product>
+</schedule>
+"#;
+    let catalog = ScheduleCatalog::from_raw_xml(xml).unwrap();
+    let request = json!({
+        "class": "od",
+        "stream": "enfo",
+        "type": "pf",
+        "date": "20240101",
+        "time": "0000",
+        "domain": "g",
+        "feature": {
+            "type": "timeseries",
+            "points": [[-9.1, 38.7]],
+            "axes": "step",
+            "range": {"start": 0, "end": 60, "step": 6}
+        }
+    });
+    let after = Utc.with_ymd_and_hms(2024, 1, 2, 7, 0, 0).unwrap();
+    catalog.assert_request_released(&request, after).unwrap();
+}
+
+#[tokio::test]
+async fn schedule_extracts_step_from_trajectory_feature() {
+    let xml = r#"
+<schedule>
+  <product>
+    <class>od</class>
+    <stream>enfo</stream>
+    <time>00:00</time>
+    <release_time>06:40:00</release_time>
+    <release_delta_day>1</release_delta_day>
+  </product>
+</schedule>
+"#;
+    let catalog = ScheduleCatalog::from_raw_xml(xml).unwrap();
+    let request = json!({
+        "class": "od",
+        "stream": "enfo",
+        "type": "pf",
+        "date": "20240101",
+        "time": "0000",
+        "domain": "g",
+        "feature": {
+            "type": "trajectory",
+            "points": [[0, 0, 1], [10, 10, 2], [20, 20, 3]],
+            "axes": ["latitude", "longitude", "step"]
+        }
+    });
+    let after = Utc.with_ymd_and_hms(2024, 1, 2, 7, 0, 0).unwrap();
+    catalog.assert_request_released(&request, after).unwrap();
+}
+
+#[tokio::test]
+async fn schedule_rejects_missing_step_without_feature() {
+    let xml = r#"
+<schedule>
+  <product>
+    <class>od</class>
+    <stream>oper</stream>
+    <time>12:00</time>
+    <release_time>13:00:00</release_time>
+    <release_delta_day>0</release_delta_day>
+  </product>
+</schedule>
+"#;
+    let catalog = ScheduleCatalog::from_raw_xml(xml).unwrap();
+    let request = json!({
+        "class": "od",
+        "stream": "oper",
+        "type": "fc",
+        "date": "20240115",
+        "time": "1200",
+        "domain": "g"
+    });
+    let now = Utc.with_ymd_and_hms(2024, 1, 15, 14, 0, 0).unwrap();
+    let err = catalog.assert_request_released(&request, now).unwrap_err();
+    assert!(err.to_string().contains("step"), "expected step error, got: {err}");
+}
+
+#[tokio::test]
 async fn patch_request_overwrites_existing() {
     let action: PatchRequest = serde_json::from_value(json!({"set": {"domain": "g"}})).unwrap();
     let mut job = Job::new(json!({"domain": "m"}));

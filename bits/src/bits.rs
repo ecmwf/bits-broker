@@ -133,6 +133,11 @@ impl Bits {
         self.router.route_names()
     }
 
+    /// Collects descriptors from every instantiated action in the routing tree.
+    pub fn describe_actions(&self) -> Vec<serde_json::Value> {
+        self.router.describe_actions()
+    }
+
     /// Submits a job for routing and execution.
     pub fn submit(&self, job: Job) -> JobHandle {
         self.submit_with_state(job, false)

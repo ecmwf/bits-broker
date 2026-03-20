@@ -57,6 +57,10 @@ A `Switch` contains named routes and tries them in sequence, returning the resul
 the first route that does not reject. This is the branching primitive — use it to express
 conditional routing (e.g. privileged vs public access paths).
 
+When all routes reject, the switch returns non-silent rejection reasons to the user. Each action
+controls whether its rejections are silent (route-selection, not shown) or non-silent (validation
+failures the user should see). The `silent` config key on any step overrides the action's default.
+
 Switches can be nested inside routes.
 
 ---
@@ -110,7 +114,8 @@ routes:
   `check::`, `transform::`, and `target::` prefixes in routes are meaningful — they identify
   which registry to look up. This makes the type of each route step visible at a glance.
 - `type:` is the reserved key within each registry entry. The optional `dispatcher:` key holds
-  dispatcher config (`queue`, `executor`, `concurrency`); all other keys are config for the action.
+  dispatcher config (`queue`, `executor`, `concurrency`); the optional `silent:` key overrides
+  rejection visibility; all other keys are config for the action.
 - Dispatcher config (`queue`, `executor`, `concurrency`) is a **route-step concern** — it sits
   under a `dispatcher:` key in a registry entry, or as a sibling `dispatcher:` key for inline
   step definitions. See the Dispatcher section below.

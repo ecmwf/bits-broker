@@ -281,10 +281,7 @@ async fn worker_reports_error() {
 
     match bits.poll(&handle.id, Some(Duration::from_secs(5))).await {
         PollOutcome::Ready(JobResult::Failed { reason }) => {
-            assert!(
-                reason.contains("internal worker failure"),
-                "unexpected reason: {reason}"
-            );
+            assert_eq!(reason, "internal server error");
         }
         other => panic!("expected Failed, got {:?}", other),
     }

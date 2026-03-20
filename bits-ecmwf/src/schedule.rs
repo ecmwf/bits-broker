@@ -103,7 +103,7 @@ impl ScheduleCatalog {
         let request = as_object(request)?;
         let date = max_request_date(request.get("date").ok_or_else(|| missing_key("date"))?)?;
         let time = parse_request_time(request.get("time").ok_or_else(|| missing_key("time"))?)?;
-        let step = max_request_u32(request.get("step").ok_or_else(|| missing_key("step"))?)?;
+        let step = resolve_step(request)?;
         let classes =
             parse_request_class_like(request.get("class").ok_or_else(|| missing_key("class"))?);
         let streams =
@@ -123,8 +123,7 @@ impl ScheduleCatalog {
                             .release_product(class, stream, domain, &time, step, type_name)
                             .ok_or_else(|| {
                                 ActionError::ConfigError(format!(
-                                    "No release time found for date: {}, class: {class}, stream: {stream}, domain: {domain}, time: {time}, step: {step:04}, type {type_name}",
-                                    date_to_ymd(date)
+                                    "No matching schedule entry for class={class}, stream={stream}, type={type_name}, time={time}, step={step:04}"
                                 ))
                             })?;
 
@@ -205,8 +204,53 @@ fn contains_token(candidate: &str, needle: &str) -> bool {
         .any(|token| token.eq_ignore_ascii_case(needle))
 }
 
+fn resolve_step(request: &serde_json::Map<String, Value>) -> Result<u32, ActionError> {
+    if let Some(step) = request.get("step") {
+        return max_request_u32(step);
+    }
+
+    let feature = request
+        .get("feature")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| missing_key("step"))?;
+
+    let feature_type = feature.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    match feature_type {
+        "timeseries" => feature
+            .get("range")
+            .and_then(|r| r.get("end"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .ok_or_else(|| missing_key("step")),
+        "trajectory" => {
+            let axes = feature
+                .get("axes")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| missing_key("step"))?;
+            let step_idx = axes
+                .iter()
+                .position(|v| v.as_str() == Some("step"))
+                .ok_or_else(|| missing_key("step"))?;
+            let points = feature
+                .get("points")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| missing_key("step"))?;
+            points
+                .iter()
+                .filter_map(|p| p.as_array()?.get(step_idx)?.as_u64())
+                .max()
+                .map(|v| v as u32)
+                .ok_or_else(|| missing_key("step"))
+        }
+        _ => Err(missing_key("step")),
+    }
+}
+
 fn missing_key(key: &str) -> ActionError {
-    ActionError::ConfigError(format!("Missing required key in request: '{key}'"))
+    ActionError::ConfigError(format!(
+        "Cannot check data availability: request does not contain '{key}'"
+    ))
 }
 
 impl ScheduleReleased {

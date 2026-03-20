@@ -109,6 +109,7 @@ pub fn single_target_switch(behavior: TargetBehavior) -> Switch {
         vec![Action::Target(
             Arc::new(ScriptedTarget::new(behavior)),
             None,
+            None,
         )],
     )])
 }

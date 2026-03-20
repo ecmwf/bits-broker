@@ -15,7 +15,10 @@ types, the same YAML registration model, and the same job data model.
 | `TargetAction` | `dispatch(job)` | `Success`, `Redirect`, `Error`, or `Reject` | Terminal dispatch: send the job and return a result. |
 
 A `Reject` from any action type stops the current route and causes the enclosing `switch` to
-try the next named branch.
+try the next named branch. Each `Reject` carries a `silent` flag: when `silent` is `true` (the
+default for route-selection checks), the rejection reason is not shown to the user. When `silent`
+is `false` (the default for validation checks like `schedule_released`), the reason is included in
+the error if all routes fail. The `silent` config key on any action step can override this default.
 
 ---
 
@@ -58,9 +61,11 @@ impl CheckAction for HasLicense {
             Some(l) if l == self.license => Ok(CheckResult::Pass),
             Some(l) => Ok(CheckResult::Reject {
                 reason: format!("license '{}' does not match required '{}'", l, self.license),
+                silent: true,
             }),
             None => Ok(CheckResult::Reject {
                 reason: "no license field found".to_string(),
+                silent: true,
             }),
         }
     }
@@ -225,6 +230,7 @@ impl TargetAction for MyHttpTarget {
         if response.status().is_client_error() {
             return Ok(TargetResult::Reject {
                 reason: format!("upstream rejected: {}", response.status()),
+                silent: true,
             });
         }
         if !response.status().is_success() {
@@ -307,7 +313,8 @@ bits::register_action!(target,    "my_target",    MyTarget);
 ```
 
 The macro deserialises the YAML config block into your struct via `serde_json`. Your struct must
-derive `Deserialize`. All YAML keys except `type` and `dispatcher` are passed as config fields.
+derive `Deserialize`. All YAML keys except `type`, `dispatcher`, and `silent` are passed as
+config fields.
 
 ### Crate setup
 
@@ -328,8 +335,10 @@ dependency of the binary, add an explicit `use` to force linkage.
 
 ### Error handling
 
-Prefer returning `Reject { reason }` for expected policy rejections (wrong role, wrong class,
-etc.). Reserve `Err(ActionError)` for unexpected system failures.
+Prefer returning `Reject { reason, silent }` for expected policy rejections. Set `silent: true`
+for route-selection logic (wrong class, missing key) and `silent: false` for validation failures
+the user should see (data not released, date out of range). Reserve `Err(ActionError)` for
+unexpected system failures.
 
 | Variant | When to use |
 |---------|-------------|
@@ -363,8 +372,8 @@ register_action("my_target", MyTarget)          # register first
 bits = await Bits.from_config(config_yaml)      # then load config
 ```
 
-YAML config keys (excluding `type` and `dispatcher`) are forwarded to `__init__` as keyword
-arguments when the action is instantiated at config-load time:
+YAML config keys (excluding `type`, `dispatcher`, and `silent`) are forwarded to `__init__` as
+keyword arguments when the action is instantiated at config-load time:
 
 ```yaml
 checks:
@@ -375,8 +384,10 @@ checks:
 
 ### Error handling
 
-Prefer returning `Reject(reason)` for expected policy rejections. For unexpected failures,
-raise an exception — it surfaces as a `Failed` result to the client.
+Prefer returning `Reject(reason)` for expected policy rejections. Pass `silent=False` when the
+rejection reason should reach the user (e.g. data not yet released); the default is `silent=True`
+(route-selection). For unexpected failures, raise an exception — it surfaces as a `Failed` result
+to the client.
 
 {{#endtab }}
 {{#endtabs }}

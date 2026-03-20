@@ -26,6 +26,28 @@ impl Switch {
         self.routes.iter().map(|r| r.name.as_str()).collect()
     }
 
+    /// Recursively collects [`describe`](crate::actions::Action::describe) output
+    /// from every action in the routing tree, including nested switches.
+    ///
+    /// Non-empty descriptors are returned as a flat list.
+    pub fn describe_actions(&self) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for route in &self.routes {
+            for action in &route.actions {
+                let desc = action.describe();
+                if let serde_json::Value::Object(ref map) = desc {
+                    if !map.is_empty() {
+                        out.push(desc);
+                    }
+                }
+                if let Action::Switch(switch) = action {
+                    out.extend(switch.describe_actions());
+                }
+            }
+        }
+        out
+    }
+
     pub fn validate(&self) -> Result<(), ActionError> {
         for route in &self.routes {
             validate_route(route)?;
@@ -70,6 +92,8 @@ fn validate_route(route: &Route) -> Result<(), ActionError> {
 #[async_trait]
 impl TargetAction for Switch {
     async fn dispatch(&self, job: &Job) -> Result<TargetResult, ActionError> {
+        let mut rejections: Vec<String> = Vec::new();
+
         'route: for pipeline in &self.routes {
             // Defer cloning the job until a Transform action actually needs to mutate it.
             let mut current_job: Cow<Job> = Cow::Borrowed(job);
@@ -79,7 +103,7 @@ impl TargetAction for Switch {
                     return Err(ActionError::Cancelled);
                 }
                 match action {
-                    Action::Check(check, dispatcher) => {
+                    Action::Check(check, dispatcher, silent_override) => {
                         let result = match dispatcher {
                             Some(d) => {
                                 let c = Arc::clone(check);
@@ -93,10 +117,15 @@ impl TargetAction for Switch {
                         };
                         match result {
                             CheckResult::Pass => {}
-                            CheckResult::Reject { .. } => continue 'route,
+                            CheckResult::Reject { reason, silent } => {
+                                if !silent_override.unwrap_or(silent) {
+                                    rejections.push(reason);
+                                }
+                                continue 'route;
+                            }
                         }
                     }
-                    Action::Transform(transform, dispatcher) => {
+                    Action::Transform(transform, dispatcher, silent_override) => {
                         let result = match dispatcher {
                             Some(d) => {
                                 let t = Arc::clone(transform);
@@ -123,10 +152,15 @@ impl TargetAction for Switch {
                         };
                         match result {
                             TransformResult::Continue => {}
-                            TransformResult::Reject { .. } => continue 'route,
+                            TransformResult::Reject { reason, silent } => {
+                                if !silent_override.unwrap_or(silent) {
+                                    rejections.push(reason);
+                                }
+                                continue 'route;
+                            }
                         }
                     }
-                    Action::Target(target, dispatcher) => {
+                    Action::Target(target, dispatcher, silent_override) => {
                         let result = match dispatcher {
                             Some(d) => {
                                 let t = Arc::clone(target);
@@ -150,22 +184,40 @@ impl TargetAction for Switch {
                             TargetResult::Complete(result) => {
                                 return Ok(TargetResult::Complete(result));
                             }
-                            TargetResult::Reject { .. } => continue 'route,
+                            TargetResult::Reject { reason, silent } => {
+                                if !silent_override.unwrap_or(silent) {
+                                    rejections.push(reason);
+                                }
+                                continue 'route;
+                            }
                         }
                     }
                     Action::Switch(switch) => match switch.dispatch(&current_job).await? {
                         TargetResult::Complete(result) => {
                             return Ok(TargetResult::Complete(result));
                         }
-                        TargetResult::Reject { .. } => continue 'route,
+                        TargetResult::Reject { reason, silent } => {
+                            if !silent {
+                                rejections.push(reason);
+                            }
+                            continue 'route;
+                        }
                     },
                 }
             }
         }
 
-        Ok(TargetResult::Reject {
-            reason: "No route matched the job".to_string(),
-        })
+        if rejections.is_empty() {
+            Ok(TargetResult::Reject {
+                reason: "no route matched the request".to_string(),
+                silent: true,
+            })
+        } else {
+            Ok(TargetResult::Reject {
+                reason: rejections.join("; "),
+                silent: false,
+            })
+        }
     }
 }
 
@@ -192,7 +244,7 @@ mod tests {
     async fn client_gone_before_target() {
         let switch = Switch::new(vec![Route::new(
             "default".to_string(),
-            vec![Action::Target(Arc::new(AlwaysSucceed), None)],
+            vec![Action::Target(Arc::new(AlwaysSucceed), None, None)],
         )]);
 
         // Job::new() has reconnect_deadline = Instant::now() (immediately expired)
@@ -252,6 +304,7 @@ mod tests {
                     release_rx: std::sync::Mutex::new(Some(release_rx)),
                 }),
                 Some(dispatcher.clone()),
+                None,
             )],
         )]);
 
@@ -270,6 +323,7 @@ mod tests {
                     ran: Arc::clone(&ran),
                 }),
                 Some(dispatcher),
+                None,
             )],
         )]);
 
@@ -342,8 +396,9 @@ mod tests {
                         release_rx: std::sync::Mutex::new(Some(release_rx)),
                     }),
                     Some(dispatcher.clone()),
+                    None,
                 ),
-                Action::Target(Arc::new(AlwaysSucceed), None),
+                Action::Target(Arc::new(AlwaysSucceed), None, None),
             ],
         )]);
 
@@ -363,8 +418,9 @@ mod tests {
                         ran: Arc::clone(&ran),
                     }),
                     Some(dispatcher),
+                    None,
                 ),
-                Action::Target(Arc::new(AlwaysSucceed), None),
+                Action::Target(Arc::new(AlwaysSucceed), None, None),
             ],
         )]);
 

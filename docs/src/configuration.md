@@ -108,6 +108,46 @@ routes:
 - For the remote worker HTTP API and worker lifecycle, see
   [External Workers](external-workers.md).
 
+## Silent rejections
+
+When all routes in a switch reject a job, the error returned to the user includes rejection
+reasons from actions that are **not silent**. Route-selection checks (like `match`) are silent by
+default — their rejections are internal routing decisions. Validation checks (like
+`schedule_released`) are not silent — their rejections should reach the user.
+
+Each action sets its own default. You can override per-step with the `silent` key:
+
+For **named registry entries**:
+
+```yaml
+checks:
+  schedule:
+    type: schedule_released
+    path: /etc/schedule.xml
+    silent: true               # override: suppress this check's rejections
+```
+
+For **inline steps**:
+
+```yaml
+routes:
+  - default:
+      - check::match:
+            class: od
+        silent: false          # override: surface this match check's rejections
+      - target::backend
+```
+
+Built-in defaults:
+
+| Action | `silent` |
+|--------|----------|
+| `match` | `true` |
+| `has_license` | `true` |
+| `has_key` | `true` |
+| `date_checker` | `false` |
+| `schedule_released` | `false` |
+
 ## Top-level bits settings
 
 The optional `bits:` section configures broker identity and persistence policy:

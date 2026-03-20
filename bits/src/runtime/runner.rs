@@ -80,13 +80,14 @@ pub(crate) fn spawn_job(
 async fn dispatch(router: &Switch, job: Job) -> JobResult {
     match router.dispatch(&job).await {
         Ok(TargetResult::Complete(result)) => result,
-        Ok(TargetResult::Reject { reason }) => JobResult::Error {
-            message: format!("All pipelines rejected: {}", reason),
-        },
+        Ok(TargetResult::Reject { reason, .. }) => JobResult::Error { message: reason },
         Err(crate::actions::ActionError::Cancelled) => JobResult::Cancelled,
         Err(crate::actions::ActionError::ClientGone) => JobResult::ClientGone,
-        Err(err) => JobResult::Failed {
-            reason: format!("Dispatch failed: {}", err),
-        },
+        Err(err) => {
+            tracing::error!(error = %err, "dispatch failed");
+            JobResult::Failed {
+                reason: "internal server error".to_string(),
+            }
+        }
     }
 }

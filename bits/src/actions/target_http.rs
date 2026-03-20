@@ -86,7 +86,7 @@ async fn execute(
         }))
     } else if status.is_client_error() {
         let reason = response.text().await.unwrap_or_else(|_| status.to_string());
-        Ok(TargetResult::Reject { reason })
+        Ok(TargetResult::Reject { reason, silent: true })
     } else {
         Err(ActionError::NetworkError(format!(
             "HTTP {} from {}",
@@ -175,7 +175,7 @@ mod tests {
         let result = target.dispatch(&job).await.unwrap();
 
         match result {
-            TargetResult::Reject { reason } => assert_eq!(reason, "unknown class"),
+            TargetResult::Reject { reason, .. } => assert_eq!(reason, "unknown class"),
             other => panic!("expected Reject, got {:?}", other),
         }
     }

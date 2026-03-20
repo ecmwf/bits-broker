@@ -22,11 +22,16 @@ impl CheckAction for Match {
             let Some(actual) = job.request.get(key) else {
                 return Ok(CheckResult::Reject {
                     reason: format!("request missing key '{key}'"),
+                    silent: true,
                 });
             };
             if actual != expected {
                 return Ok(CheckResult::Reject {
-                    reason: format!("{key}: '{}' does not match required '{}'", actual, expected),
+                    reason: format!(
+                        "{key}: '{}' does not match required '{}'",
+                        actual, expected
+                    ),
+                    silent: true,
                 });
             }
         }
@@ -49,9 +54,11 @@ impl CheckAction for HasLicense {
             Some(l) if l == self.license => Ok(CheckResult::Pass),
             Some(l) => Ok(CheckResult::Reject {
                 reason: format!("license '{}' does not match required '{}'", l, self.license),
+                silent: true,
             }),
             None => Ok(CheckResult::Reject {
                 reason: "no license field found".to_string(),
+                silent: true,
             }),
         }
     }
@@ -76,12 +83,14 @@ impl CheckAction for DateChecker {
         let Some(value) = job.request.get(&self.key) else {
             return Ok(CheckResult::Reject {
                 reason: format!("request does not contain expected key '{}'", self.key),
+                silent: false,
             });
         };
         match date_check(value, &self.allowed_values) {
             Ok(()) => Ok(CheckResult::Pass),
             Err(err) => Ok(CheckResult::Reject {
                 reason: err.to_string(),
+                silent: false,
             }),
         }
     }
@@ -102,6 +111,7 @@ impl CheckAction for HasKey {
         } else {
             Ok(CheckResult::Reject {
                 reason: format!("request does not contain key '{}'", self.key),
+                silent: true,
             })
         }
     }
@@ -115,9 +125,14 @@ impl CheckAction for ScheduleReleased {
         let catalog = ScheduleCatalog::from_path(&self.path)?;
         match catalog.assert_request_released(&job.request, self.current_time()?) {
             Ok(()) => Ok(CheckResult::Pass),
-            Err(ActionError::ResourceError(reason)) | Err(ActionError::ConfigError(reason)) => {
-                Ok(CheckResult::Reject { reason })
-            }
+            Err(ActionError::ResourceError(reason)) => Ok(CheckResult::Reject {
+                reason,
+                silent: false,
+            }),
+            Err(ActionError::ConfigError(reason)) => Ok(CheckResult::Reject {
+                reason,
+                silent: false,
+            }),
             Err(err) => Err(err),
         }
     }

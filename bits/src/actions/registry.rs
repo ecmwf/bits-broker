@@ -100,7 +100,7 @@ macro_rules! register_action {
                 factory: |config| {
                     let action: $action_type = serde_json::from_value(config)
                         .map_err(|e| $crate::actions::ActionError::ConfigError(e.to_string()))?;
-                    Ok($crate::actions::Action::Check(std::sync::Arc::new(action), None))
+                    Ok($crate::actions::Action::Check(std::sync::Arc::new(action), None, None))
                 }
             }
         }
@@ -112,7 +112,7 @@ macro_rules! register_action {
                 factory: |config| {
                     let action: $action_type = serde_json::from_value(config)
                         .map_err(|e| $crate::actions::ActionError::ConfigError(e.to_string()))?;
-                    Ok($crate::actions::Action::Transform(std::sync::Arc::new(action), None))
+                    Ok($crate::actions::Action::Transform(std::sync::Arc::new(action), None, None))
                 }
             }
         }
@@ -124,7 +124,7 @@ macro_rules! register_action {
                 factory: |config| {
                     let action: $action_type = serde_json::from_value(config)
                         .map_err(|e| $crate::actions::ActionError::ConfigError(e.to_string()))?;
-                    Ok($crate::actions::Action::Target(std::sync::Arc::new(action), None))
+                    Ok($crate::actions::Action::Target(std::sync::Arc::new(action), None, None))
                 }
             }
         }
@@ -178,7 +178,7 @@ mod tests {
         }
 
         let factory: RuntimeActionFactory =
-            Arc::new(|_config| Ok(Action::Check(Arc::new(AlwaysPass), None)));
+            Arc::new(|_config| Ok(Action::Check(Arc::new(AlwaysPass), None, None)));
 
         let name = "test_runtime_always_pass_9f3a";
         register_runtime_action(name, factory).expect("registration should succeed");

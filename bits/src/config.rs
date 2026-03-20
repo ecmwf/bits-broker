@@ -23,8 +23,16 @@ struct Registries {
 
 struct ParseContext {
     registries: Registries,
-    resolved_targets:
-        RefCell<HashMap<String, (Arc<dyn TargetAction>, Option<Dispatcher<TargetResult>>)>>,
+    resolved_targets: RefCell<
+        HashMap<
+            String,
+            (
+                Arc<dyn TargetAction>,
+                Option<Dispatcher<TargetResult>>,
+                Option<bool>,
+            ),
+        >,
+    >,
     worker_server: Option<Arc<WorkerServer>>,
 }
 
@@ -340,7 +348,22 @@ fn parse_action(
                     let action = create_action(action_name, config.clone())?;
                     let action = validate_inline_action(ns, action)?;
                     let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
-                    return attach_dispatcher(action_name, action_name, action, settings, ctx);
+                    let silent = map
+                        .get("silent")
+                        .map(|v| {
+                            v.as_bool().ok_or_else(|| {
+                                format!("{key}: silent must be a boolean")
+                            })
+                        })
+                        .transpose()?;
+                    return attach_dispatcher(
+                        action_name,
+                        action_name,
+                        action,
+                        settings,
+                        silent,
+                        ctx,
+                    );
                 }
             }
 
@@ -384,8 +407,12 @@ fn resolve_named(
             action_from_entry(ns, name, entry, ctx)
         }
         "target" => {
-            if let Some((target, dispatcher)) = ctx.resolved_targets.borrow().get(name) {
-                return Ok(Action::Target(Arc::clone(target), dispatcher.clone()));
+            if let Some((target, dispatcher, surface)) = ctx.resolved_targets.borrow().get(name) {
+                return Ok(Action::Target(
+                    Arc::clone(target),
+                    dispatcher.clone(),
+                    *surface,
+                ));
             }
             let entry = ctx
                 .registries
@@ -393,10 +420,11 @@ fn resolve_named(
                 .get(name)
                 .ok_or_else(|| format!("unknown target '{name}'"))?;
             let action = action_from_entry(ns, name, entry, ctx)?;
-            if let Action::Target(target, dispatcher) = &action {
-                ctx.resolved_targets
-                    .borrow_mut()
-                    .insert(name.to_string(), (Arc::clone(target), dispatcher.clone()));
+            if let Action::Target(target, dispatcher, surface) = &action {
+                ctx.resolved_targets.borrow_mut().insert(
+                    name.to_string(),
+                    (Arc::clone(target), dispatcher.clone(), *surface),
+                );
             }
             Ok(action)
         }
@@ -465,10 +493,17 @@ fn action_from_entry(
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("{ns} '{entry_name}' is missing a 'type' field (got: {entry})"))?;
     let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
+    let silent = map
+        .get("silent")
+        .map(|v| {
+            v.as_bool()
+                .ok_or_else(|| format!("{ns} '{entry_name}': silent must be a boolean"))
+        })
+        .transpose()?;
 
     let remaining: serde_json::Map<_, _> = map
         .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "type" | "dispatcher"))
+        .filter(|(k, _)| !matches!(k.as_str(), "type" | "dispatcher" | "silent"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let config = if remaining.is_empty() {
@@ -477,7 +512,7 @@ fn action_from_entry(
         remaining.into()
     };
     let action = create_action(type_name, config)?;
-    attach_dispatcher(entry_name, type_name, action, settings, ctx)
+    attach_dispatcher(entry_name, type_name, action, settings, silent, ctx)
 }
 
 fn attach_dispatcher(
@@ -485,6 +520,7 @@ fn attach_dispatcher(
     action_name: &str,
     action: Action,
     mut settings: DispatcherSettings,
+    silent: Option<bool>,
     ctx: &ParseContext,
 ) -> Result<Action, Box<dyn std::error::Error>> {
     let is_remote_action = action_name == "remote";
@@ -512,25 +548,25 @@ fn attach_dispatcher(
     let has_dispatcher = settings.queue.is_some() || settings.executor.is_some();
 
     match action {
-        Action::Check(check, _) => {
+        Action::Check(check, _, _) => {
             let dispatcher = Dispatcher::from_config(
                 settings.queue.as_ref(),
                 settings.executor.as_ref(),
                 None,
                 None,
             );
-            Ok(Action::Check(check, dispatcher))
+            Ok(Action::Check(check, dispatcher, silent))
         }
-        Action::Transform(transform, _) => {
+        Action::Transform(transform, _, _) => {
             let dispatcher = Dispatcher::from_config(
                 settings.queue.as_ref(),
                 settings.executor.as_ref(),
                 None,
                 None,
             );
-            Ok(Action::Transform(transform, dispatcher))
+            Ok(Action::Transform(transform, dispatcher, silent))
         }
-        Action::Target(target, _) => {
+        Action::Target(target, _, _) => {
             let pool_name = if is_remote_action {
                 Some(entry_name)
             } else {
@@ -542,7 +578,7 @@ fn attach_dispatcher(
                 pool_name,
                 ctx.worker_server.clone(),
             );
-            Ok(Action::Target(target, dispatcher))
+            Ok(Action::Target(target, dispatcher, silent))
         }
         _ if has_dispatcher => {
             Err("dispatcher config only valid for Check, Transform, and Target actions".into())

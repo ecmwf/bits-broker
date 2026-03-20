@@ -40,13 +40,15 @@ impl PyPass {
 #[derive(Clone)]
 pub struct PyReject {
     pub reason: String,
+    pub silent: bool,
 }
 
 #[pymethods]
 impl PyReject {
     #[new]
-    fn new(reason: String) -> Self {
-        PyReject { reason }
+    #[pyo3(signature = (reason, silent = true))]
+    fn new(reason: String, silent: bool) -> Self {
+        PyReject { reason, silent }
     }
     fn __repr__(&self) -> String {
         format!("Reject({:?})", self.reason)
@@ -422,6 +424,7 @@ impl CheckAction for PyCheckAdapter {
             } else if let Ok(r) = obj.extract::<PyRef<PyReject>>() {
                 Ok(CheckResult::Reject {
                     reason: r.reason.clone(),
+                    silent: r.silent,
                 })
             } else {
                 let type_name = obj
@@ -491,6 +494,7 @@ impl TransformAction for PyTransformAdapter {
             } else if let Ok(r) = obj.extract::<PyRef<PyReject>>() {
                 Ok(TransformResult::Reject {
                     reason: r.reason.clone(),
+                    silent: r.silent,
                 })
             } else {
                 let type_name = obj
@@ -569,6 +573,7 @@ impl TargetAction for PyTargetAdapter {
             } else if let Ok(r) = obj.extract::<PyRef<PyReject>>() {
                 Ok(TargetResult::Reject {
                     reason: r.reason.clone(),
+                    silent: r.silent,
                 })
             } else {
                 let type_name = obj
@@ -652,11 +657,11 @@ fn register_action(py: Python<'_>, name: String, cls: Bound<'_, PyAny>) -> PyRes
                 .map_err(|e| ActionError::ConfigError(format!("__init__ failed: {}", e)))?;
 
             Ok(match kind {
-                ActionKind::Check => Action::Check(Arc::new(PyCheckAdapter { instance }), None),
+                ActionKind::Check => Action::Check(Arc::new(PyCheckAdapter { instance }), None, None),
                 ActionKind::Transform => {
-                    Action::Transform(Arc::new(PyTransformAdapter { instance }), None)
+                    Action::Transform(Arc::new(PyTransformAdapter { instance }), None, None)
                 }
-                ActionKind::Target => Action::Target(Arc::new(PyTargetAdapter { instance }), None),
+                ActionKind::Target => Action::Target(Arc::new(PyTargetAdapter { instance }), None, None),
             })
         })
     });

@@ -48,6 +48,11 @@ A `switch` contains named routes and tries them **in order**, returning the resu
 route whose checks all pass. This is the branching primitive — use it to express conditional
 routing such as privileged versus public access paths. Switches can be nested inside routes.
 
+When all routes reject, the switch collects rejection reasons from non-silent actions and returns
+them to the user. Silent rejections (route-selection checks like `match`) are omitted; non-silent
+rejections (validation checks like `schedule_released`) are included so the user understands why
+a matched route still failed.
+
 ## Dispatcher
 
 Any action step — check, transform, or target — can have an optional **dispatcher** that controls

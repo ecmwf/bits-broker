@@ -3,6 +3,11 @@
 # Dispatcher config (queue, executor) lives inside a `dispatcher:`
 # key within the registry entry, or as a sibling `dispatcher:` key for inline steps.
 #
+# silent: true/false — override whether rejections from this step are shown to the
+#   user when all routes fail.  Route-selection checks (match, has_key) default to
+#   silent: true; validation checks (schedule_released, date_checker) default to
+#   silent: false.
+#
 # queue:
 #   fifo          — first-in, first-out ordering
 #   cost_weighted — cheaper jobs (lower metadata["cost"]) run first

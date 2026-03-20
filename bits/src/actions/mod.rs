@@ -60,14 +60,17 @@ pub enum Action {
     Check(
         Arc<dyn CheckAction>,
         Option<crate::dispatcher::Dispatcher<CheckResult>>,
+        Option<bool>,
     ),
     Transform(
         Arc<dyn TransformAction>,
         Option<crate::dispatcher::Dispatcher<TransformResult>>,
+        Option<bool>,
     ),
     Target(
         Arc<dyn TargetAction>,
         Option<crate::dispatcher::Dispatcher<TargetResult>>,
+        Option<bool>,
     ),
     Switch(crate::routing::switch::Switch),
 }
@@ -76,6 +79,28 @@ impl Action {
     /// Returns true when this action ends a route.
     pub fn is_terminal(&self) -> bool {
         matches!(self, Action::Target(..) | Action::Switch(..))
+    }
+
+    /// Config-level override for whether this action's rejections are silent.
+    pub fn silent_override(&self) -> Option<bool> {
+        match self {
+            Action::Check(_, _, o) | Action::Transform(_, _, o) | Action::Target(_, _, o) => *o,
+            Action::Switch(_) => None,
+        }
+    }
+
+    /// Returns the [`describe`](CheckAction::describe) output for the inner action.
+    ///
+    /// For `Switch` variants this returns the default empty object; use
+    /// [`Switch::describe_actions`](crate::routing::switch::Switch::describe_actions)
+    /// to recurse into nested switches.
+    pub fn describe(&self) -> serde_json::Value {
+        match self {
+            Action::Check(a, _, _) => a.describe(),
+            Action::Transform(a, _, _) => a.describe(),
+            Action::Target(a, _, _) => a.describe(),
+            Action::Switch(_) => serde_json::json!({}),
+        }
     }
 }
 
@@ -98,6 +123,15 @@ impl std::fmt::Debug for Action {
 #[async_trait]
 pub trait CheckAction: Send + Sync {
     async fn evaluate(&self, job: &Job) -> Result<CheckResult, ActionError>;
+
+    /// Machine-readable descriptor for introspection.
+    ///
+    /// Override this to expose action-specific metadata (e.g. collection names,
+    /// configuration values) that callers can query at runtime.  The default
+    /// implementation returns an empty JSON object.
+    fn describe(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
 }
 
 #[derive(Debug)]
@@ -106,7 +140,12 @@ pub enum CheckResult {
     /// The job may continue through the route.
     Pass,
     /// The route is rejected with a human-readable reason.
-    Reject { reason: String },
+    ///
+    /// When `silent` is false and the entire switch fails, this rejection
+    /// reason is included in the error returned to the user.  Route-selection
+    /// checks (e.g. `Match`) normally set this to `true`; validation checks
+    /// (e.g. `ScheduleReleased`) set it to `false`.
+    Reject { reason: String, silent: bool },
 }
 
 // ================================
@@ -117,6 +156,11 @@ pub enum CheckResult {
 #[async_trait]
 pub trait TransformAction: Send + Sync {
     async fn execute(&self, job: &mut Job) -> Result<TransformResult, ActionError>;
+
+    /// See [`CheckAction::describe`].
+    fn describe(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
 }
 
 #[derive(Debug)]
@@ -125,7 +169,9 @@ pub enum TransformResult {
     /// The job was updated and may continue through the route.
     Continue,
     /// The route is rejected with a human-readable reason.
-    Reject { reason: String },
+    ///
+    /// See [`CheckResult::Reject::silent`] for semantics.
+    Reject { reason: String, silent: bool },
 }
 
 // ================================
@@ -136,6 +182,11 @@ pub enum TransformResult {
 #[async_trait]
 pub trait TargetAction: Send + Sync {
     async fn dispatch(&self, job: &Job) -> Result<TargetResult, ActionError>;
+
+    /// See [`CheckAction::describe`].
+    fn describe(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
 }
 
 #[derive(Debug)]
@@ -144,5 +195,7 @@ pub enum TargetResult {
     /// The target produced a final job result.
     Complete(JobResult),
     /// The target rejected the job without a system failure.
-    Reject { reason: String },
+    ///
+    /// See [`CheckResult::Reject::silent`] for semantics.
+    Reject { reason: String, silent: bool },
 }

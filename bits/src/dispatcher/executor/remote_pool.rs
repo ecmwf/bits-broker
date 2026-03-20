@@ -259,7 +259,7 @@ async fn handle_get_work(
                         message,
                     }))
                 }
-                WorkerOutcome::Reject { reason } => Ok(TargetResult::Reject { reason }),
+                WorkerOutcome::Reject { reason } => Ok(TargetResult::Reject { reason, silent: true }),
                 WorkerOutcome::Error { message } => Err(ActionError::ResourceError(message)),
             },
             Err(_) => Err(ActionError::ResourceError(

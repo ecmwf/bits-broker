@@ -18,6 +18,7 @@ impl bits::CheckAction for MatchClass {
             Some(v) if v == self.class => Ok(bits::CheckResult::Pass),
             _ => Ok(bits::CheckResult::Reject {
                 reason: format!("class {} not matched", self.class),
+                silent: true,
             }),
         }
     }
@@ -31,7 +32,7 @@ fn ensure_match_class_registered() {
             std::sync::Arc::new(|config| {
                 let action: MatchClass = serde_json::from_value(config)
                     .map_err(|e| bits::ActionError::ConfigError(e.to_string()))?;
-                Ok(bits::Action::Check(std::sync::Arc::new(action), None))
+                Ok(bits::Action::Check(std::sync::Arc::new(action), None, None))
             }),
         )
         .expect("register test_match_class");

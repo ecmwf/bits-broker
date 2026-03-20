@@ -22,6 +22,7 @@ impl TransformAction for AddField {
         let Some(map) = job.request.as_object_mut() else {
             return Ok(TransformResult::Reject {
                 reason: "request must be a JSON object".to_string(),
+                silent: true,
             });
         };
 

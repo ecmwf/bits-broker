@@ -22,6 +22,7 @@ impl CheckAction for MatchField {
             Some(v) if v == self.value => Ok(CheckResult::Pass),
             _ => Ok(CheckResult::Reject {
                 reason: format!("{}={} not matched", self.field, self.value),
+                silent: true,
             }),
         }
     }

@@ -66,17 +66,25 @@ async fn poll_by_id(id: &str, state: &AppState) -> Response {
     }
 }
 
-async fn start_server(config: &str, poll_timeout: Duration) -> u16 {
+struct TestServer {
+    port: u16,
+    bits: Arc<Bits>,
+}
+
+async fn start_server(config: &str, poll_timeout: Duration) -> TestServer {
     let bits = Arc::new(Bits::from_config(config).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let state = AppState { bits, poll_timeout };
+    let state = AppState {
+        bits: bits.clone(),
+        poll_timeout,
+    };
     let app = Router::new()
         .route("/job", post(submit_job))
         .route("/job/{id}", get(poll_job))
         .with_state(state);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    port
+    TestServer { port, bits }
 }
 
 // ================================
@@ -95,7 +103,8 @@ routes:
           concurrency: 1
 "#;
 
-    let port = start_server(config, Duration::from_secs(25)).await;
+    let server = start_server(config, Duration::from_secs(25)).await;
+    let port = server.port;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = reqwest::Client::builder()
@@ -129,7 +138,8 @@ routes:
           concurrency: 1
 "#;
 
-    let port = start_server(config, Duration::from_millis(50)).await;
+    let server = start_server(config, Duration::from_millis(50)).await;
+    let port = server.port;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let client = reqwest::Client::builder()
@@ -170,5 +180,226 @@ routes:
     assert!(
         !final_location.starts_with("/job/"),
         "expected final result, not another poll redirect"
+    );
+}
+
+#[tokio::test]
+async fn post_malformed_json_returns_error() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+    let server = start_server(config, Duration::from_secs(5)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/job"))
+        .header("content-type", "application/json")
+        .body("not valid json{{{")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "malformed JSON should return 400"
+    );
+}
+
+#[tokio::test]
+async fn get_nonexistent_job_returns_not_found() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+    let server = start_server(config, Duration::from_millis(100)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/job/does-not-exist"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn post_empty_object_is_valid() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+    let server = start_server(config, Duration::from_secs(5)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/job"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::SEE_OTHER,
+        "empty object should produce a redirect result"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_submits_all_resolve() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 8
+"#;
+    let server = start_server(config, Duration::from_secs(5)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let futs: Vec<_> = (0..20)
+        .map(|i| {
+            let client = client.clone();
+            async move {
+                client
+                    .post(format!("http://127.0.0.1:{port}/job"))
+                    .json(&serde_json::json!({"index": i}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        })
+        .collect();
+
+    let statuses = futures::future::join_all(futs).await;
+    for (i, status) in statuses.iter().enumerate() {
+        assert_eq!(
+            *status,
+            reqwest::StatusCode::SEE_OTHER,
+            "request {i} expected 303, got {status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pending_redirect_includes_location_and_retry_after_headers() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 500
+          concurrency: 1
+"#;
+    let server = start_server(config, Duration::from_millis(50)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/job"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+
+    let location = resp
+        .headers()
+        .get("location")
+        .expect("missing Location header");
+    assert!(
+        location.to_str().unwrap().starts_with("/job/"),
+        "Location should point to /job/{{id}}, got: {location:?}"
+    );
+
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .expect("missing Retry-After header");
+    assert_eq!(retry_after.to_str().unwrap(), "0");
+}
+
+#[tokio::test]
+async fn cancelled_job_returns_gone_via_http() {
+    let _ = common::CheckDummyDelay::new(500);
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - check::dummy_delay:
+          duration_ms: 500
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+    let server = start_server(config, Duration::from_secs(2)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let handle = server.bits.submit(Job::new(serde_json::json!({})));
+    server.bits.cancel(&handle.id);
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/job/{}", handle.id))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::GONE,
+        "cancelled job should return 410 GONE"
     );
 }

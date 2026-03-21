@@ -41,16 +41,42 @@ are stored at `jobs/{job_id}`. These key spaces are disjoint.
 
 ## Configuration
 
+The persistence backend is selected via `bits.persistence.type`:
+
+### NATS JetStream KV
+
 ```yaml
 bits:
-  tikv:
-    endpoints: ["pd:2379"]
-    broker_lease_ttl_secs: 30    # default: 30 seconds
+  persistence:
+    type: nats
+    url: "nats://localhost:4222"
+    jobs_bucket: "bits-jobs"         # default
+    leases_bucket: "bits-leases"     # default
+    broker_lease_ttl_secs: 30        # default: 30 seconds
+    num_replicas: 1                  # use 3 for production
 ```
+
+Build with `--features nats`. Requires `nats-server` with JetStream enabled.
+
+### TiKV
+
+```yaml
+bits:
+  persistence:
+    type: tikv
+    endpoints: ["pd:2379"]
+    broker_lease_ttl_secs: 30        # default: 30 seconds
+```
+
+Build with `--features tikv`. Requires a TiKV cluster with PD.
+
+### No persistence (in-memory only)
+
+Omit the `persistence` section entirely. Jobs are lost on broker restart.
 
 `broker_lease_ttl_secs` is the only tuning knob for lease lifetime. Setting it lower reduces
 the window during which a crashed broker's jobs are unrecoverable, at the cost of more frequent
-upserts to TiKV.
+heartbeat writes.
 
 > **Note:** Broker leases are only active when a persistence store is configured. Without
-> `bits.tikv`, the heartbeat task does not start and no lease records are written.
+> `bits.persistence`, the heartbeat task does not start and no lease records are written.

@@ -556,10 +556,10 @@ async fn delete_failure_leaves_record_for_reclaim() {
 #[cfg(not(feature = "tikv"))]
 #[tokio::test]
 async fn config_rejects_tiny_broker_lease_ttl() {
-    // TiKV lease TTL values below one second must be rejected at config-parse time.
     let cfg = r#"
 bits:
-  tikv:
+  persistence:
+    type: tikv
     endpoints:
       - 127.0.0.1:2379
     broker_lease_ttl_secs: 0.5

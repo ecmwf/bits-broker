@@ -35,3 +35,76 @@ routes:
     let outcome = bits.poll(&handle.id, Some(Duration::from_secs(2))).await;
     assert!(matches!(outcome, PollOutcome::Ready(JobResult::Cancelled)));
 }
+
+#[tokio::test]
+async fn cancel_after_completion_has_no_effect() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+
+    let bits = Arc::new(Bits::from_config(config).unwrap());
+    let handle = bits.submit(Job::new(serde_json::json!({})));
+
+    let outcome = bits.poll(&handle.id, Some(Duration::from_secs(2))).await;
+    assert!(matches!(
+        outcome,
+        PollOutcome::Ready(JobResult::Redirect { .. })
+    ));
+
+    bits.cancel(&handle.id);
+
+    let outcome = bits
+        .poll(&handle.id, Some(Duration::from_millis(100)))
+        .await;
+    assert!(
+        matches!(outcome, PollOutcome::NotFound),
+        "job already consumed, expected NotFound, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn double_cancel_does_not_panic() {
+    let _ = common::CheckDummyDelay::new(200);
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - check::dummy_delay:
+          duration_ms: 200
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+
+    let bits = Arc::new(Bits::from_config(config).unwrap());
+    let handle = bits.submit(Job::new(serde_json::json!({})));
+
+    bits.cancel(&handle.id);
+    bits.cancel(&handle.id);
+
+    let outcome = bits.poll(&handle.id, Some(Duration::from_secs(2))).await;
+    assert!(matches!(outcome, PollOutcome::Ready(JobResult::Cancelled)));
+}
+
+#[tokio::test]
+async fn cancel_nonexistent_job_does_not_panic() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+
+    let bits = Bits::from_config(config).unwrap();
+    bits.cancel("does-not-exist");
+}

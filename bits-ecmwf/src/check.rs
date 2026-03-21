@@ -182,9 +182,8 @@ impl CheckAction for HasRole {
             });
         };
 
-        let auth_user: AuthUser = serde_json::from_value(auth_value.clone()).map_err(|e| {
-            ActionError::AuthError(format!("invalid auth context: {}", e))
-        })?;
+        let auth_user: AuthUser = serde_json::from_value(auth_value.clone())
+            .map_err(|e| ActionError::AuthError(format!("invalid auth context: {}", e)))?;
 
         if auth_user.version != 1 {
             return Ok(CheckResult::Reject {

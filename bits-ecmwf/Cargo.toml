@@ -9,6 +9,7 @@ path = "src/bin/main.rs"
 
 [dependencies]
 bits = { path = "../bits" }
+authotron-types = { git = "https://github.com/ecmwf/auth-o-tron.git", branch = "feat/shared-auth-workspace", package = "authotron-types" }
 async-trait = "0.1.88"
 bytes = "1.10.1"
 chrono = { version = "0.4", features = ["clock"] }

@@ -186,4 +186,33 @@ mod tests {
         assert_eq!(*job.original_request, request);
         assert_eq!(job.request, request);
     }
+
+    #[test]
+    fn metadata_cow_isolates_clone_from_original() {
+        let original = Job::new(json!({}));
+        let mut cloned = original.clone();
+
+        cloned.metadata_mut()["cost"] = json!(42u64);
+
+        assert_eq!(
+            original.metadata.get("cost"),
+            None,
+            "original must be untouched"
+        );
+        assert_eq!(cloned.metadata["cost"], json!(42u64));
+    }
+
+    #[test]
+    fn user_cow_isolates_clone_from_original() {
+        let original = Job::new(json!({}));
+        let mut cloned = original.clone();
+
+        *cloned.user_mut() = json!({"name": "alice"});
+
+        assert!(
+            original.user.get("name").is_none(),
+            "original must be untouched"
+        );
+        assert_eq!(cloned.user["name"], json!("alice"));
+    }
 }

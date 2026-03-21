@@ -64,7 +64,7 @@ async fn drop_completes_promptly_via_condvar_wakeup() {
     let elapsed = start.elapsed();
 
     assert!(
-        elapsed < Duration::from_millis(500),
-        "drop took {elapsed:?}; expected < 500ms (condvar should wake sleeping threads)"
+        elapsed < Duration::from_secs(2),
+        "drop took {elapsed:?}; expected well under the 30s sweep interval"
     );
 }

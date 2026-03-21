@@ -278,7 +278,12 @@ impl Bits {
         tokio::pin!(notified);
         notified.as_mut().enable();
 
-        if let Some(result) = job.result.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        // Take the result while holding the result lock, then drop the guard
+        // before touching self.jobs. The sweeper's remove_if also locks
+        // job.result under the DashMap shard lock; holding result across a
+        // DashMap operation here would invert that order and risk deadlock.
+        let taken = job.result.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(result) = taken {
             self.jobs.remove(id);
             self.schedule_durable_cleanup(id, &job);
             return Some(PollOutcome::Ready(result));
@@ -286,19 +291,23 @@ impl Bits {
 
         let outcome = match timeout {
             Some(t) => match tokio::time::timeout(t, notified).await {
-                Ok(()) => match job.result.lock().unwrap_or_else(|p| p.into_inner()).take() {
-                    Some(result) => {
-                        self.jobs.remove(id);
-                        self.schedule_durable_cleanup(id, &job);
-                        PollOutcome::Ready(result)
+                Ok(()) => {
+                    let taken = job.result.lock().unwrap_or_else(|p| p.into_inner()).take();
+                    match taken {
+                        Some(result) => {
+                            self.jobs.remove(id);
+                            self.schedule_durable_cleanup(id, &job);
+                            PollOutcome::Ready(result)
+                        }
+                        None => PollOutcome::Pending { id: id.to_string() },
                     }
-                    None => PollOutcome::Pending { id: id.to_string() },
-                },
+                }
                 Err(_) => PollOutcome::Pending { id: id.to_string() },
             },
             None => {
                 notified.await;
-                match job.result.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                let taken = job.result.lock().unwrap_or_else(|p| p.into_inner()).take();
+                match taken {
                     Some(result) => {
                         self.jobs.remove(id);
                         self.schedule_durable_cleanup(id, &job);
@@ -321,6 +330,10 @@ impl Bits {
 
 impl Drop for Bits {
     fn drop(&mut self) {
+        // ShutdownSignal uses a condvar, so threads wake within microseconds.
+        // The only path where join could block longer is if a thread is mid-
+        // persistence I/O (e.g. TiKV); that should be bounded by the backend's
+        // own client timeout, not ours.
         self.shutdown.stop();
         if let Some(handle) = self.sweeper_handle.take() {
             let _ = handle.join();

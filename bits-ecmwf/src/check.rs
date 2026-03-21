@@ -230,7 +230,7 @@ mod has_role_tests {
 
     fn job_with_auth(auth_user: &User) -> Job {
         let mut job = Job::new(json!({}));
-        job.user = json!({
+        *job.user_mut() = json!({
             "client_ip": "1.2.3.4",
             "auth": serde_json::to_value(auth_user).unwrap(),
         });
@@ -299,7 +299,7 @@ mod has_role_tests {
     #[tokio::test]
     async fn test_has_role_no_auth_context() {
         let mut job = Job::new(json!({}));
-        job.user = json!({"client_ip": "1.2.3.4"});
+        *job.user_mut() = json!({"client_ip": "1.2.3.4"});
         let check = HasRole {
             role: "admin".to_string(),
             realm: None,
@@ -329,7 +329,7 @@ mod has_role_tests {
     #[tokio::test]
     async fn test_has_role_malformed_auth() {
         let mut job = Job::new(json!({}));
-        job.user = json!({"auth": "not a valid User object"});
+        *job.user_mut() = json!({"auth": "not a valid User object"});
         let check = HasRole {
             role: "admin".to_string(),
             realm: None,
@@ -344,7 +344,7 @@ mod has_role_tests {
     #[tokio::test]
     async fn test_has_role_missing_version_defaults_to_v1() {
         let mut job = Job::new(json!({}));
-        job.user = json!({
+        *job.user_mut() = json!({
             "client_ip": "1.2.3.4",
             "auth": {
                 "username": "alice",
@@ -384,7 +384,7 @@ mod has_role_tests {
     #[tokio::test]
     async fn test_has_role_malformed_roles_type_returns_auth_error() {
         let mut job = Job::new(json!({}));
-        job.user = json!({
+        *job.user_mut() = json!({
             "auth": {
                 "version": 1,
                 "username": "alice",
@@ -424,7 +424,7 @@ mod has_role_tests {
     async fn test_has_role_old_job_without_auth() {
         // Simulates a restored old job that only has client_ip
         let mut job = Job::new(json!({"class": "od"}));
-        job.user = json!({"client_ip": "10.0.0.1"});
+        *job.user_mut() = json!({"client_ip": "10.0.0.1"});
         let check = HasRole {
             role: "data_access".to_string(),
             realm: Some("ecmwf".to_string()),

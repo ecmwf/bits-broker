@@ -156,14 +156,14 @@ async fn check_dispatcher_cost_weighted_ordering() {
     // Blocker holds the single slot while expensive + cheap enter the heap.
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let mut blocker = Job::new(serde_json::json!({}));
-    blocker.metadata["cost"] = serde_json::json!(0u64);
+    blocker.metadata_mut()["cost"] = serde_json::json!(0u64);
     let blocker_work: BoxFuture<'static, Result<CheckResult, ActionError>> = Box::pin(async move {
         let _ = release_rx.await;
         Ok(CheckResult::Pass)
     });
 
     let mut expensive = Job::new(serde_json::json!({}));
-    expensive.metadata["cost"] = serde_json::json!(100u64);
+    expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
     let order_e = Arc::clone(&order);
     let expensive_work: BoxFuture<'static, Result<CheckResult, ActionError>> =
         Box::pin(async move {
@@ -172,7 +172,7 @@ async fn check_dispatcher_cost_weighted_ordering() {
         });
 
     let mut cheap = Job::new(serde_json::json!({}));
-    cheap.metadata["cost"] = serde_json::json!(1u64);
+    cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
     let order_c = Arc::clone(&order);
     let cheap_work: BoxFuture<'static, Result<CheckResult, ActionError>> = Box::pin(async move {
         order_c.lock().unwrap().push(1);
@@ -223,7 +223,7 @@ async fn target_dispatcher_cost_weighted_ordering() {
 
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let mut blocker = Job::new(serde_json::json!({}));
-    blocker.metadata["cost"] = serde_json::json!(0u64);
+    blocker.metadata_mut()["cost"] = serde_json::json!(0u64);
     let blocker_work: BoxFuture<'static, Result<TargetResult, ActionError>> =
         Box::pin(async move {
             let _ = release_rx.await;
@@ -233,7 +233,7 @@ async fn target_dispatcher_cost_weighted_ordering() {
         });
 
     let mut expensive = Job::new(serde_json::json!({}));
-    expensive.metadata["cost"] = serde_json::json!(100u64);
+    expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
     let order_e = Arc::clone(&order);
     let expensive_work: BoxFuture<'static, Result<TargetResult, ActionError>> =
         Box::pin(async move {
@@ -244,7 +244,7 @@ async fn target_dispatcher_cost_weighted_ordering() {
         });
 
     let mut cheap = Job::new(serde_json::json!({}));
-    cheap.metadata["cost"] = serde_json::json!(1u64);
+    cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
     let order_c = Arc::clone(&order);
     let cheap_work: BoxFuture<'static, Result<TargetResult, ActionError>> = Box::pin(async move {
         order_c.lock().unwrap().push(1);
@@ -291,7 +291,7 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
 
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let mut blocker = Job::new(serde_json::json!({}));
-    blocker.metadata["cost"] = serde_json::json!(0u64);
+    blocker.metadata_mut()["cost"] = serde_json::json!(0u64);
     let blocker_work: BoxFuture<'static, Result<TargetResult, ActionError>> =
         Box::pin(async move {
             let _ = release_rx.await;
@@ -304,7 +304,7 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     let mut expensive = Job::new(serde_json::json!({}));
-    expensive.metadata["cost"] = serde_json::json!(100u64);
+    expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
     let order_e = Arc::clone(&order);
     let expensive_work: BoxFuture<'static, Result<TargetResult, ActionError>> =
         Box::pin(async move {
@@ -322,7 +322,7 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut cheap = Job::new(serde_json::json!({}));
-    cheap.metadata["cost"] = serde_json::json!(1u64);
+    cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
     let order_c = Arc::clone(&order);
     let cheap_work: BoxFuture<'static, Result<TargetResult, ActionError>> = Box::pin(async move {
         order_c.lock().unwrap().push(1);

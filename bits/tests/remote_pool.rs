@@ -567,11 +567,11 @@ async fn remote_pool_preserves_cost_weighted_ordering() {
     let blocker_id = blocker_work["job_id"].as_str().unwrap().to_string();
 
     let mut expensive = Job::new(serde_json::json!({"label": "expensive"}));
-    expensive.metadata["cost"] = serde_json::json!(100u64);
+    expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
     let h_expensive = bits.submit(expensive);
 
     let mut cheap = Job::new(serde_json::json!({"label": "cheap"}));
-    cheap.metadata["cost"] = serde_json::json!(1u64);
+    cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
     let h_cheap = bits.submit(cheap);
 
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -652,13 +652,13 @@ async fn remote_pool_preserves_age_priority_ordering() {
     let blocker_id = blocker_work["job_id"].as_str().unwrap().to_string();
 
     let mut expensive = Job::new(serde_json::json!({"label": "expensive"}));
-    expensive.metadata["cost"] = serde_json::json!(100u64);
+    expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
     let h_expensive = bits.submit(expensive);
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut cheap = Job::new(serde_json::json!({"label": "cheap"}));
-    cheap.metadata["cost"] = serde_json::json!(1u64);
+    cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
     let h_cheap = bits.submit(cheap);
 
     tokio::time::sleep(Duration::from_millis(20)).await;

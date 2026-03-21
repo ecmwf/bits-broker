@@ -45,9 +45,9 @@ async fn target_dummy_cheap_job_dequeued_before_expensive() {
 
     // Prime the queue with an expensive job and a cheap job.
     let mut expensive = Job::new(serde_json::json!({}));
-    expensive.metadata["cost"] = serde_json::json!(100u64);
+    expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
     let mut cheap = Job::new(serde_json::json!({}));
-    cheap.metadata["cost"] = serde_json::json!(1u64);
+    cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
 
     q.enqueue(expensive);
     // Brief pause so the expensive job arrives in the heap first.
@@ -86,13 +86,13 @@ async fn age_priority_old_expensive_job_beats_new_cheap_job() {
     let q = Arc::new(AgePriorityQueue::new());
 
     let mut expensive = Job::new(serde_json::json!({}));
-    expensive.metadata["cost"] = serde_json::json!(100u64);
+    expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
     q.enqueue(expensive);
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let mut cheap = Job::new(serde_json::json!({}));
-    cheap.metadata["cost"] = serde_json::json!(1u64);
+    cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
     q.enqueue(cheap);
 
     tokio::time::sleep(Duration::from_millis(10)).await;

@@ -53,9 +53,9 @@ mod tests {
         let q = CostWeightedQueue::new();
 
         let mut cheap = Job::new(serde_json::json!({}));
-        cheap.metadata["cost"] = serde_json::json!(1u64);
+        cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
         let mut expensive = Job::new(serde_json::json!({}));
-        expensive.metadata["cost"] = serde_json::json!(99u64);
+        expensive.metadata_mut()["cost"] = serde_json::json!(99u64);
 
         q.enqueue(expensive);
         q.enqueue(cheap);
@@ -76,13 +76,13 @@ mod tests {
         let q = AgePriorityQueue::new();
 
         let mut expensive = Job::new(serde_json::json!({}));
-        expensive.metadata["cost"] = serde_json::json!(100u64);
+        expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
         q.enqueue(expensive);
 
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         let mut cheap = Job::new(serde_json::json!({}));
-        cheap.metadata["cost"] = serde_json::json!(1u64);
+        cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
         q.enqueue(cheap);
 
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;

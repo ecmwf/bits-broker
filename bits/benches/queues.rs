@@ -13,7 +13,7 @@ fn job() -> Job {
 
 fn job_with_cost(cost: u64) -> Job {
     let mut j = Job::new(serde_json::json!({}));
-    j.metadata["cost"] = serde_json::json!(cost);
+    j.metadata_mut()["cost"] = serde_json::json!(cost);
     j
 }
 
@@ -193,7 +193,7 @@ async fn run_accuracy_trial_with_queue<Q: Queue + 'static>(
             }
 
             let mut job = Job::new_with_id(scheduled.id.clone(), serde_json::json!({}));
-            job.metadata["cost"] = serde_json::json!(scheduled.cost);
+            job.metadata_mut()["cost"] = serde_json::json!(scheduled.cost);
             producer_q.enqueue(job);
         }
     });

@@ -17,17 +17,30 @@ routes:
 "#
 }
 
+fn slow_sweep_config() -> &'static str {
+    r#"
+bits:
+  job_cleanup_interval_ms: 30000
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#
+}
+
 #[tokio::test]
-async fn completed_job_survives_sweeps_while_reconnect_window_active() {
+async fn sweeper_does_not_remove_job_during_reconnect_window() {
     let _ = common::TargetDummyDelay::new(0);
 
     let bits = Arc::new(Bits::from_config(fast_sweep_config()).unwrap());
     let handle = bits.submit(Job::new(serde_json::json!({})));
 
-    // Let several sweep cycles pass while the reconnect window (5s) is still active.
+    // The reconnect buffer is 5s. Sleep 300ms (6 sweep cycles at 50ms) —
+    // the sweeper runs multiple times but client_present() stays true
+    // because the reconnect deadline hasn't expired yet.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Job should still be available — sweeper must not remove it during the reconnect window.
     let outcome = bits.poll(&handle.id, Some(Duration::from_secs(2))).await;
     assert!(
         matches!(outcome, PollOutcome::Ready(_)),
@@ -39,10 +52,11 @@ async fn completed_job_survives_sweeps_while_reconnect_window_active() {
 async fn drop_completes_promptly_via_condvar_wakeup() {
     let _ = common::TargetDummyDelay::new(0);
 
-    let bits = Bits::from_config(fast_sweep_config()).unwrap();
+    // Use a 30-second sweep interval. Without condvar wakeup, join()
+    // would block for up to 30s. With condvar, it completes instantly.
+    let bits = Bits::from_config(slow_sweep_config()).unwrap();
     let _ = bits.submit(Job::new(serde_json::json!({})));
 
-    // Give the job time to complete and the sweeper/heartbeat threads to enter their sleep.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let start = Instant::now();

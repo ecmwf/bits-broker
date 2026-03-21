@@ -321,6 +321,93 @@ pub fn ensure_tiup_playground() -> String {
     pd_endpoint
 }
 
+#[cfg(feature = "nats")]
+struct NatsGuard {
+    child: Child,
+    url: String,
+}
+
+#[cfg(feature = "nats")]
+impl Drop for NatsGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(feature = "nats")]
+fn nats_guard_slot() -> &'static Mutex<Option<NatsGuard>> {
+    static SLOT: OnceLock<Mutex<Option<NatsGuard>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(feature = "nats")]
+fn wait_for_nats_ready(url: &str, timeout: Duration) {
+    let addr = url.strip_prefix("nats://").unwrap_or(url);
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect_timeout(
+            &addr.parse().expect("valid NATS address"),
+            Duration::from_secs(1),
+        )
+        .is_ok()
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("timed out waiting for nats-server at {url}");
+}
+
+#[cfg(feature = "nats")]
+pub fn ensure_nats_server() -> String {
+    if let Ok(url) = std::env::var("BITS_NATS_URL")
+        && !url.is_empty()
+    {
+        return url;
+    }
+
+    let existing = {
+        let slot = nats_guard_slot()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        slot.as_ref().map(|guard| guard.url.clone())
+    };
+    if let Some(url) = existing {
+        return url;
+    }
+
+    let mut slot = nats_guard_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(guard) = slot.as_ref() {
+        return guard.url.clone();
+    }
+
+    let nats_bin = std::env::var("BITS_NATS_BIN").unwrap_or_else(|_| "nats-server".to_string());
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        listener.local_addr().unwrap().port()
+    };
+    let url = format!("nats://127.0.0.1:{port}");
+    let tmp = std::env::temp_dir().join(format!("bits-nats-test-{port}"));
+    let _ = std::fs::create_dir_all(&tmp);
+
+    let child = Command::new(&nats_bin)
+        .args(["-js", "-p", &port.to_string(), "-sd", tmp.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|err| panic!("failed to start nats-server via {nats_bin}: {err}"));
+
+    wait_for_nats_ready(&format!("127.0.0.1:{port}"), Duration::from_secs(10));
+    *slot = Some(NatsGuard {
+        child,
+        url: url.clone(),
+    });
+    url
+}
+
 pub fn test_client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())

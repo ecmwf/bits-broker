@@ -53,7 +53,7 @@ async fn cost_weighted_tiebreak_is_fifo_for_equal_cost() {
 
     for i in 0..5u64 {
         let mut job = Job::new(serde_json::json!({"seq": i}));
-        job.metadata["cost"] = serde_json::json!(10u64);
+        job.metadata_mut()["cost"] = serde_json::json!(10u64);
         q.enqueue(job);
         // Small gap so seq assignment is deterministic relative to enqueue order.
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -104,7 +104,7 @@ async fn cost_weighted_cancelled_waiter_does_not_block() {
 
     // Enqueue a job — the second waiter should get it.
     let mut job = Job::new(serde_json::json!({"value": 42}));
-    job.metadata["cost"] = serde_json::json!(1u64);
+    job.metadata_mut()["cost"] = serde_json::json!(1u64);
     q.enqueue(job);
 
     let result = tokio::time::timeout(Duration::from_secs(2), second)
@@ -139,7 +139,7 @@ async fn age_priority_cancelled_waiter_does_not_block() {
     tokio::time::sleep(Duration::from_millis(5)).await;
 
     let mut job = Job::new(serde_json::json!({"value": 99}));
-    job.metadata["cost"] = serde_json::json!(1u64);
+    job.metadata_mut()["cost"] = serde_json::json!(1u64);
     q.enqueue(job);
 
     let result = tokio::time::timeout(Duration::from_secs(2), second)
@@ -162,7 +162,7 @@ async fn age_priority_tiebreak_is_fifo_for_equal_cost() {
 
     for i in 0..3u64 {
         let mut job = Job::new(serde_json::json!({"seq": i}));
-        job.metadata["cost"] = serde_json::json!(10u64);
+        job.metadata_mut()["cost"] = serde_json::json!(10u64);
         q.enqueue(job);
     }
 
@@ -192,7 +192,7 @@ async fn cost_weighted_missing_cost_defaults_to_zero() {
     let q = CostWeightedQueue::new();
 
     let mut expensive = Job::new(serde_json::json!({"label": "expensive"}));
-    expensive.metadata["cost"] = serde_json::json!(100u64);
+    expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
 
     let no_cost = Job::new(serde_json::json!({"label": "no_cost"}));
 
@@ -216,7 +216,7 @@ async fn age_priority_missing_cost_defaults_to_one() {
     // Enqueue a job with explicit cost=1 and one without cost.
     // They should behave identically — both treated as cost 1.
     let mut explicit = Job::new(serde_json::json!({"label": "explicit"}));
-    explicit.metadata["cost"] = serde_json::json!(1u64);
+    explicit.metadata_mut()["cost"] = serde_json::json!(1u64);
     let no_cost = Job::new(serde_json::json!({"label": "no_cost"}));
 
     // Enqueue explicit first, then no_cost right after.

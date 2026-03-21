@@ -14,7 +14,7 @@ pub struct TransformDummyCost {
 #[async_trait]
 impl TransformAction for TransformDummyCost {
     async fn execute(&self, job: &mut Job) -> Result<TransformResult, ActionError> {
-        job.metadata["cost"] = serde_json::json!(self.cost);
+        job.metadata_mut()["cost"] = serde_json::json!(self.cost);
         Ok(TransformResult::Continue)
     }
 }

@@ -242,19 +242,19 @@ async fn per_pool_queue_policy() {
     wait_for_pool(port, "pool_b").await;
 
     let mut a_expensive = Job::new(serde_json::json!({"class": "a", "label": "a_expensive"}));
-    a_expensive.metadata["cost"] = serde_json::json!(100u64);
+    a_expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
     let h_a_expensive = bits.submit(a_expensive);
 
     let mut a_cheap = Job::new(serde_json::json!({"class": "a", "label": "a_cheap"}));
-    a_cheap.metadata["cost"] = serde_json::json!(1u64);
+    a_cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
     let h_a_cheap = bits.submit(a_cheap);
 
     let mut b_expensive = Job::new(serde_json::json!({"class": "b", "label": "b_expensive"}));
-    b_expensive.metadata["cost"] = serde_json::json!(100u64);
+    b_expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
     let h_b_expensive = bits.submit(b_expensive);
 
     let mut b_cheap = Job::new(serde_json::json!({"class": "b", "label": "b_cheap"}));
-    b_cheap.metadata["cost"] = serde_json::json!(1u64);
+    b_cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
     let h_b_cheap = bits.submit(b_cheap);
 
     let client = Client::new();

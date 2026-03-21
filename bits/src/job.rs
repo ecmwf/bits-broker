@@ -46,10 +46,15 @@ fn default_persisted() -> AtomicBool {
 pub struct Job {
     /// Unique identifier for the job.
     pub id: String,
+    /// Frozen snapshot of the original request. Used as the restart point on broker recovery.
     pub original_request: Arc<Value>,
+    /// Working request, mutated by transform actions as the job flows through the pipeline.
     pub request: Value,
+    /// Arbitrary user-scoped context (auth, client IP, etc.). Immutable after creation.
     pub user: Arc<Value>,
+    /// Creation timestamp used for routing and persistence metadata.
     pub created_at: DateTime<Utc>,
+    /// Free-form metadata available to actions and queue ordering (e.g. cost). Use `metadata_mut()` to modify.
     pub metadata: Arc<Value>,
     /// Set by `Bits::cancel()`. Checked in the pipeline before each action.
     #[serde(skip, default = "default_cancelled")]

@@ -13,13 +13,11 @@ pub struct MetkitExpansion {
 impl TransformAction for MetkitExpansion {
     async fn execute(&self, job: &mut Job) -> Result<TransformResult, ActionError> {
         if self.expand_parameters {
-            let mut map = job
-                .metadata
-                .as_object()
-                .unwrap_or(&serde_json::Map::new())
-                .clone();
-            map.insert("metkit_expanded".to_string(), serde_json::json!(true));
-            job.metadata = std::sync::Arc::new(serde_json::Value::Object(map));
+            let meta = job.metadata_mut();
+            if !meta.is_object() {
+                *meta = serde_json::json!({});
+            }
+            meta["metkit_expanded"] = serde_json::json!(true);
         }
         Ok(TransformResult::Continue)
     }

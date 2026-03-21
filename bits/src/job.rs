@@ -13,7 +13,7 @@ use crate::result::JobResult;
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 fn instant_to_nanos(instant: Instant) -> u64 {
-    instant.duration_since(*EPOCH).as_nanos() as u64
+    instant.saturating_duration_since(*EPOCH).as_nanos() as u64
 }
 
 fn nanos_to_instant(nanos: u64) -> Instant {

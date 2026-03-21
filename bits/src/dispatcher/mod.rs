@@ -6,7 +6,9 @@ pub use queue::{AgePriorityQueue, CostWeightedQueue, FifoQueue, Queue, QueueKind
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -180,21 +182,23 @@ impl<T: Send + 'static> Dispatcher<T> {
         let pending = Arc::clone(&self.pending);
         let queue = Arc::clone(&self.queue);
         let job_to_enqueue = job.clone();
-        let job_for_guard = job_to_enqueue.clone();
+        let cancelled = job.cancelled.clone();
+        let pollers = job.active_pollers.clone();
+        let deadline_nanos = job.reconnect_deadline_nanos.clone();
         Box::pin(async move {
             let guarded_work: BoxFuture<'static, Result<T, ActionError>> = Box::pin(async move {
                 match guard {
                     DispatchGuard::None => {}
                     DispatchGuard::Cancelled => {
-                        if job_for_guard.is_cancelled() {
+                        if cancelled.load(Ordering::Acquire) {
                             return Err(ActionError::Cancelled);
                         }
                     }
                     DispatchGuard::CancelledOrClientGone => {
-                        if job_for_guard.is_cancelled() {
+                        if cancelled.load(Ordering::Acquire) {
                             return Err(ActionError::Cancelled);
                         }
-                        if !job_for_guard.client_present() {
+                        if !crate::job::is_client_present(&pollers, &deadline_nanos) {
                             return Err(ActionError::ClientGone);
                         }
                     }
@@ -203,12 +207,12 @@ impl<T: Send + 'static> Dispatcher<T> {
                 work.await
             });
 
-            // Insert before enqueue so the scheduler always finds the entry.
+            let job_id = job_to_enqueue.id.clone();
             pending
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .insert(job_to_enqueue.id.clone(), (guard, guarded_work, reply_tx));
-            queue.enqueue(job_to_enqueue.clone());
+                .insert(job_id, (guard, guarded_work, reply_tx));
+            queue.enqueue(job_to_enqueue);
 
             reply_rx
                 .await

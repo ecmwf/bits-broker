@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
@@ -199,15 +198,16 @@ impl Bits {
         Some(PollOutcome::Pending { id: id.to_string() })
     }
 
-    pub(crate) fn start_broker_lease_heartbeat(&self, broker_lease_ttl: Duration) {
-        let Some(store) = &self.job_store else {
-            return;
-        };
+    pub(crate) fn start_broker_lease_heartbeat(
+        &self,
+        broker_lease_ttl: Duration,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        let store = self.job_store.as_ref()?;
         let store = Arc::clone(store);
         let broker_id = self.broker_id.clone();
+        let shutdown = self.shutdown.clone();
         let base_url = self.internal_poll_base_url.clone();
-        let stop_flag = self.stop_flag.clone();
-        std::thread::spawn(move || {
+        Some(std::thread::spawn(move || {
             let tick = broker_lease_ttl
                 .div_f64(2.0)
                 .max(Duration::from_millis(100));
@@ -223,7 +223,7 @@ impl Bits {
             };
 
             loop {
-                if stop_flag.load(Ordering::Relaxed) {
+                if shutdown.is_stopped() {
                     if let Err(err) = runtime.block_on(store.delete_broker_lease(&broker_id)) {
                         tracing::debug!(broker_id = %broker_id, error = %err, "lease cleanup on shutdown failed");
                     }
@@ -238,8 +238,8 @@ impl Bits {
                     Ok(()) => {}
                     Err(err) => {
                         tracing::warn!(broker_id = %broker_id, error = %err, "broker lease upsert failed; retrying");
-                        std::thread::sleep(Duration::from_millis(500).min(tick));
-                        if stop_flag.load(Ordering::Relaxed) {
+                        shutdown.wait_timeout(Duration::from_millis(500).min(tick));
+                        if shutdown.is_stopped() {
                             if let Err(err) =
                                 runtime.block_on(store.delete_broker_lease(&broker_id))
                             {
@@ -257,9 +257,9 @@ impl Bits {
                     }
                 }
 
-                std::thread::sleep(tick);
+                shutdown.wait_timeout(tick);
             }
-        });
+        }))
     }
 }
 

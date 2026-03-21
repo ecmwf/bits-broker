@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -9,7 +9,7 @@ use crate::db::{ClaimResult, DbError, PersistenceStore};
 use crate::job::Job;
 use crate::result::JobResult;
 use crate::routing::switch::Switch;
-use crate::runtime::maintenance::{ConnectedGuard, start_sweeper};
+use crate::runtime::maintenance::{ConnectedGuard, ShutdownSignal, start_sweeper};
 use crate::runtime::recovery::{LeaseLookup, owner_from_job_id};
 use crate::runtime::runner::spawn_job;
 
@@ -47,7 +47,9 @@ pub struct Bits {
     pub(crate) persist_after: Option<Duration>,
     pub(crate) job_store: Option<Arc<dyn PersistenceStore>>,
     pub(crate) internal_client: reqwest::Client,
-    pub(crate) stop_flag: Arc<AtomicBool>,
+    pub(crate) shutdown: Arc<ShutdownSignal>,
+    sweeper_handle: Option<std::thread::JoinHandle<()>>,
+    heartbeat_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Bits {
@@ -62,8 +64,8 @@ impl Bits {
         job_store: Option<Arc<dyn PersistenceStore>>,
         broker_lease_ttl: Duration,
     ) -> Self {
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let bits = Bits {
+        let shutdown = Arc::new(ShutdownSignal::new());
+        let mut bits = Bits {
             router: Arc::new(router),
             jobs: Arc::new(DashMap::new()),
             broker_id,
@@ -75,15 +77,17 @@ impl Bits {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to build reqwest client"),
-            stop_flag: stop_flag.clone(),
+            shutdown: shutdown.clone(),
+            sweeper_handle: None,
+            heartbeat_handle: None,
         };
-        start_sweeper(
+        bits.sweeper_handle = Some(start_sweeper(
             bits.jobs.clone(),
             DEFAULT_SWEEP_INTERVAL,
             bits.job_store.clone(),
-            stop_flag,
-        );
-        bits.start_broker_lease_heartbeat(broker_lease_ttl);
+            shutdown,
+        ));
+        bits.heartbeat_handle = bits.start_broker_lease_heartbeat(broker_lease_ttl);
         bits
     }
 
@@ -97,8 +101,8 @@ impl Bits {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let sweep_interval = parsed.sweep_interval.unwrap_or(DEFAULT_SWEEP_INTERVAL);
         let instance_id = format!("{}-{}", parsed.broker_id, uuid::Uuid::new_v4());
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let bits = Bits {
+        let shutdown = Arc::new(ShutdownSignal::new());
+        let mut bits = Bits {
             router: Arc::new(parsed.router),
             jobs: Arc::new(DashMap::new()),
             broker_id: instance_id,
@@ -109,16 +113,18 @@ impl Bits {
             internal_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
-            stop_flag: stop_flag.clone(),
+            shutdown: shutdown.clone(),
+            sweeper_handle: None,
+            heartbeat_handle: None,
         };
 
-        start_sweeper(
+        bits.sweeper_handle = Some(start_sweeper(
             bits.jobs.clone(),
             sweep_interval,
             bits.job_store.clone(),
-            stop_flag,
-        );
-        bits.start_broker_lease_heartbeat(parsed.broker_lease_ttl);
+            shutdown,
+        ));
+        bits.heartbeat_handle = bits.start_broker_lease_heartbeat(parsed.broker_lease_ttl);
 
         Ok(bits)
     }
@@ -149,9 +155,7 @@ impl Bits {
         }
         let job_id = job.id.clone();
 
-        *job.reconnect_deadline
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Instant::now() + RECONNECT_BUFFER;
+        job.set_reconnect_deadline(Instant::now() + RECONNECT_BUFFER);
 
         let job = Arc::new(job);
         self.jobs.insert(job_id.clone(), job.clone());
@@ -173,7 +177,7 @@ impl Bits {
     /// Cancellation is best-effort and is observed at action boundaries.
     pub fn cancel(&self, id: &str) {
         if let Some(job) = self.jobs.get(id) {
-            job.cancelled.store(true, Ordering::Relaxed);
+            job.cancelled.store(true, Ordering::Release);
         }
     }
 
@@ -252,7 +256,7 @@ impl Bits {
     }
 
     fn schedule_durable_cleanup(&self, id: &str, job: &crate::job::Job) {
-        if job.persisted.load(Ordering::Relaxed)
+        if job.persisted.load(Ordering::Acquire)
             && let Some(store) = &self.job_store
         {
             let store = store.clone();
@@ -305,9 +309,7 @@ impl Bits {
             }
         };
 
-        *job.reconnect_deadline
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Instant::now() + RECONNECT_BUFFER;
+        job.set_reconnect_deadline(Instant::now() + RECONNECT_BUFFER);
 
         Some(outcome)
     }
@@ -319,6 +321,12 @@ impl Bits {
 
 impl Drop for Bits {
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
+        self.shutdown.stop();
+        if let Some(handle) = self.sweeper_handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.heartbeat_handle.take() {
+            let _ = handle.join();
+        }
     }
 }

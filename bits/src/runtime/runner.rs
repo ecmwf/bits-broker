@@ -30,7 +30,7 @@ pub(crate) fn spawn_job(
             tokio::pin!(dispatch_fut);
 
             if already_persisted {
-                job.persisted.store(true, Ordering::Relaxed);
+                job.persisted.store(true, Ordering::Release);
             }
 
             let result = if let Some(delay) = persist_after {
@@ -49,7 +49,7 @@ pub(crate) fn spawn_job(
                                 created_at: job.created_at,
                             };
                             match store.upsert_job(record).await {
-                                Ok(_) => job.persisted.store(true, Ordering::Relaxed),
+                                Ok(_) => job.persisted.store(true, Ordering::Release),
                                 Err(err) => tracing::warn!(job.id = %job.id, error = %err, "delayed persist failed"),
                             }
                         }

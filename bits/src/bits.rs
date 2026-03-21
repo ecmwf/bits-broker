@@ -335,11 +335,15 @@ impl Drop for Bits {
         // persistence I/O (e.g. TiKV); that should be bounded by the backend's
         // own client timeout, not ours.
         self.shutdown.stop();
-        if let Some(handle) = self.sweeper_handle.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.sweeper_handle.take()
+            && let Err(panic) = handle.join()
+        {
+            tracing::error!("sweeper thread panicked during shutdown: {panic:?}");
         }
-        if let Some(handle) = self.heartbeat_handle.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.heartbeat_handle.take()
+            && let Err(panic) = handle.join()
+        {
+            tracing::error!("heartbeat thread panicked during shutdown: {panic:?}");
         }
     }
 }

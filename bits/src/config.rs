@@ -81,6 +81,8 @@ struct BitsConfig {
     #[serde(default)]
     tikv: Option<TiKvConfig>,
     #[serde(default)]
+    nats: Option<NatsConfig>,
+    #[serde(default)]
     worker_server: Option<WorkerServerConfig>,
 }
 
@@ -90,6 +92,32 @@ struct TiKvConfig {
     endpoints: Vec<String>,
     #[serde(default = "default_broker_lease_ttl_secs")]
     broker_lease_ttl_secs: f64,
+}
+
+#[cfg_attr(not(feature = "nats"), allow(dead_code))]
+#[derive(Debug, Deserialize)]
+struct NatsConfig {
+    url: String,
+    #[serde(default = "default_nats_jobs_bucket")]
+    jobs_bucket: String,
+    #[serde(default = "default_nats_leases_bucket")]
+    leases_bucket: String,
+    #[serde(default = "default_broker_lease_ttl_secs")]
+    broker_lease_ttl_secs: f64,
+    #[serde(default = "default_nats_num_replicas")]
+    num_replicas: usize,
+}
+
+fn default_nats_jobs_bucket() -> String {
+    "bits-jobs".to_string()
+}
+
+fn default_nats_leases_bucket() -> String {
+    "bits-leases".to_string()
+}
+
+fn default_nats_num_replicas() -> usize {
+    1
 }
 
 #[cfg(feature = "tikv")]
@@ -201,6 +229,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             poll_timeout_ms: None,
             persist_guard_ms: None,
             tikv: None,
+            nats: None,
             worker_server: None,
         });
 
@@ -232,35 +261,70 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
         );
     }
 
-    let (job_store, broker_lease_ttl) = match bits_cfg.tikv {
-        Some(tikv) => {
-            if tikv.endpoints.is_empty() {
-                return Err("bits.tikv.endpoints must not be empty".into());
-            }
-            let ttl = Duration::try_from_secs_f64(tikv.broker_lease_ttl_secs).map_err(
-                |e| -> Box<dyn std::error::Error> {
-                    format!("bits.tikv.broker_lease_ttl_secs: {e}").into()
-                },
-            )?;
-            if ttl < Duration::from_secs(1) {
-                return Err("bits.tikv.broker_lease_ttl_secs must be at least 1 second".into());
-            }
-            #[cfg(not(feature = "tikv"))]
-            {
-                return Err("bits.tikv configured but crate built without 'tikv' feature".into());
-            }
-            #[cfg(feature = "tikv")]
-            {
-                (
-                    Some(Arc::new(StoreFactory::new(tikv.endpoints)) as Arc<dyn PersistenceStore>),
-                    ttl,
-                )
-            }
+    let (job_store, broker_lease_ttl) = if let Some(tikv) = bits_cfg.tikv {
+        if tikv.endpoints.is_empty() {
+            return Err("bits.tikv.endpoints must not be empty".into());
         }
-        None => (
+        let ttl = Duration::try_from_secs_f64(tikv.broker_lease_ttl_secs).map_err(
+            |e| -> Box<dyn std::error::Error> {
+                format!("bits.tikv.broker_lease_ttl_secs: {e}").into()
+            },
+        )?;
+        if ttl < Duration::from_secs(1) {
+            return Err("bits.tikv.broker_lease_ttl_secs must be at least 1 second".into());
+        }
+        #[cfg(not(feature = "tikv"))]
+        {
+            return Err("bits.tikv configured but crate built without 'tikv' feature".into());
+        }
+        #[cfg(feature = "tikv")]
+        {
+            (
+                Some(Arc::new(StoreFactory::new(tikv.endpoints)) as Arc<dyn PersistenceStore>),
+                ttl,
+            )
+        }
+    } else if let Some(nats_cfg) = bits_cfg.nats {
+        if nats_cfg.url.is_empty() {
+            return Err("bits.nats.url must not be empty".into());
+        }
+        let ttl = Duration::try_from_secs_f64(nats_cfg.broker_lease_ttl_secs).map_err(
+            |e| -> Box<dyn std::error::Error> {
+                format!("bits.nats.broker_lease_ttl_secs: {e}").into()
+            },
+        )?;
+        if ttl < Duration::from_secs(1) {
+            return Err("bits.nats.broker_lease_ttl_secs must be at least 1 second".into());
+        }
+        #[cfg(not(feature = "nats"))]
+        {
+            return Err("bits.nats configured but crate built without 'nats' feature".into());
+        }
+        #[cfg(feature = "nats")]
+        {
+            let store = crate::db::nats::NatsStore::new(
+                nats_cfg.url,
+                nats_cfg.jobs_bucket,
+                nats_cfg.leases_bucket,
+                ttl,
+                nats_cfg.num_replicas,
+            );
+            // Eager init on the caller's runtime so the NATS client's
+            // internal tasks live on the same runtime as subsequent operations.
+            // Requires a multi-threaded runtime (production binaries use #[tokio::main]).
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(store.init())
+            })
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("NATS store init failed: {e}").into()
+            })?;
+            (Some(Arc::new(store) as Arc<dyn PersistenceStore>), ttl)
+        }
+    } else {
+        (
             None,
             Duration::from_secs_f64(default_broker_lease_ttl_secs()),
-        ),
+        )
     };
 
     let server_config: ServerConfig = raw

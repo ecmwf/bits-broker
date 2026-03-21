@@ -1,4 +1,6 @@
 pub mod memory;
+#[cfg(feature = "nats")]
+pub mod nats;
 #[cfg(feature = "tikv")]
 pub mod tikv;
 

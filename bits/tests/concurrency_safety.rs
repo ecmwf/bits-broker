@@ -7,7 +7,8 @@ use bits::{Bits, Job, PollOutcome};
 
 fn fast_sweep_config() -> &'static str {
     r#"
-sweep_interval_ms: 50
+bits:
+  job_cleanup_interval_ms: 50
 routes:
   - default:
       - target::dummy_dispatch:

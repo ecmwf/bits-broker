@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use crate::result::JobResult;
 
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-fn instant_to_nanos(instant: Instant) -> u64 {
+pub(crate) fn instant_to_nanos(instant: Instant) -> u64 {
     instant.saturating_duration_since(*EPOCH).as_nanos() as u64
 }
 
@@ -24,8 +24,8 @@ fn default_cancelled() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
-fn default_client_connected() -> Arc<AtomicBool> {
-    Arc::new(AtomicBool::new(false))
+fn default_active_pollers() -> Arc<AtomicUsize> {
+    Arc::new(AtomicUsize::new(0))
 }
 
 fn default_reconnect_deadline_nanos() -> Arc<AtomicU64> {
@@ -55,9 +55,9 @@ pub struct Job {
     /// Set by `Bits::cancel()`. Checked in the pipeline before each action.
     #[serde(skip, default = "default_cancelled")]
     pub(crate) cancelled: Arc<AtomicBool>,
-    /// True while a `Bits::poll()` call is in flight for this job.
-    #[serde(skip, default = "default_client_connected")]
-    pub(crate) client_connected: Arc<AtomicBool>,
+    /// Number of active `Bits::poll()` calls for this job (refcount, not boolean).
+    #[serde(skip, default = "default_active_pollers")]
+    pub(crate) active_pollers: Arc<AtomicUsize>,
     /// Deadline by which the client must reconnect after a poll completes.
     /// Stored as nanoseconds since process-epoch for lock-free access.
     #[serde(skip, default = "default_reconnect_deadline_nanos")]
@@ -90,7 +90,7 @@ impl Job {
             created_at: Utc::now(),
             metadata: serde_json::json!({}),
             cancelled: default_cancelled(),
-            client_connected: default_client_connected(),
+            active_pollers: default_active_pollers(),
             reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
             persisted: AtomicBool::new(false),
             result: Mutex::new(None),
@@ -108,7 +108,7 @@ impl Job {
             created_at: record.created_at,
             metadata: record.metadata,
             cancelled: default_cancelled(),
-            client_connected: default_client_connected(),
+            active_pollers: default_active_pollers(),
             reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
             persisted: AtomicBool::new(false),
             result: Mutex::new(None),
@@ -123,7 +123,7 @@ impl Job {
 
     /// Returns true if the client is currently polling or is within the reconnect window.
     pub fn client_present(&self) -> bool {
-        self.client_connected.load(Ordering::Acquire)
+        self.active_pollers.load(Ordering::Acquire) > 0
             || Instant::now()
                 < nanos_to_instant(self.reconnect_deadline_nanos.load(Ordering::Acquire))
     }
@@ -147,7 +147,7 @@ impl Clone for Job {
             // Lifecycle arcs — share the same underlying state so the pipeline
             // clone can still read cancellation / client-presence correctly.
             cancelled: self.cancelled.clone(),
-            client_connected: self.client_connected.clone(),
+            active_pollers: self.active_pollers.clone(),
             reconnect_deadline_nanos: self.reconnect_deadline_nanos.clone(),
             // Result slot, notifier, and persisted flag are not shared — the
             // pipeline clone never writes results or persistence state.

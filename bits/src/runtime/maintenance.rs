@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
 use crate::db::PersistenceStore;
-use crate::job::Job;
+use crate::job::{self, Job};
 
 /// Shared shutdown signal that can wake blocked threads immediately.
 pub(crate) struct ShutdownSignal {
@@ -40,18 +40,33 @@ impl ShutdownSignal {
     }
 }
 
-pub(crate) struct ConnectedGuard(Arc<AtomicBool>);
+pub(crate) struct ConnectedGuard {
+    pollers: Arc<AtomicUsize>,
+    deadline_nanos: Arc<AtomicU64>,
+    reconnect_buffer: Duration,
+}
 
 impl ConnectedGuard {
-    pub(crate) fn new(flag: Arc<AtomicBool>) -> Self {
-        flag.store(true, Ordering::Release);
-        Self(flag)
+    pub(crate) fn new(
+        pollers: Arc<AtomicUsize>,
+        deadline_nanos: Arc<AtomicU64>,
+        reconnect_buffer: Duration,
+    ) -> Self {
+        pollers.fetch_add(1, Ordering::Release);
+        Self {
+            pollers,
+            deadline_nanos,
+            reconnect_buffer,
+        }
     }
 }
 
 impl Drop for ConnectedGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        let deadline = Instant::now() + self.reconnect_buffer;
+        self.deadline_nanos
+            .store(job::instant_to_nanos(deadline), Ordering::Release);
+        self.pollers.fetch_sub(1, Ordering::Release);
     }
 }
 

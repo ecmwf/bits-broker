@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -48,6 +48,7 @@ pub struct Bits {
     pub(crate) job_store: Option<Arc<dyn PersistenceStore>>,
     pub(crate) internal_client: reqwest::Client,
     pub(crate) shutdown: Arc<ShutdownSignal>,
+    pub(crate) in_flight: Arc<AtomicUsize>,
     sweeper_handle: Option<std::thread::JoinHandle<()>>,
     heartbeat_handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -78,6 +79,7 @@ impl Bits {
                 .build()
                 .expect("failed to build reqwest client"),
             shutdown: shutdown.clone(),
+            in_flight: Arc::new(AtomicUsize::new(0)),
             sweeper_handle: None,
             heartbeat_handle: None,
         };
@@ -114,6 +116,7 @@ impl Bits {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             shutdown: shutdown.clone(),
+            in_flight: Arc::new(AtomicUsize::new(0)),
             sweeper_handle: None,
             heartbeat_handle: None,
         };
@@ -167,6 +170,7 @@ impl Bits {
             self.persist_after,
             self.broker_id.clone(),
             already_persisted,
+            self.in_flight.clone(),
         );
 
         JobHandle { id: job_id }
@@ -272,7 +276,11 @@ impl Bits {
     async fn poll_local(&self, id: &str, timeout: Option<Duration>) -> Option<PollOutcome> {
         let job = self.jobs.get(id).map(|r| r.clone())?;
 
-        let _guard = ConnectedGuard::new(job.client_connected.clone());
+        let _guard = ConnectedGuard::new(
+            job.active_pollers.clone(),
+            job.reconnect_deadline_nanos.clone(),
+            RECONNECT_BUFFER,
+        );
 
         let notified = job.notify.notified();
         tokio::pin!(notified);
@@ -317,8 +325,6 @@ impl Bits {
                 }
             }
         };
-
-        job.set_reconnect_deadline(Instant::now() + RECONNECT_BUFFER);
 
         Some(outcome)
     }

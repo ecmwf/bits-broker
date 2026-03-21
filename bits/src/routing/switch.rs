@@ -248,7 +248,7 @@ mod tests {
         )]);
 
         // Job::new() has reconnect_deadline = Instant::now() (immediately expired)
-        // and client_connected = false, so client_present() returns false.
+        // and active_pollers = 0, so client_present() returns false.
         let job = Job::new(serde_json::json!({}));
         let result = switch.dispatch(&job).await;
         assert!(matches!(result, Err(ActionError::ClientGone)));

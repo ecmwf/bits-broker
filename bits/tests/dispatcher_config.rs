@@ -337,3 +337,63 @@ routes:
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn completely_invalid_yaml_is_rejected() {
+    assert!(Bits::from_config("{{{{not yaml at all").is_err());
+}
+
+#[test]
+fn non_mapping_yaml_is_rejected() {
+    assert!(Bits::from_config("just a plain string").is_err());
+}
+
+#[test]
+fn missing_routes_section_is_rejected() {
+    let config = r#"
+bits:
+  job_cleanup_interval_ms: 100
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(err.contains("routes"), "expected routes error, got: {err}");
+}
+
+#[test]
+fn unknown_action_namespace_is_rejected() {
+    let config = r#"
+routes:
+  - default:
+      - banana::something: ~
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.to_lowercase().contains("unknown"),
+        "expected unknown namespace error, got: {err}"
+    );
+}
+
+#[test]
+fn unknown_action_name_is_rejected() {
+    let config = r#"
+routes:
+  - default:
+      - target::this_target_does_not_exist: ~
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.to_lowercase().contains("unknown"),
+        "expected unknown action error, got: {err}"
+    );
+}
+
+#[test]
+fn routes_must_be_array() {
+    let config = r#"
+routes:
+  default:
+    - target::http:
+        url: "http://example.com"
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(err.contains("array"), "expected array error, got: {err}");
+}

@@ -98,12 +98,11 @@ impl WorkerServer {
     /// Returns an error if the TCP listener cannot bind (e.g. port in use).
     /// Panics if called more than once.
     pub fn start(&self) -> Result<(), String> {
-        self.started
-            .set(())
-            .expect("WorkerServer::start called more than once");
-
         let pools = self.pools.lock().unwrap_or_else(|p| p.into_inner());
         if pools.is_empty() {
+            self.started
+                .set(())
+                .expect("WorkerServer::start called more than once");
             return Ok(());
         }
 
@@ -118,16 +117,15 @@ impl WorkerServer {
         std_listener
             .set_nonblocking(true)
             .map_err(|e| format!("worker server: failed to set non-blocking on listener: {e}"))?;
-        let local_addr = std_listener.local_addr();
+        let listener = tokio::net::TcpListener::from_std(std_listener)
+            .map_err(|e| format!("worker server: failed to convert listener to async: {e}"))?;
+        let local_addr = listener.local_addr();
+
+        self.started
+            .set(())
+            .expect("WorkerServer::start called more than once");
 
         tokio::spawn(async move {
-            let listener = match tokio::net::TcpListener::from_std(std_listener) {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::error!(error = %e, "worker server: failed to convert listener to async");
-                    return;
-                }
-            };
             match local_addr {
                 Ok(addr) => tracing::info!(address = %addr, "worker server listening"),
                 Err(_) => tracing::info!(address = %bind_addr, "worker server listening"),
@@ -232,6 +230,20 @@ mod tests {
         let ws2 = ws.clone();
         let result = std::panic::catch_unwind(move || ws2.start());
         assert!(result.is_err(), "second call to start() should panic");
+    }
+
+    #[tokio::test]
+    async fn start_returns_error_when_port_occupied() {
+        let blocker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = blocker.local_addr().unwrap().port();
+
+        let ws = WorkerServer::new("127.0.0.1", port);
+        ws.register_pool("pool", Router::new()).unwrap();
+        let err = ws.start().unwrap_err();
+        assert!(
+            err.contains("failed to bind"),
+            "expected bind error, got: {err}"
+        );
     }
 
     #[tokio::test]

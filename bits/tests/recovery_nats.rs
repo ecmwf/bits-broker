@@ -82,7 +82,7 @@ async fn wait_for_owner(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Some(owner) = observed_owner(store, job_id).await
-            && owner.contains(expected_broker)
+            && owner.starts_with(expected_broker)
         {
             return;
         }

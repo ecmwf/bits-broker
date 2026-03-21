@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [features]
 default = []
 tikv = ["dep:tikv-client"]
+nats = ["dep:async-nats"]
 
 [[example]]
 name = "hello_bits"
@@ -35,6 +36,7 @@ axum = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tikv-client = { version = "0.3", optional = true }
+async-nats = { version = "0.38", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

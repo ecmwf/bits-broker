@@ -146,8 +146,8 @@ fn default_timeout_ms() -> u64 {
 struct WorkResponse {
     job_id: String,
     request: serde_json::Value,
-    user: serde_json::Value,
-    metadata: serde_json::Value,
+    user: std::sync::Arc<serde_json::Value>,
+    metadata: std::sync::Arc<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -287,8 +287,8 @@ async fn handle_get_work(
     let resp = WorkResponse {
         job_id: job.id.clone(),
         request: job.request.clone(),
-        user: (*job.user).clone(),
-        metadata: (*job.metadata).clone(),
+        user: job.user.clone(),
+        metadata: job.metadata.clone(),
     };
 
     Ok(Json(resp))

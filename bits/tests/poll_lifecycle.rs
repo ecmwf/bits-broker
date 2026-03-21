@@ -83,18 +83,19 @@ async fn many_concurrent_submits_all_complete() {
     let _ = common::TargetDummyDelay::new(0);
     let bits = Arc::new(Bits::from_config(default_config()).unwrap());
 
-    let futs: Vec<_> = (0..50)
+    let handles: Vec<_> = (0..50)
         .map(|i| {
             let bits = bits.clone();
-            async move {
+            tokio::spawn(async move {
                 let h = bits.submit(Job::new(serde_json::json!({"i": i})));
                 bits.poll(&h.id, Some(Duration::from_secs(5))).await
-            }
+            })
         })
         .collect();
 
-    let results = futures::future::join_all(futs).await;
-    for (i, outcome) in results.into_iter().enumerate() {
+    let results = futures::future::join_all(handles).await;
+    for (i, result) in results.into_iter().enumerate() {
+        let outcome = result.expect("task should not panic");
         assert!(
             matches!(outcome, PollOutcome::Ready(JobResult::Redirect { .. })),
             "job {i} expected Ready(Redirect), got {outcome:?}"

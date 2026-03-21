@@ -1,6 +1,6 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,16 @@ use tokio::sync::Notify;
 use crate::db::PersistentJobRecord;
 use crate::result::JobResult;
 
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+fn instant_to_nanos(instant: Instant) -> u64 {
+    instant.duration_since(*EPOCH).as_nanos() as u64
+}
+
+fn nanos_to_instant(nanos: u64) -> Instant {
+    *EPOCH + Duration::from_nanos(nanos)
+}
+
 fn default_cancelled() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
@@ -18,9 +28,8 @@ fn default_client_connected() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
-fn default_reconnect_deadline() -> Arc<Mutex<Instant>> {
-    // Initialise to now (already expired) — no client assumed on deserialisation.
-    Arc::new(Mutex::new(Instant::now()))
+fn default_reconnect_deadline_nanos() -> Arc<AtomicU64> {
+    Arc::new(AtomicU64::new(instant_to_nanos(Instant::now())))
 }
 
 fn default_persisted() -> AtomicBool {
@@ -50,8 +59,9 @@ pub struct Job {
     #[serde(skip, default = "default_client_connected")]
     pub(crate) client_connected: Arc<AtomicBool>,
     /// Deadline by which the client must reconnect after a poll completes.
-    #[serde(skip, default = "default_reconnect_deadline")]
-    pub(crate) reconnect_deadline: Arc<Mutex<Instant>>,
+    /// Stored as nanoseconds since process-epoch for lock-free access.
+    #[serde(skip, default = "default_reconnect_deadline_nanos")]
+    pub(crate) reconnect_deadline_nanos: Arc<AtomicU64>,
     /// True once a durable record has been successfully written for this job.
     /// Used by poll and sweeper to know whether durable cleanup is needed.
     #[serde(skip, default = "default_persisted")]
@@ -81,7 +91,7 @@ impl Job {
             metadata: serde_json::json!({}),
             cancelled: default_cancelled(),
             client_connected: default_client_connected(),
-            reconnect_deadline: default_reconnect_deadline(),
+            reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
             persisted: AtomicBool::new(false),
             result: Mutex::new(None),
             notify: Notify::new(),
@@ -99,7 +109,7 @@ impl Job {
             metadata: record.metadata,
             cancelled: default_cancelled(),
             client_connected: default_client_connected(),
-            reconnect_deadline: default_reconnect_deadline(),
+            reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
             persisted: AtomicBool::new(false),
             result: Mutex::new(None),
             notify: Notify::new(),
@@ -108,17 +118,19 @@ impl Job {
 
     /// Returns whether cancellation has been requested for this job.
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.cancelled.load(Ordering::Acquire)
     }
 
     /// Returns true if the client is currently polling or is within the reconnect window.
     pub fn client_present(&self) -> bool {
-        self.client_connected.load(Ordering::Relaxed)
+        self.client_connected.load(Ordering::Acquire)
             || Instant::now()
-                < *self
-                    .reconnect_deadline
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
+                < nanos_to_instant(self.reconnect_deadline_nanos.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn set_reconnect_deadline(&self, deadline: Instant) {
+        self.reconnect_deadline_nanos
+            .store(instant_to_nanos(deadline), Ordering::Release);
     }
 }
 
@@ -136,7 +148,7 @@ impl Clone for Job {
             // clone can still read cancellation / client-presence correctly.
             cancelled: self.cancelled.clone(),
             client_connected: self.client_connected.clone(),
-            reconnect_deadline: self.reconnect_deadline.clone(),
+            reconnect_deadline_nanos: self.reconnect_deadline_nanos.clone(),
             // Result slot, notifier, and persisted flag are not shared — the
             // pipeline clone never writes results or persistence state.
             persisted: AtomicBool::new(false),
@@ -149,7 +161,7 @@ impl Clone for Job {
 #[cfg(test)]
 impl Job {
     pub(crate) fn set_reconnect_deadline_for_test(&self, deadline: Instant) {
-        *self.reconnect_deadline.lock().unwrap() = deadline;
+        self.set_reconnect_deadline(deadline);
     }
 }
 

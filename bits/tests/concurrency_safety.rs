@@ -68,3 +68,29 @@ async fn drop_completes_promptly_via_condvar_wakeup() {
         "drop took {elapsed:?}; expected well under the 30s sweep interval"
     );
 }
+
+#[tokio::test]
+async fn concurrent_poll_and_sweep_do_not_deadlock() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let bits = Arc::new(Bits::from_config(fast_sweep_config()).unwrap());
+
+    let mut handles = Vec::new();
+    for _ in 0..20 {
+        let bits = bits.clone();
+        handles.push(tokio::spawn(async move {
+            let h = bits.submit(Job::new(serde_json::json!({})));
+            bits.poll(&h.id, Some(Duration::from_secs(5))).await
+        }));
+    }
+
+    // All 20 submit-then-poll cycles must complete without deadlock.
+    let results = futures::future::join_all(handles).await;
+    for r in results {
+        let outcome = r.expect("task should not panic");
+        assert!(
+            matches!(outcome, PollOutcome::Ready(_)),
+            "expected Ready, got {outcome:?}"
+        );
+    }
+}

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use tracing::Instrument;
@@ -10,6 +10,21 @@ use crate::job::Job;
 use crate::result::JobResult;
 use crate::routing::switch::Switch;
 
+struct InFlightGuard(Arc<AtomicUsize>);
+
+impl InFlightGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Release);
+        Self(counter)
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
+
 pub(crate) fn spawn_job(
     router: Arc<Switch>,
     job: Arc<Job>,
@@ -17,12 +32,15 @@ pub(crate) fn spawn_job(
     persist_after: Option<std::time::Duration>,
     broker_id: String,
     already_persisted: bool,
+    in_flight: Arc<AtomicUsize>,
 ) {
     let span = tracing::info_span!("job", job.id = %job.id);
     tracing::info!(parent: &span, "job received");
 
+    let _guard = InFlightGuard::new(in_flight);
     tokio::spawn(
         async move {
+            let _in_flight = _guard;
             let started = Instant::now();
             let router_for_dispatch = Arc::clone(&router);
             let job_for_dispatch = (*job).clone();
@@ -38,6 +56,7 @@ pub(crate) fn spawn_job(
                     result = &mut dispatch_fut => result,
                     _ = tokio::time::sleep(delay) => {
                         if let Some(store) = &store
+                            && !job.persisted.load(Ordering::Acquire)
                             && job.result.lock().unwrap_or_else(|p| p.into_inner()).is_none()
                         {
                             let record = PersistentJobRecord {

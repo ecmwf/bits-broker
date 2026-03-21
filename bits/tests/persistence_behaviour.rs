@@ -570,7 +570,10 @@ routes:
         .err()
         .expect("expected tiny lease TTL config to fail")
         .to_string();
-    assert!(err.contains("broker_lease_ttl_secs"));
+    assert!(
+        err.contains("at least 1 second"),
+        "expected 'at least 1 second' in error, got: {err}"
+    );
 }
 
 #[tokio::test]

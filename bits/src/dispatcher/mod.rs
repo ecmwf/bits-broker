@@ -138,15 +138,14 @@ impl<T: Send + 'static> Dispatcher<T> {
                 let worker_server = worker_server.ok_or_else(|| {
                     "remote_pool executor requires bits.worker_server to be configured".to_string()
                 })?;
-                if !cfg.heartbeat_timeout_secs.is_finite() || cfg.heartbeat_timeout_secs <= 0.0 {
-                    return Err(
-                        "remote_pool: heartbeat_timeout_secs must be a finite positive number"
-                            .to_string(),
-                    );
+                let heartbeat_timeout = Duration::try_from_secs_f64(cfg.heartbeat_timeout_secs)
+                    .map_err(|e| format!("remote_pool: invalid heartbeat_timeout_secs: {e}"))?;
+                if heartbeat_timeout.is_zero() {
+                    return Err("remote_pool: heartbeat_timeout_secs must be positive".to_string());
                 }
                 let concrete: Arc<dyn Executor<TargetResult>> = Arc::new(RemotePoolExecutor::new(
                     pool_name,
-                    Duration::from_secs_f64(cfg.heartbeat_timeout_secs),
+                    heartbeat_timeout,
                     worker_server,
                 ));
                 let any: Box<dyn Any> = Box::new(concrete);

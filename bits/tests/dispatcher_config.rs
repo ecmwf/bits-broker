@@ -155,6 +155,56 @@ routes:
     );
 }
 
+#[tokio::test]
+async fn remote_pool_rejects_zero_heartbeat_timeout() {
+    let config = r#"
+bits:
+  worker_server:
+    host: "127.0.0.1"
+    port: 0
+targets:
+  pool:
+    type: remote
+    dispatcher:
+      executor:
+        type: remote_pool
+        heartbeat_timeout_secs: 0
+routes:
+  - default:
+      - target::pool
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("heartbeat_timeout_secs"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn remote_pool_rejects_negative_heartbeat_timeout() {
+    let config = r#"
+bits:
+  worker_server:
+    host: "127.0.0.1"
+    port: 0
+targets:
+  pool:
+    type: remote
+    dispatcher:
+      executor:
+        type: remote_pool
+        heartbeat_timeout_secs: -5.0
+routes:
+  - default:
+      - target::pool
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("heartbeat_timeout_secs"),
+        "unexpected error: {err}"
+    );
+}
+
 #[test]
 fn remote_target_rejected_with_non_remote_executor() {
     let config = r#"

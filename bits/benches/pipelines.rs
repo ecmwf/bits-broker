@@ -64,54 +64,50 @@ fn make_bits(config: &str) -> Bits {
 fn config_target_only() -> &'static str {
     r#"
 routes:
-  default:
-    - target::noop: ~
+  - default:
+      - target::noop: ~
 "#
 }
 
-/// Single check → target.
 fn config_check_target() -> &'static str {
     r#"
 routes:
-  default:
-    - check::noop_check: ~
-    - target::noop: ~
+  - default:
+      - check::noop_check: ~
+      - target::noop: ~
 "#
 }
 
-/// Single transform → target.
 fn config_transform_target() -> &'static str {
     r#"
 routes:
-  default:
-    - transform::noop_transform: ~
-    - target::noop: ~
+  - default:
+      - transform::noop_transform: ~
+      - target::noop: ~
 "#
 }
 
-/// Check → transform → target (typical minimal pipeline).
 fn config_full_pipeline() -> &'static str {
     r#"
 routes:
-  default:
-    - check::noop_check: ~
-    - transform::noop_transform: ~
-    - target::noop: ~
+  - default:
+      - check::noop_check: ~
+      - transform::noop_transform: ~
+      - target::noop: ~
 "#
 }
 
-/// 3 checks → 3 transforms → target (deeper pipeline).
 fn config_deep_pipeline() -> &'static str {
     r#"
 routes:
-  default:
-    - check::noop_check: ~
-    - check::noop_check: ~
-    - check::noop_check: ~
-    - transform::noop_transform: ~
-    - transform::noop_transform: ~
-    - transform::noop_transform: ~
-    - target::noop: ~
+  - default:
+      - check::noop_check: ~
+      - check::noop_check: ~
+      - check::noop_check: ~
+      - transform::noop_transform: ~
+      - transform::noop_transform: ~
+      - transform::noop_transform: ~
+      - target::noop: ~
 "#
 }
 
@@ -150,7 +146,37 @@ fn bench_latency(c: &mut Criterion) {
     group.finish();
 }
 
-/// Throughput: N concurrent jobs for each pipeline configuration.
+fn large_request() -> serde_json::Value {
+    serde_json::json!({
+        "class": "od", "type": "fc", "stream": "oper", "expver": "0001",
+        "date": "2024-01-15/to/2024-01-20", "time": "00:00:00/06:00:00/12:00:00/18:00:00",
+        "step": "0/6/12/18/24/30/36/42/48", "levtype": "pl",
+        "levelist": "1/2/3/5/7/10/20/30/50/70/100/150/200/250/300/400/500/600/700/800/850/900/925/950/1000",
+        "param": "129/130/131/132/133/135/138/155/157/203/246/247/248",
+        "area": "90/-180/-90/180", "grid": "0.25/0.25",
+        "user": {"name": "alice", "group": "research", "project": "climate-2024"},
+        "metadata": {"priority": 5, "cost_estimate": 1200, "source": "web-api"}
+    })
+}
+
+fn bench_latency_large(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut group = c.benchmark_group("latency_large");
+    group.throughput(Throughput::Elements(1));
+
+    for &(name, config_fn) in CONFIGS {
+        let bits = make_bits(config_fn());
+        group.bench_function(BenchmarkId::new("submit_poll", name), |b| {
+            b.to_async(&rt).iter(|| async {
+                let handle = bits.submit(Job::new(large_request()));
+                bits.poll(&handle.id, None).await
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_throughput(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("throughput");
@@ -181,5 +207,39 @@ fn bench_throughput(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_latency, bench_throughput);
+fn bench_throughput_large(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut group = c.benchmark_group("throughput_large");
+
+    let bits = std::sync::Arc::new(make_bits(config_deep_pipeline()));
+
+    for &n in &[4u32, 32, 128] {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("deep_pipeline", n), &n, |b, &n| {
+            let bits = bits.clone();
+            b.to_async(&rt).iter(|| async {
+                let futs: Vec<_> = (0..n)
+                    .map(|_| {
+                        let bits = bits.clone();
+                        async move {
+                            let handle = bits.submit(Job::new(large_request()));
+                            bits.poll(&handle.id, None).await
+                        }
+                    })
+                    .collect();
+                futures::future::join_all(futs).await
+            });
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_latency,
+    bench_latency_large,
+    bench_throughput,
+    bench_throughput_large
+);
 criterion_main!(benches);

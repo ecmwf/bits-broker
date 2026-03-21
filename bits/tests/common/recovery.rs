@@ -325,6 +325,7 @@ pub fn ensure_tiup_playground() -> String {
 struct NatsGuard {
     child: Child,
     url: String,
+    data_dir: std::path::PathBuf,
 }
 
 #[cfg(feature = "nats")]
@@ -332,6 +333,7 @@ impl Drop for NatsGuard {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.data_dir);
     }
 }
 
@@ -342,21 +344,21 @@ fn nats_guard_slot() -> &'static Mutex<Option<NatsGuard>> {
 }
 
 #[cfg(feature = "nats")]
-fn wait_for_nats_ready(url: &str, timeout: Duration) {
-    let addr = url.strip_prefix("nats://").unwrap_or(url);
+fn wait_for_nats_ready(host: &str, port: u16, timeout: Duration) {
+    use std::net::ToSocketAddrs;
+
+    let addr_str = format!("{host}:{port}");
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        if std::net::TcpStream::connect_timeout(
-            &addr.parse().expect("valid NATS address"),
-            Duration::from_secs(1),
-        )
-        .is_ok()
+        if let Ok(mut addrs) = addr_str.to_socket_addrs()
+            && let Some(addr) = addrs.next()
+            && std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
         {
             return;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    panic!("timed out waiting for nats-server at {url}");
+    panic!("timed out waiting for nats-server at {addr_str}");
 }
 
 #[cfg(feature = "nats")]
@@ -391,6 +393,7 @@ pub fn ensure_nats_server() -> String {
     };
     let url = format!("nats://127.0.0.1:{port}");
     let tmp = std::env::temp_dir().join(format!("bits-nats-test-{port}"));
+    let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::create_dir_all(&tmp);
 
     let child = Command::new(&nats_bin)
@@ -400,10 +403,11 @@ pub fn ensure_nats_server() -> String {
         .spawn()
         .unwrap_or_else(|err| panic!("failed to start nats-server via {nats_bin}: {err}"));
 
-    wait_for_nats_ready(&format!("127.0.0.1:{port}"), Duration::from_secs(10));
+    wait_for_nats_ready("127.0.0.1", port, Duration::from_secs(10));
     *slot = Some(NatsGuard {
         child,
         url: url.clone(),
+        data_dir: tmp,
     });
     url
 }

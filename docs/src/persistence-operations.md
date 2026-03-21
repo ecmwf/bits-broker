@@ -16,12 +16,17 @@ All options live under the `bits:` key in your YAML config file.
 | `poll_timeout_ms` | integer (ms) | `30000` | Used only for config validation (see below). Not enforced at runtime. |
 | `persist_guard_ms` | integer (ms) | `1000` | Used only for config validation (see below). Not enforced at runtime. |
 
-### TiKV options (`bits.tikv`)
+### Persistence options (`bits.persistence`)
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `endpoints` | list of strings | *(required)* | TiKV PD endpoints, e.g. `["pd:2379"]`. Must be non-empty. |
+| `type` | string | *(required)* | Backend type: `nats` or `tikv`. |
 | `broker_lease_ttl_secs` | float | `30.0` | Lease TTL in seconds. Heartbeat renews at TTL ÷ 2. |
+| `url` | string | *(nats only, required)* | NATS server URL, e.g. `"nats://localhost:4222"`. |
+| `jobs_bucket` | string | `"bits-jobs"` | *(nats only)* KV bucket name for job records. |
+| `leases_bucket` | string | `"bits-leases"` | *(nats only)* KV bucket name for broker leases. |
+| `num_replicas` | integer | `1` | *(nats only)* JetStream replication factor. Use 3 for production. |
+| `endpoints` | list of strings | *(tikv only, required)* | TiKV PD endpoints, e.g. `["pd:2379"]`. |
 
 ## Config validation
 
@@ -42,7 +47,9 @@ BITS actively rejects several legacy keys to prevent silent misconfiguration:
 | Old key | Replacement |
 |---|---|
 | `dispatcher.persistent` | Use `bits.persist_after_ms` |
-| `dispatcher.lock_ttl_secs` | Use `bits.tikv.broker_lease_ttl_secs` |
+| `dispatcher.lock_ttl_secs` | Use `bits.persistence.broker_lease_ttl_secs` |
+| `bits.tikv` | Use `bits.persistence` with `type: tikv` |
+| `bits.nats` | Use `bits.persistence` with `type: nats` |
 | `persist` as a route step name | Persistence is now threshold-based; remove the step |
 
 ## Tuning guidance

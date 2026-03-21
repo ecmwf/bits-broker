@@ -401,3 +401,68 @@ routes:
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(err.contains("array"), "expected array error, got: {err}");
 }
+
+#[test]
+fn legacy_bits_tikv_key_is_rejected() {
+    let config = r#"
+bits:
+  tikv:
+    endpoints:
+      - 127.0.0.1:2379
+routes:
+  - default: []
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("unknown field"),
+        "legacy bits.tikv should be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn legacy_bits_nats_key_is_rejected() {
+    let config = r#"
+bits:
+  nats:
+    url: "nats://localhost:4222"
+routes:
+  - default: []
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("unknown field"),
+        "legacy bits.nats should be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn persistence_missing_type_is_rejected() {
+    let config = r#"
+bits:
+  persistence:
+    url: "nats://localhost:4222"
+routes:
+  - default: []
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("missing field") || err.contains("type"),
+        "missing type should be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn persistence_invalid_type_is_rejected() {
+    let config = r#"
+bits:
+  persistence:
+    type: redis
+routes:
+  - default: []
+"#;
+    let err = Bits::from_config(config).err().unwrap().to_string();
+    assert!(
+        err.contains("unknown variant"),
+        "invalid type should be rejected, got: {err}"
+    );
+}

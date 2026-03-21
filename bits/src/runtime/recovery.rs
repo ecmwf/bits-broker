@@ -224,15 +224,19 @@ impl Bits {
                 }
             };
 
+            let drain_and_delete = || {
+                let deadline = Instant::now() + broker_lease_ttl;
+                while in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                if let Err(err) = runtime.block_on(store.delete_broker_lease(&broker_id)) {
+                    tracing::debug!(broker_id = %broker_id, error = %err, "lease cleanup on shutdown failed");
+                }
+            };
+
             loop {
                 if shutdown.is_stopped() {
-                    let deadline = Instant::now() + broker_lease_ttl;
-                    while in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    if let Err(err) = runtime.block_on(store.delete_broker_lease(&broker_id)) {
-                        tracing::debug!(broker_id = %broker_id, error = %err, "lease cleanup on shutdown failed");
-                    }
+                    drain_and_delete();
                     return;
                 }
 
@@ -246,16 +250,7 @@ impl Bits {
                         tracing::warn!(broker_id = %broker_id, error = %err, "broker lease upsert failed; retrying");
                         shutdown.wait_timeout(Duration::from_millis(500).min(tick));
                         if shutdown.is_stopped() {
-                            let deadline = Instant::now() + broker_lease_ttl;
-                            while in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline
-                            {
-                                std::thread::sleep(Duration::from_millis(50));
-                            }
-                            if let Err(err) =
-                                runtime.block_on(store.delete_broker_lease(&broker_id))
-                            {
-                                tracing::debug!(broker_id = %broker_id, error = %err, "lease cleanup on shutdown failed");
-                            }
+                            drain_and_delete();
                             return;
                         }
                         if let Err(retry_err) = runtime.block_on(store.upsert_broker_lease(

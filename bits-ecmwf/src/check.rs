@@ -195,16 +195,16 @@ impl CheckAction for HasRole {
             });
         }
 
-        if let Some(ref required_realm) = self.realm {
-            if &auth_user.realm != required_realm {
-                return Ok(CheckResult::Reject {
-                    reason: format!(
-                        "user realm '{}' does not match required '{}'",
-                        auth_user.realm, required_realm
-                    ),
-                    silent: false,
-                });
-            }
+        if let Some(ref required_realm) = self.realm
+            && &auth_user.realm != required_realm
+        {
+            return Ok(CheckResult::Reject {
+                reason: format!(
+                    "user realm '{}' does not match required '{}'",
+                    auth_user.realm, required_realm
+                ),
+                silent: false,
+            });
         }
 
         if auth_user.roles.contains(&self.role) {

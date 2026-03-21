@@ -62,9 +62,9 @@ pub(crate) fn spawn_job(
                             let record = PersistentJobRecord {
                                 job_id: job.id.clone(),
                                 broker_id: broker_id.clone(),
-                                original_request: job.original_request.clone(),
-                                user: job.user.clone(),
-                                metadata: job.metadata.clone(),
+                                original_request: (*job.original_request).clone(),
+                                user: (*job.user).clone(),
+                                metadata: (*job.metadata).clone(),
                                 created_at: job.created_at,
                             };
                             match store.upsert_job(record).await {

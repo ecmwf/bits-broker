@@ -16,8 +16,13 @@ pub(crate) fn instant_to_nanos(instant: Instant) -> u64 {
     instant.saturating_duration_since(*EPOCH).as_nanos() as u64
 }
 
-fn nanos_to_instant(nanos: u64) -> Instant {
+pub(crate) fn nanos_to_instant(nanos: u64) -> Instant {
     *EPOCH + Duration::from_nanos(nanos)
+}
+
+pub(crate) fn is_client_present(pollers: &AtomicUsize, deadline_nanos: &AtomicU64) -> bool {
+    pollers.load(Ordering::Acquire) > 0
+        || Instant::now() < nanos_to_instant(deadline_nanos.load(Ordering::Acquire))
 }
 
 fn default_cancelled() -> Arc<AtomicBool> {
@@ -41,17 +46,11 @@ fn default_persisted() -> AtomicBool {
 pub struct Job {
     /// Unique identifier for the job.
     pub id: String,
-    /// The original request as submitted by the client. Never modified after creation.
-    /// Used as the restart point on broker recovery.
-    pub original_request: Value,
-    /// The working request, mutated by transform actions as the job flows through the pipeline.
+    pub original_request: Arc<Value>,
     pub request: Value,
-    /// Arbitrary user-scoped context carried alongside the request.
-    pub user: Value,
-    /// Creation timestamp used for routing and persistence metadata.
+    pub user: Arc<Value>,
     pub created_at: DateTime<Utc>,
-    /// Free-form metadata available to actions and persistence backends.
-    pub metadata: Value,
+    pub metadata: Arc<Value>,
     /// Set by `Bits::cancel()`. Checked in the pipeline before each action.
     #[serde(skip, default = "default_cancelled")]
     pub(crate) cancelled: Arc<AtomicBool>,
@@ -84,11 +83,11 @@ impl Job {
     pub fn new_with_id(id: String, request: Value) -> Self {
         Self {
             id,
-            original_request: request.clone(),
+            original_request: Arc::new(request.clone()),
             request,
-            user: serde_json::json!({}),
+            user: Arc::new(serde_json::json!({})),
             created_at: Utc::now(),
-            metadata: serde_json::json!({}),
+            metadata: Arc::new(serde_json::json!({})),
             cancelled: default_cancelled(),
             active_pollers: default_active_pollers(),
             reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
@@ -102,11 +101,11 @@ impl Job {
     pub fn restore(record: PersistentJobRecord) -> Self {
         Self {
             id: record.job_id,
-            original_request: record.original_request.clone(),
+            original_request: Arc::new(record.original_request.clone()),
             request: record.original_request,
-            user: record.user,
+            user: Arc::new(record.user),
             created_at: record.created_at,
-            metadata: record.metadata,
+            metadata: Arc::new(record.metadata),
             cancelled: default_cancelled(),
             active_pollers: default_active_pollers(),
             reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
@@ -121,11 +120,16 @@ impl Job {
         self.cancelled.load(Ordering::Acquire)
     }
 
-    /// Returns true if the client is currently polling or is within the reconnect window.
     pub fn client_present(&self) -> bool {
-        self.active_pollers.load(Ordering::Acquire) > 0
-            || Instant::now()
-                < nanos_to_instant(self.reconnect_deadline_nanos.load(Ordering::Acquire))
+        is_client_present(&self.active_pollers, &self.reconnect_deadline_nanos)
+    }
+
+    pub fn user_mut(&mut self) -> &mut Value {
+        Arc::make_mut(&mut self.user)
+    }
+
+    pub fn metadata_mut(&mut self) -> &mut Value {
+        Arc::make_mut(&mut self.metadata)
     }
 
     pub(crate) fn set_reconnect_deadline(&self, deadline: Instant) {
@@ -174,7 +178,7 @@ mod tests {
     fn test_job_creation() {
         let request = json!({"class": "od", "stream": "oper"});
         let job = Job::new(request.clone());
-        assert_eq!(job.original_request, request);
+        assert_eq!(*job.original_request, request);
         assert_eq!(job.request, request);
     }
 }

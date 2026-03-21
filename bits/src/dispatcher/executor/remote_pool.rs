@@ -287,8 +287,8 @@ async fn handle_get_work(
     let resp = WorkResponse {
         job_id: job.id.clone(),
         request: job.request.clone(),
-        user: job.user.clone(),
-        metadata: job.metadata.clone(),
+        user: (*job.user).clone(),
+        metadata: (*job.metadata).clone(),
     };
 
     Ok(Json(resp))

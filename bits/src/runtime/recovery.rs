@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
@@ -206,6 +207,7 @@ impl Bits {
         let store = Arc::clone(store);
         let broker_id = self.broker_id.clone();
         let shutdown = self.shutdown.clone();
+        let in_flight = self.in_flight.clone();
         let base_url = self.internal_poll_base_url.clone();
         Some(std::thread::spawn(move || {
             let tick = broker_lease_ttl
@@ -224,6 +226,10 @@ impl Bits {
 
             loop {
                 if shutdown.is_stopped() {
+                    let deadline = Instant::now() + broker_lease_ttl;
+                    while in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                     if let Err(err) = runtime.block_on(store.delete_broker_lease(&broker_id)) {
                         tracing::debug!(broker_id = %broker_id, error = %err, "lease cleanup on shutdown failed");
                     }
@@ -240,6 +246,11 @@ impl Bits {
                         tracing::warn!(broker_id = %broker_id, error = %err, "broker lease upsert failed; retrying");
                         shutdown.wait_timeout(Duration::from_millis(500).min(tick));
                         if shutdown.is_stopped() {
+                            let deadline = Instant::now() + broker_lease_ttl;
+                            while in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline
+                            {
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
                             if let Err(err) =
                                 runtime.block_on(store.delete_broker_lease(&broker_id))
                             {

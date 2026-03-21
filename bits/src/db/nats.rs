@@ -89,10 +89,18 @@ impl NatsStore {
         let bucket_name = config.bucket.clone();
         match js.create_key_value(config).await {
             Ok(store) => Ok(store),
-            Err(_) => js
-                .get_key_value(&bucket_name)
-                .await
-                .map_err(|e| format!("bucket '{bucket_name}': {e}")),
+            Err(create_err) => {
+                tracing::debug!(
+                    bucket = %bucket_name,
+                    error = %create_err,
+                    "bucket create failed, attempting get"
+                );
+                js.get_key_value(&bucket_name).await.map_err(|e| {
+                    format!(
+                        "bucket '{bucket_name}': create failed ({create_err}), get also failed: {e}"
+                    )
+                })
+            }
         }
     }
 
@@ -149,60 +157,66 @@ impl JobStore for NatsStore {
         expected_owner_broker_id: &str,
         claimant_broker_id: &str,
     ) -> Result<ClaimResult, DbError> {
+        const MAX_CAS_ATTEMPTS: u8 = 3;
         let key = Self::encode_key(job_id);
         let jobs = self.jobs().await?;
-        let entry = jobs
-            .entry(&key)
-            .await
-            .map_err(|e| DbError::Backend(format!("get job entry: {e}")))?;
 
-        let Some(entry) = entry else {
-            return Ok(ClaimResult::NotFound);
-        };
+        for _ in 0..MAX_CAS_ATTEMPTS {
+            let entry = jobs
+                .entry(&key)
+                .await
+                .map_err(|e| DbError::Backend(format!("get job entry: {e}")))?;
 
-        if entry.operation != kv::Operation::Put {
-            return Ok(ClaimResult::NotFound);
-        }
+            let Some(entry) = entry else {
+                return Ok(ClaimResult::NotFound);
+            };
 
-        let mut record: PersistentJobRecord = Self::deserialize(&entry.value)?;
+            if entry.operation != kv::Operation::Put {
+                return Ok(ClaimResult::NotFound);
+            }
 
-        if record.broker_id == claimant_broker_id {
-            return Ok(ClaimResult::Claimed(record));
-        }
+            let record: PersistentJobRecord = Self::deserialize(&entry.value)?;
 
-        if record.broker_id != expected_owner_broker_id {
-            return Ok(ClaimResult::Active {
-                owner_broker_id: record.broker_id,
-            });
-        }
+            if record.broker_id == claimant_broker_id {
+                return Ok(ClaimResult::Claimed(record));
+            }
 
-        record.broker_id = claimant_broker_id.to_string();
-        let value = Self::serialize(&record)?;
+            if record.broker_id != expected_owner_broker_id {
+                return Ok(ClaimResult::Active {
+                    owner_broker_id: record.broker_id,
+                });
+            }
 
-        match jobs.update(&key, value, entry.revision).await {
-            Ok(_) => Ok(ClaimResult::Claimed(record)),
-            Err(e) => {
-                if !matches!(e.kind(), kv::UpdateErrorKind::WrongLastRevision) {
-                    return Err(DbError::Backend(format!("update job: {e}")));
-                }
-                let refreshed = jobs
-                    .entry(&key)
-                    .await
-                    .map_err(|e| DbError::Backend(format!("re-read after CAS: {e}")))?;
-                match refreshed {
-                    Some(e) if e.operation == kv::Operation::Put => {
-                        let current: PersistentJobRecord = Self::deserialize(&e.value)?;
-                        if current.broker_id == claimant_broker_id {
-                            Ok(ClaimResult::Claimed(current))
-                        } else {
-                            Ok(ClaimResult::Active {
-                                owner_broker_id: current.broker_id,
-                            })
-                        }
+            let mut claimed = record;
+            claimed.broker_id = claimant_broker_id.to_string();
+            let value = Self::serialize(&claimed)?;
+
+            match jobs.update(&key, value, entry.revision).await {
+                Ok(_) => return Ok(ClaimResult::Claimed(claimed)),
+                Err(e) => {
+                    if !matches!(e.kind(), kv::UpdateErrorKind::WrongLastRevision) {
+                        return Err(DbError::Backend(format!("update job: {e}")));
                     }
-                    _ => Ok(ClaimResult::NotFound),
                 }
             }
+        }
+
+        let refreshed = jobs
+            .entry(&key)
+            .await
+            .map_err(|e| DbError::Backend(format!("re-read after CAS retries: {e}")))?;
+        match refreshed {
+            Some(e) if e.operation == kv::Operation::Put => {
+                let current: PersistentJobRecord = Self::deserialize(&e.value)?;
+                if current.broker_id == claimant_broker_id {
+                    Ok(ClaimResult::Claimed(current))
+                } else {
+                    Ok(ClaimResult::Active {
+                        owner_broker_id: current.broker_id,
+                    })
+                }
+            }
+            _ => Ok(ClaimResult::NotFound),
         }
     }
 }

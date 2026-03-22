@@ -66,8 +66,8 @@ I/O cost for persistence.
 ### `broker_lease_ttl_secs`
 
 This controls the window during which jobs are unrecoverable after a broker crashes. A lower
-TTL (e.g., 10 s) means faster recovery but more frequent TiKV writes. A higher TTL reduces
-write pressure at the cost of longer client wait times after a crash.
+TTL (e.g., 10 s) means faster recovery but more frequent persistence writes. A higher TTL
+reduces write pressure at the cost of longer client wait times after a crash.
 
 ### Sticky ingress
 
@@ -81,9 +81,9 @@ from local in-memory state, avoiding proxy or recovery paths entirely.
 |---|---|
 | Store unreachable at lease lookup | `Pending` returned to client. No claim attempted. |
 | Store unreachable at claim (repeated) | Exponential backoff (100 ms → 1 s), budget `min(timeout, 2 s)`. Returns `Pending` on exhaustion. |
-| Two brokers claim the same job simultaneously | TiKV optimistic transaction ensures only one wins. Loser returns `Pending`; next poll finds the new owner. |
+| Two brokers claim the same job simultaneously | Backend-specific CAS ensures only one wins (TiKV: optimistic transaction, NATS: revision-based update). Loser returns `Pending`; next poll finds the new owner. |
 | `upsert_job` fails at persist threshold | Logged as a warning; job continues in memory. If the broker subsequently crashes, the job is unrecoverable. |
-| `delete_job` fails at job completion | Error is silently ignored. The stale record remains in TiKV but is harmless — the reading broker will see an active lease for the owning broker. |
-| Broker crashes without lease cleanup | Lease expires after `broker_lease_ttl_secs` (default 30 s). Jobs become recoverable after that window. Old lease records are never purged from TiKV automatically. |
-| `tikv` config present, feature not compiled | `Bits::from_config` returns an error immediately at startup. |
-| Empty `tikv.endpoints` | `Bits::from_config` returns an error immediately at startup. |
+| `delete_job` fails at job completion | Error is silently ignored. The stale record remains in the store but is harmless — the reading broker will see an active lease for the owning broker. |
+| Broker crashes without lease cleanup | Lease expires after `broker_lease_ttl_secs` (default 30 s). Jobs become recoverable after that window. NATS leases auto-expire via bucket `max_age`; TiKV lease records require application-level expiry checks. |
+| `persistence.type` set, feature not compiled | `Bits::from_config` returns an error immediately at startup. |
+| Missing required backend fields | `Bits::from_config` returns an error immediately at startup (e.g., empty `endpoints` for TiKV, empty `url` for NATS). |

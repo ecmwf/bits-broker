@@ -29,15 +29,19 @@ any outstanding jobs.
 
 ## Expiry evaluation
 
-BITS does not rely on any server-side TTL mechanism. The reading broker compares
-`lease.lease_until > current_wall_time` to decide if the lease is active. Expired records are
-never deleted from TiKV automatically — they remain until the broker comes back online and
-overwrites them. This is safe because the timestamp comparison is the only check that matters.
+The reading broker compares `lease.lease_until > current_wall_time` to decide if the lease is
+active. Backend-specific cleanup varies:
 
-## TiKV storage
+- **NATS**: The leases bucket uses `max_age` (2× TTL), so expired entries are automatically
+  removed by JetStream. The application-level `lease_until` check is the primary liveness signal.
+- **TiKV**: Expired records remain until the broker comes back online and overwrites them.
+  This is safe because the timestamp comparison is the only check that matters.
 
-Broker leases are stored at the key `brokers/{broker_id}` as a JSON-encoded record. Job records
-are stored at `jobs/{job_id}`. These key spaces are disjoint.
+## Storage layout
+
+Broker leases and job records are stored as JSON-encoded values in separate key spaces. The
+key encoding is backend-specific (base64url for NATS, raw string for TiKV) but the key spaces
+are always disjoint.
 
 ## Configuration
 

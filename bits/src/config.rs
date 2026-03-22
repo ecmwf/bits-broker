@@ -86,7 +86,7 @@ struct BitsConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum PersistenceConfig {
     #[cfg_attr(not(feature = "tikv"), allow(dead_code))]
     Tikv {

@@ -65,7 +65,7 @@ impl NatsStore {
                         history: 1,
                         num_replicas: self.num_replicas,
                         storage: async_nats::jetstream::stream::StorageType::Memory,
-                        max_age: self.lease_ttl * 2,
+                        max_age: self.lease_ttl.saturating_mul(2),
                         ..Default::default()
                     },
                 )

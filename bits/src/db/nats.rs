@@ -230,11 +230,12 @@ impl BrokerLeaseStore for NatsStore {
         ttl: Duration,
     ) -> Result<(), DbError> {
         let now = Utc::now();
+        let lease_duration = chrono::Duration::from_std(ttl)
+            .map_err(|e| DbError::Backend(format!("invalid broker lease ttl: {e}")))?;
         let record = BrokerLeaseRecord {
             broker_id: broker_id.to_string(),
             internal_poll_base_url: internal_poll_base_url.to_string(),
-            lease_until: now
-                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(60)),
+            lease_until: now + lease_duration,
             updated_at: now,
         };
         let key = Self::encode_key(broker_id);

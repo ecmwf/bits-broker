@@ -302,6 +302,15 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             if url.is_empty() {
                 return Err("bits.persistence.url must not be empty".into());
             }
+            if jobs_bucket.is_empty() {
+                return Err("bits.persistence.jobs_bucket must not be empty".into());
+            }
+            if leases_bucket.is_empty() {
+                return Err("bits.persistence.leases_bucket must not be empty".into());
+            }
+            if num_replicas < 1 {
+                return Err("bits.persistence.num_replicas must be at least 1".into());
+            }
             let ttl = Duration::try_from_secs_f64(broker_lease_ttl_secs).map_err(
                 |e| -> Box<dyn std::error::Error> {
                     format!("bits.persistence.broker_lease_ttl_secs: {e}").into()

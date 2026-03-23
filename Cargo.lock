@@ -91,7 +91,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "authotron-types"
 version = "0.1.0"
-source = "git+https://github.com/ecmwf/auth-o-tron.git?branch=feat%2Fshared-auth-workspace#ec71b1305bd461353b60ff7f5c5472a34ce74d1f"
+source = "git+https://github.com/ecmwf/auth-o-tron.git?branch=main#dc4d90ab9c06a045091bf1aa1ad05fe1fadff954"
 dependencies = [
  "serde",
  "serde_json",

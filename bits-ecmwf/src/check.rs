@@ -6,24 +6,10 @@ use bits::actions::{ActionError, CheckAction, CheckResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[cfg(test)]
-use authotron_types::User;
+use authotron_types::User as AuthUser;
 
 use crate::date_check::date_check;
 use crate::schedule::{ScheduleCatalog, ScheduleReleased};
-
-fn default_user_schema_version() -> u32 {
-    1
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthUser {
-    #[serde(default = "default_user_schema_version")]
-    version: u32,
-    username: String,
-    realm: String,
-    roles: Vec<String>,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Match {
@@ -226,6 +212,7 @@ bits::register_action!(check, "has_role", HasRole);
 #[cfg(test)]
 mod has_role_tests {
     use super::*;
+    use authotron_types::User;
     use serde_json::json;
 
     fn job_with_auth(auth_user: &User) -> Job {

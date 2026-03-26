@@ -5,6 +5,7 @@ use bits::Job;
 use bits::actions::{ActionError, CheckAction, CheckResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing;
 
 use authotron_types::User as AuthUser;
 
@@ -139,15 +140,15 @@ impl CheckAction for ScheduleReleased {
 
 bits::register_action!(check, "schedule_released", ScheduleReleased);
 
-/// Check that the authenticated user has a specific role, optionally in a specific realm.
+/// Authorization gate: rejects jobs whose authenticated user lacks a required role.
 ///
 /// Reads the auth context from `job.user["auth"]`, which is set by polytope-server
 /// when it forwards the authenticated user into the job.
 ///
-/// Returns `Reject` (non-silent) when:
-/// - No auth context is present in `job.user`
-/// - The user's realm doesn't match the required realm (if specified)
-/// - The user doesn't have the required role
+/// Use `HasRole` when a route **requires** specific credentials — rejections are
+/// non-silent with a generic "insufficient permissions" message (detailed reasons
+/// are logged).  For route selection based on auth *presence* alone, use
+/// [`HasAuth`] instead.
 ///
 /// Returns `ActionError::AuthError` when:
 /// - The auth context exists but is malformed (can't deserialize into `User`)
@@ -158,12 +159,15 @@ pub struct HasRole {
     pub realm: Option<String>,
 }
 
+const ACCESS_DENIED: &str = "insufficient permissions";
+
 #[async_trait]
 impl CheckAction for HasRole {
     async fn evaluate(&self, job: &Job) -> Result<CheckResult, ActionError> {
         let Some(auth_value) = job.user.get("auth") else {
+            tracing::warn!("has_role: no authentication context in job");
             return Ok(CheckResult::Reject {
-                reason: "no authentication context in job".to_string(),
+                reason: ACCESS_DENIED.to_string(),
                 silent: false,
             });
         };
@@ -172,11 +176,12 @@ impl CheckAction for HasRole {
             .map_err(|e| ActionError::AuthError(format!("invalid auth context: {}", e)))?;
 
         if auth_user.version != 1 {
+            tracing::warn!(
+                version = auth_user.version,
+                "has_role: unsupported auth schema version, expected 1"
+            );
             return Ok(CheckResult::Reject {
-                reason: format!(
-                    "unsupported auth schema version '{}', expected '1'",
-                    auth_user.version
-                ),
+                reason: ACCESS_DENIED.to_string(),
                 silent: false,
             });
         }
@@ -184,11 +189,14 @@ impl CheckAction for HasRole {
         if let Some(ref required_realm) = self.realm
             && &auth_user.realm != required_realm
         {
+            tracing::warn!(
+                user = auth_user.username,
+                realm = auth_user.realm,
+                required_realm = required_realm.as_str(),
+                "has_role: realm mismatch"
+            );
             return Ok(CheckResult::Reject {
-                reason: format!(
-                    "user realm '{}' does not match required '{}'",
-                    auth_user.realm, required_realm
-                ),
+                reason: ACCESS_DENIED.to_string(),
                 silent: false,
             });
         }
@@ -196,11 +204,13 @@ impl CheckAction for HasRole {
         if auth_user.roles.contains(&self.role) {
             Ok(CheckResult::Pass)
         } else {
+            tracing::warn!(
+                user = auth_user.username,
+                role = self.role,
+                "has_role: user lacks required role"
+            );
             Ok(CheckResult::Reject {
-                reason: format!(
-                    "user '{}' does not have required role '{}'",
-                    auth_user.username, self.role
-                ),
+                reason: ACCESS_DENIED.to_string(),
                 silent: false,
             })
         }
@@ -209,20 +219,40 @@ impl CheckAction for HasRole {
 
 bits::register_action!(check, "has_role", HasRole);
 
+/// Routing discriminator: passes when the job carries a valid authenticated user.
+///
+/// Unlike [`HasRole`], rejections are **silent** so the router falls through to
+/// the next route (e.g. a public/anonymous path).  Use `HasAuth` to split traffic
+/// between authenticated and unauthenticated routes; use `HasRole` to enforce
+/// specific credentials within an authenticated route.
+///
+/// Returns `ActionError::AuthError` when `job.user["auth"]` exists but cannot
+/// be parsed as a valid `User` — this indicates a broken auth context, not
+/// simply an unauthenticated request.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HasAuth;
 
 #[async_trait]
 impl CheckAction for HasAuth {
     async fn evaluate(&self, job: &Job) -> Result<CheckResult, ActionError> {
-        if job.user.get("auth").is_some() {
-            Ok(CheckResult::Pass)
-        } else {
-            Ok(CheckResult::Reject {
+        let Some(auth_value) = job.user.get("auth") else {
+            return Ok(CheckResult::Reject {
                 reason: "no authentication context in job".to_string(),
                 silent: true,
-            })
+            });
+        };
+
+        if auth_value.is_null() {
+            return Ok(CheckResult::Reject {
+                reason: "no authentication context in job".to_string(),
+                silent: true,
+            });
         }
+
+        serde_json::from_value::<AuthUser>(auth_value.clone())
+            .map_err(|e| ActionError::AuthError(format!("invalid auth context: {}", e)))?;
+
+        Ok(CheckResult::Pass)
     }
 }
 
@@ -262,6 +292,36 @@ mod has_auth_tests {
         let job = Job::new(json!({}));
         let result = HasAuth.evaluate(&job).await.unwrap();
         assert!(matches!(result, CheckResult::Reject { silent: true, .. }));
+    }
+
+    #[tokio::test]
+    async fn reject_silently_when_auth_is_null() {
+        let mut job = Job::new(json!({}));
+        *job.user_mut() = json!({"auth": null});
+        let result = HasAuth.evaluate(&job).await.unwrap();
+        assert!(matches!(result, CheckResult::Reject { silent: true, .. }));
+    }
+
+    #[tokio::test]
+    async fn error_when_auth_is_malformed() {
+        let mut job = Job::new(json!({}));
+        *job.user_mut() = json!({"auth": "not a valid User object"});
+        let result = HasAuth.evaluate(&job).await;
+        assert!(
+            matches!(result, Err(ActionError::AuthError(_))),
+            "malformed auth should be an error, not silent rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_when_auth_is_partial_object() {
+        let mut job = Job::new(json!({}));
+        *job.user_mut() = json!({"auth": {"username": "alice"}});
+        let result = HasAuth.evaluate(&job).await;
+        assert!(
+            matches!(result, Err(ActionError::AuthError(_))),
+            "partial auth object missing required fields should be an error"
+        );
     }
 }
 
@@ -315,7 +375,7 @@ mod has_role_tests {
         match result {
             CheckResult::Reject { reason, silent } => {
                 assert!(!silent, "rejection should be non-silent");
-                assert!(reason.contains("does not have required role"));
+                assert_eq!(reason, ACCESS_DENIED);
             }
             _ => panic!("expected Reject"),
         }
@@ -333,7 +393,7 @@ mod has_role_tests {
         match result {
             CheckResult::Reject { reason, silent } => {
                 assert!(!silent, "rejection should be non-silent");
-                assert!(reason.contains("does not match required"));
+                assert_eq!(reason, ACCESS_DENIED);
             }
             _ => panic!("expected Reject"),
         }
@@ -351,7 +411,7 @@ mod has_role_tests {
         match result {
             CheckResult::Reject { reason, silent } => {
                 assert!(!silent, "rejection should be non-silent");
-                assert!(reason.contains("no authentication context"));
+                assert_eq!(reason, ACCESS_DENIED);
             }
             _ => panic!("expected Reject"),
         }
@@ -418,7 +478,7 @@ mod has_role_tests {
         match result {
             CheckResult::Reject { reason, silent } => {
                 assert!(!silent, "rejection should be non-silent");
-                assert!(reason.contains("unsupported auth schema version"));
+                assert_eq!(reason, ACCESS_DENIED);
             }
             _ => panic!("expected Reject"),
         }

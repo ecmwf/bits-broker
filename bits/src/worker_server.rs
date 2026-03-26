@@ -20,6 +20,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use axum::Router;
+use axum::http::{StatusCode, Uri};
 
 /// Validates that a pool name is URL-safe.
 ///
@@ -106,10 +107,28 @@ impl WorkerServer {
             return Ok(());
         }
 
+        let pool_names: Vec<String> = pools.iter().map(|(name, _)| name.clone()).collect();
+
         let mut app = Router::new();
         for (pool_name, pool_router) in pools.iter() {
             app = app.nest(&format!("/{pool_name}"), pool_router.clone());
         }
+
+        let fallback_pools = pool_names.clone();
+        app = app.fallback(move |uri: Uri| {
+            let pools = fallback_pools.clone();
+            async move {
+                let requested = uri.path().split('/').nth(1).unwrap_or(uri.path());
+                let available = pools.join(", ");
+                (
+                    StatusCode::NOT_FOUND,
+                    format!(
+                        "pool '{}' not found; available pools: [{}]",
+                        requested, available
+                    ),
+                )
+            }
+        });
 
         let bind_addr = format!("{}:{}", self.host, self.port);
         let std_listener = std::net::TcpListener::bind(&bind_addr)
@@ -339,12 +358,21 @@ mod tests {
             .unwrap();
         assert_eq!(beta, "beta");
 
-        // Wrong prefix → 404.
+        // Wrong prefix → 404 with helpful message.
         let resp = client
             .get(format!("http://127.0.0.1:{port}/gamma/ping"))
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains("pool 'gamma' not found"),
+            "expected pool-not-found message, got: {body}"
+        );
+        assert!(
+            body.contains("alpha") && body.contains("beta"),
+            "expected available pools in message, got: {body}"
+        );
     }
 }

@@ -5,8 +5,6 @@ use bits::Job;
 use bits::actions::{ActionError, CheckAction, CheckResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing;
-
 use authotron_types::User as AuthUser;
 
 use crate::date_check::date_check;
@@ -314,11 +312,31 @@ mod has_role_tests {
     }
 
     #[tokio::test]
-    async fn empty_roles_rejects() {
+    async fn empty_roles_map_rejects() {
         let user = test_user(vec!["admin"], "ecmwf");
         let job = job_with_auth(&user);
         let check = HasRole {
             roles: HashMap::new(),
+        };
+        assert_reject(check.evaluate(&job).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn realm_with_empty_allowed_roles_rejects() {
+        let user = test_user(vec!["admin", "default"], "ecmwf");
+        let job = job_with_auth(&user);
+        let check = HasRole {
+            roles: roles(&[("ecmwf", &[])]),
+        };
+        assert_reject(check.evaluate(&job).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn user_with_no_roles_rejects() {
+        let user = test_user(vec![], "ecmwf");
+        let job = job_with_auth(&user);
+        let check = HasRole {
+            roles: roles(&[("ecmwf", &["data_access"])]),
         };
         assert_reject(check.evaluate(&job).await.unwrap());
     }
@@ -344,6 +362,26 @@ mod has_role_tests {
             check.evaluate(&job).await,
             Err(ActionError::AuthError(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn malformed_roles_type_returns_auth_error() {
+        let mut job = Job::new(json!({}));
+        *job.user_mut() = json!({
+            "auth": {
+                "version": 1,
+                "username": "alice",
+                "realm": "ecmwf",
+                "roles": "admin"
+            }
+        });
+        let check = HasRole {
+            roles: roles(&[("ecmwf", &["admin"])]),
+        };
+        assert!(
+            matches!(check.evaluate(&job).await, Err(ActionError::AuthError(_))),
+            "string instead of array for roles should return AuthError"
+        );
     }
 
     #[tokio::test]

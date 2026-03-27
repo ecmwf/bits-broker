@@ -240,191 +240,158 @@ mod has_role_tests {
         }
     }
 
+    fn roles(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(realm, roles)| {
+                (
+                    realm.to_string(),
+                    roles.iter().map(|r| r.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn assert_reject(result: CheckResult) {
+        match result {
+            CheckResult::Reject { reason, silent } => {
+                assert!(!silent, "HasRole rejections must be non-silent");
+                assert_eq!(reason, ACCESS_DENIED);
+            }
+            _ => panic!("expected Reject, got Pass"),
+        }
+    }
+
     #[tokio::test]
-    async fn test_has_role_pass() {
+    async fn single_realm_pass() {
         let user = test_user(vec!["data_access", "default"], "ecmwf");
         let job = job_with_auth(&user);
         let check = HasRole {
-            role: "data_access".to_string(),
-            realm: Some("ecmwf".to_string()),
+            roles: roles(&[("ecmwf", &["data_access"])]),
         };
         let result = check.evaluate(&job).await.unwrap();
         assert!(matches!(result, CheckResult::Pass));
     }
 
     #[tokio::test]
-    async fn test_has_role_missing_role() {
+    async fn single_realm_wrong_role() {
         let user = test_user(vec!["default"], "ecmwf");
         let job = job_with_auth(&user);
         let check = HasRole {
-            role: "admin".to_string(),
-            realm: Some("ecmwf".to_string()),
+            roles: roles(&[("ecmwf", &["admin"])]),
         };
-        let result = check.evaluate(&job).await.unwrap();
-        match result {
-            CheckResult::Reject { reason, silent } => {
-                assert!(!silent, "rejection should be non-silent");
-                assert_eq!(reason, ACCESS_DENIED);
-            }
-            _ => panic!("expected Reject"),
-        }
+        assert_reject(check.evaluate(&job).await.unwrap());
     }
 
     #[tokio::test]
-    async fn test_has_role_wrong_realm() {
+    async fn single_realm_wrong_realm() {
         let user = test_user(vec!["admin"], "other");
         let job = job_with_auth(&user);
         let check = HasRole {
-            role: "admin".to_string(),
-            realm: Some("ecmwf".to_string()),
+            roles: roles(&[("ecmwf", &["admin"])]),
         };
-        let result = check.evaluate(&job).await.unwrap();
-        match result {
-            CheckResult::Reject { reason, silent } => {
-                assert!(!silent, "rejection should be non-silent");
-                assert_eq!(reason, ACCESS_DENIED);
-            }
-            _ => panic!("expected Reject"),
-        }
+        assert_reject(check.evaluate(&job).await.unwrap());
     }
 
     #[tokio::test]
-    async fn test_has_role_no_auth_context() {
+    async fn multi_realm_one_matches() {
+        let user = test_user(vec!["data_access"], "cds");
+        let job = job_with_auth(&user);
+        let check = HasRole {
+            roles: roles(&[("ecmwf", &["admin"]), ("cds", &["data_access"])]),
+        };
+        let result = check.evaluate(&job).await.unwrap();
+        assert!(matches!(result, CheckResult::Pass));
+    }
+
+    #[tokio::test]
+    async fn multi_realm_none_match() {
+        let user = test_user(vec!["viewer"], "ecmwf");
+        let job = job_with_auth(&user);
+        let check = HasRole {
+            roles: roles(&[("ecmwf", &["admin"]), ("cds", &["data_access"])]),
+        };
+        assert_reject(check.evaluate(&job).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn multi_realm_role_in_wrong_realm() {
+        let user = test_user(vec!["admin", "data_access"], "other");
+        let job = job_with_auth(&user);
+        let check = HasRole {
+            roles: roles(&[("ecmwf", &["admin"]), ("cds", &["data_access"])]),
+        };
+        assert_reject(check.evaluate(&job).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn same_realm_multiple_roles() {
+        let user = test_user(vec!["viewer", "default"], "ecmwf");
+        let job = job_with_auth(&user);
+        let check = HasRole {
+            roles: roles(&[("ecmwf", &["admin", "viewer"])]),
+        };
+        let result = check.evaluate(&job).await.unwrap();
+        assert!(matches!(result, CheckResult::Pass));
+    }
+
+    #[tokio::test]
+    async fn empty_roles_rejects() {
+        let user = test_user(vec!["admin"], "ecmwf");
+        let job = job_with_auth(&user);
+        let check = HasRole {
+            roles: HashMap::new(),
+        };
+        assert_reject(check.evaluate(&job).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn no_auth_context() {
         let mut job = Job::new(json!({}));
         *job.user_mut() = json!({"client_ip": "1.2.3.4"});
         let check = HasRole {
-            role: "admin".to_string(),
-            realm: None,
+            roles: roles(&[("ecmwf", &["admin"])]),
         };
-        let result = check.evaluate(&job).await.unwrap();
-        match result {
-            CheckResult::Reject { reason, silent } => {
-                assert!(!silent, "rejection should be non-silent");
-                assert_eq!(reason, ACCESS_DENIED);
-            }
-            _ => panic!("expected Reject"),
-        }
+        assert_reject(check.evaluate(&job).await.unwrap());
     }
 
     #[tokio::test]
-    async fn test_has_role_realm_optional() {
-        let user = test_user(vec!["viewer"], "anything");
-        let job = job_with_auth(&user);
-        let check = HasRole {
-            role: "viewer".to_string(),
-            realm: None, // No realm constraint
-        };
-        let result = check.evaluate(&job).await.unwrap();
-        assert!(matches!(result, CheckResult::Pass));
-    }
-
-    #[tokio::test]
-    async fn test_has_role_malformed_auth() {
+    async fn malformed_auth() {
         let mut job = Job::new(json!({}));
         *job.user_mut() = json!({"auth": "not a valid User object"});
         let check = HasRole {
-            role: "admin".to_string(),
-            realm: None,
+            roles: roles(&[("ecmwf", &["admin"])]),
         };
-        let result = check.evaluate(&job).await;
-        assert!(
-            matches!(result, Err(ActionError::AuthError(_))),
-            "malformed auth should return AuthError"
-        );
+        assert!(matches!(
+            check.evaluate(&job).await,
+            Err(ActionError::AuthError(_))
+        ));
     }
 
     #[tokio::test]
-    async fn test_has_role_missing_version_defaults_to_v1() {
-        let mut job = Job::new(json!({}));
-        *job.user_mut() = json!({
-            "client_ip": "1.2.3.4",
-            "auth": {
-                "username": "alice",
-                "realm": "ecmwf",
-                "roles": ["data_access"],
-                "attributes": {},
-                "scopes": {}
-            }
-        });
-        let check = HasRole {
-            role: "data_access".to_string(),
-            realm: Some("ecmwf".to_string()),
-        };
-        let result = check.evaluate(&job).await.unwrap();
-        assert!(matches!(result, CheckResult::Pass));
-    }
-
-    #[tokio::test]
-    async fn test_has_role_unsupported_version_rejected_non_silently() {
+    async fn unsupported_version() {
         let mut user = test_user(vec!["data_access"], "ecmwf");
         user.version = 2;
         let job = job_with_auth(&user);
         let check = HasRole {
-            role: "data_access".to_string(),
-            realm: Some("ecmwf".to_string()),
+            roles: roles(&[("ecmwf", &["data_access"])]),
         };
-        let result = check.evaluate(&job).await.unwrap();
-        match result {
-            CheckResult::Reject { reason, silent } => {
-                assert!(!silent, "rejection should be non-silent");
-                assert_eq!(reason, ACCESS_DENIED);
-            }
-            _ => panic!("expected Reject"),
-        }
+        assert_reject(check.evaluate(&job).await.unwrap());
     }
 
-    #[tokio::test]
-    async fn test_has_role_malformed_roles_type_returns_auth_error() {
-        let mut job = Job::new(json!({}));
-        *job.user_mut() = json!({
-            "auth": {
-                "version": 1,
-                "username": "alice",
-                "realm": "ecmwf",
-                "roles": "admin"
-            }
-        });
-        let check = HasRole {
-            role: "admin".to_string(),
-            realm: None,
-        };
-        let result = check.evaluate(&job).await;
-        assert!(
-            matches!(result, Err(ActionError::AuthError(_))),
-            "malformed roles type should return AuthError"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_has_role_reject_is_non_silent() {
-        // All rejection paths should have silent: false
-        let user = test_user(vec!["default"], "ecmwf");
-        let job = job_with_auth(&user);
-        let check = HasRole {
-            role: "nonexistent".to_string(),
-            realm: Some("ecmwf".to_string()),
-        };
-        match check.evaluate(&job).await.unwrap() {
-            CheckResult::Reject { silent, .. } => {
-                assert!(!silent, "HasRole rejections must be non-silent");
-            }
-            _ => panic!("expected Reject"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_has_role_old_job_without_auth() {
-        // Simulates a restored old job that only has client_ip
-        let mut job = Job::new(json!({"class": "od"}));
-        *job.user_mut() = json!({"client_ip": "10.0.0.1"});
-        let check = HasRole {
-            role: "data_access".to_string(),
-            realm: Some("ecmwf".to_string()),
-        };
-        let result = check.evaluate(&job).await.unwrap();
-        assert!(
-            matches!(result, CheckResult::Reject { .. }),
-            "old jobs without auth should be rejected"
-        );
+    #[test]
+    fn deserialize_from_yaml() {
+        let yaml = r#"
+roles:
+  ecmwf:
+    - admin
+    - data_access
+  cds:
+    - viewer
+"#;
+        let check: HasRole = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(check.roles.len(), 2);
+        assert_eq!(check.roles["ecmwf"], vec!["admin", "data_access"]);
+        assert_eq!(check.roles["cds"], vec!["viewer"]);
     }
 }

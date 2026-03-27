@@ -144,9 +144,10 @@ impl WorkerServer {
         let _ = self.started.set(());
 
         tokio::spawn(async move {
+            let pools_list = pool_names.join(", ");
             match local_addr {
-                Ok(addr) => tracing::info!(address = %addr, "worker server listening"),
-                Err(_) => tracing::info!(address = %bind_addr, "worker server listening"),
+                Ok(addr) => tracing::info!(address = %addr, pools = %pools_list, "worker server listening"),
+                Err(_) => tracing::info!(address = %bind_addr, pools = %pools_list, "worker server listening"),
             }
             if let Err(e) = axum::serve(listener, app).await {
                 tracing::error!(error = %e, "worker server exited with error");

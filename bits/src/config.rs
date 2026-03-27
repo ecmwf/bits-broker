@@ -410,10 +410,6 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
     }
 
-    if let Some(ws) = &worker_server {
-        ws.start()?;
-    }
-
     Ok(Bootstrap {
         runtime_config: RuntimeConfig {
             router,

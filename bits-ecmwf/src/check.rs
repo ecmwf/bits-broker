@@ -140,18 +140,9 @@ impl CheckAction for ScheduleReleased {
 
 bits::register_action!(check, "schedule_released", ScheduleReleased);
 
-/// Authorization gate: rejects jobs whose authenticated user lacks a required role.
-///
-/// Reads the auth context from `job.user["auth"]`, which is set by polytope-server
-/// when it forwards the authenticated user into the job.
-///
-/// Returns `ActionError::AuthError` when:
-/// - The auth context exists but is malformed (can't deserialize into `User`)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HasRole {
-    pub role: String,
-    #[serde(default)]
-    pub realm: Option<String>,
+    pub roles: HashMap<String, Vec<String>>,
 }
 
 const ACCESS_DENIED: &str = "insufficient permissions";
@@ -181,34 +172,21 @@ impl CheckAction for HasRole {
             });
         }
 
-        if let Some(ref required_realm) = self.realm
-            && &auth_user.realm != required_realm
-        {
-            tracing::warn!(
-                user = auth_user.username,
-                realm = auth_user.realm,
-                required_realm = required_realm.as_str(),
-                "has_role: realm mismatch"
-            );
-            return Ok(CheckResult::Reject {
-                reason: ACCESS_DENIED.to_string(),
-                silent: false,
-            });
+        if let Some(allowed_roles) = self.roles.get(&auth_user.realm) {
+            if allowed_roles.iter().any(|r| auth_user.roles.contains(r)) {
+                return Ok(CheckResult::Pass);
+            }
         }
 
-        if auth_user.roles.contains(&self.role) {
-            Ok(CheckResult::Pass)
-        } else {
-            tracing::warn!(
-                user = auth_user.username,
-                role = self.role,
-                "has_role: user lacks required role"
-            );
-            Ok(CheckResult::Reject {
-                reason: ACCESS_DENIED.to_string(),
-                silent: false,
-            })
-        }
+        tracing::warn!(
+            user = auth_user.username,
+            realm = auth_user.realm,
+            "has_role: no matching realm/role pair"
+        );
+        Ok(CheckResult::Reject {
+            reason: ACCESS_DENIED.to_string(),
+            silent: false,
+        })
     }
 }
 

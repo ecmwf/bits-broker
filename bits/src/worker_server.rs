@@ -94,16 +94,17 @@ impl WorkerServer {
     /// Starts the shared HTTP server.
     ///
     /// If no pools have been registered, this is a no-op — no listener is
-    /// bound and no task is spawned.
+    /// bound and no task is spawned. Can be called again later once pools
+    /// have been registered.
     ///
     /// Returns an error if the TCP listener cannot bind (e.g. port in use).
-    /// Panics if called more than once.
+    /// Once the server is actually listening, subsequent calls are no-ops.
     pub fn start(&self) -> Result<(), String> {
+        if self.started.get().is_some() {
+            return Ok(());
+        }
         let pools = self.pools.lock().unwrap_or_else(|p| p.into_inner());
         if pools.is_empty() {
-            self.started
-                .set(())
-                .expect("WorkerServer::start called more than once");
             return Ok(());
         }
 
@@ -140,9 +141,7 @@ impl WorkerServer {
             .map_err(|e| format!("worker server: failed to convert listener to async: {e}"))?;
         let local_addr = listener.local_addr();
 
-        self.started
-            .set(())
-            .expect("WorkerServer::start called more than once");
+        let _ = self.started.set(());
 
         tokio::spawn(async move {
             match local_addr {
@@ -243,12 +242,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_panics_if_called_twice() {
+    async fn start_is_idempotent() {
         let ws = Arc::new(WorkerServer::new("127.0.0.1", 0));
         ws.start().expect("first start should succeed");
-        let ws2 = ws.clone();
-        let result = std::panic::catch_unwind(move || ws2.start());
-        assert!(result.is_err(), "second call to start() should panic");
+        ws.start().expect("second start should also succeed");
     }
 
     #[tokio::test]

@@ -171,7 +171,7 @@ impl RouteFactory {
         Ok(routes)
     }
 
-    pub fn start_worker_server(&self) -> Result<(), String> {
+    pub(crate) fn start_worker_server(&self) -> Result<(), String> {
         if let Some(ws) = &self.worker_server {
             ws.start()?;
         }

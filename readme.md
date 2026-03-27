@@ -155,6 +155,29 @@ See [Writing Custom Actions](docs/src/custom-actions.md) for the full Python API
 
 ---
 
+## 🔀 Programmatic Routes
+
+The `routes` section in YAML is optional. When your application manages its own collection or
+tenant model, you can add routes at runtime via `Bits::add_route()`:
+
+```rust
+let bits = Bits::from_config(config)?;
+
+// Add a route from a YAML fragment — shared targets use the same Arc
+let handle = bits.add_route("my_collection", &route_yaml)?;
+
+// Submit via the named route
+let job_handle = handle.submit(Job::new(json!({"class": "od"})));
+```
+
+If the route uses `target::remote`, the worker server is started automatically inside
+`add_route()` — no extra call is needed.
+
+Routes added this way share registries and target instances with YAML-defined routes. See
+[Programmatic Routes](docs/src/configuration.md#programmatic-routes) for details.
+
+---
+
 ## 📐 Dispatcher Config
 
 Any step in a pipeline can be given a dispatcher via a `dispatcher:` key. For named registry entries it sits alongside `type:`; for inline steps it is a sibling key of the action mapping:
@@ -186,7 +209,7 @@ routes:
 | Field | Values | Default |
 |-------|--------|---------|
 | `queue` | `fifo`, `cost_weighted`, `age_priority` | none (FIFO when `concurrency` is set) |
-| `executor` | `semaphore`, `thread_pool`, `remote_pool`* | `semaphore` |
+| `executor` | `async_pool`, `thread_pool`, `remote_pool`* | `async_pool` |
 | `concurrency` | positive integer | unlimited |
 
 \* `remote_pool` is only valid with `target::remote`.

@@ -1,7 +1,12 @@
 # Configuration
 
-BITS configuration is a single YAML file with four top-level sections: three typed registries
-(`checks`, `transforms`, `targets`) and a `routes` section.
+BITS configuration is a single YAML file with typed registries
+(`checks`, `transforms`, `targets`) and an optional `routes` section.
+
+Routes can be defined statically in the YAML or added programmatically at runtime via
+`Bits::add_route()`. This is useful when the host application manages its own collection
+or tenant model and maps each to a separate BITS route. See
+[Programmatic Routes](#programmatic-routes) below.
 
 ## Registries
 
@@ -31,8 +36,10 @@ resources (such as a target with a dispatcher) are the same instance in memory.
 
 ## Routes
 
-Routes define ordered pipelines of action steps. Steps reference named registry entries or define
-actions inline.
+The `routes` section is **optional**. When present, it defines ordered pipelines of action steps
+that are loaded at config parse time. Steps reference named registry entries or define actions
+inline. When omitted, routes must be added programmatically via `add_route()` — see
+[Programmatic Routes](#programmatic-routes).
 
 ```yaml
 routes:
@@ -194,3 +201,49 @@ bits:
 Persistence requires a configured storage backend. TiKV is supported when the `tikv` Cargo
 feature is enabled. If TiKV configuration is present but the crate is built without the `tikv`
 feature, startup fails immediately with a configuration error.
+
+## Programmatic Routes
+
+When the host application manages its own routing model (e.g. per-collection or per-tenant
+routing), routes can be added after config load via `Bits::add_route()`.
+
+The YAML file still defines registries (`checks`, `targets`, `transforms`), `bits:` settings, and
+optionally a `worker_server:` block — but the `routes` section can be omitted entirely.
+
+### add_route
+
+`Bits::add_route()` parses a route YAML fragment against the already-loaded registries and
+returns a `RouteHandle`:
+
+```rust
+let bits = Bits::from_config(config)?;
+
+// Parse a route from a YAML value — actions that reference named
+// registry entries (e.g. target::backend) share the same Arc instances.
+let handle: RouteHandle = bits.add_route("my_collection", &route_yaml_value)?;
+
+// Submit a job via the named route handle
+let job_handle = handle.submit(Job::new(json!({"class": "od"})));
+```
+
+### RouteHandle
+
+`add_route()` returns a `RouteHandle` — an opaque handle the host application uses to submit
+jobs to a specific route. The host keeps the mapping from its own collection/tenant names to
+route handles.
+
+### Shared resources
+
+Routes added via `add_route()` share the same action registries and target `Arc`s as routes
+defined in the YAML. This means a named target like `target::backend` with a dispatcher is the
+same instance across all routes — jobs from any route contend on the same concurrency pool and
+queue.
+
+### Worker server
+
+When using `target::remote` with programmatic routes, remote pool targets may be registered
+during `add_route()` — after the initial config parse. The worker server is started
+automatically inside `add_route()` whenever remote pools have been registered. The call is
+idempotent — once the listener is bound, subsequent `add_route()` calls skip re-binding.
+
+No explicit worker server management is needed from the host application.

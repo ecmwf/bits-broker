@@ -221,6 +221,10 @@ impl Bits {
             .expect("route storage lock poisoned")
             .push(handle.clone());
 
+        // Start the worker server if any remote pools were registered by this route.
+        // Idempotent — safe to call on every add_route().
+        self.route_factory.start_worker_server()?;
+
         Ok(handle)
     }
 

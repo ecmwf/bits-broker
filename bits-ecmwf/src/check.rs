@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use authotron_types::User as AuthUser;
 use bits::Job;
 use bits::actions::{ActionError, CheckAction, CheckResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use authotron_types::User as AuthUser;
 
 use crate::date_check::date_check;
 use crate::schedule::{ScheduleCatalog, ScheduleReleased};

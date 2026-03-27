@@ -118,7 +118,12 @@ impl WorkerServer {
     }
 
     pub fn start(&self) -> Result<(), String> {
-        if self.pools.read().unwrap_or_else(|p| p.into_inner()).is_empty() {
+        if self
+            .pools
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty()
+        {
             return Ok(());
         }
         self.ensure_started()
@@ -541,9 +546,7 @@ mod tests {
         }
 
         let resp = client
-            .get(format!(
-                "http://127.0.0.1:{port}/pool/work?timeout_ms=5000"
-            ))
+            .get(format!("http://127.0.0.1:{port}/pool/work?timeout_ms=5000"))
             .send()
             .await
             .unwrap();
@@ -566,11 +569,8 @@ mod tests {
             "server should not be listening before any pool is registered"
         );
 
-        ws.register_pool(
-            "pool",
-            Router::new().route("/ping", get(|| async { "ok" })),
-        )
-        .unwrap();
+        ws.register_pool("pool", Router::new().route("/ping", get(|| async { "ok" })))
+            .unwrap();
 
         for _ in 0..100 {
             if client

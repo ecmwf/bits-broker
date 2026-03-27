@@ -190,6 +190,10 @@ impl Bits {
             .collect()
     }
 
+    pub fn start_worker_server(&self) -> Result<(), String> {
+        self.route_factory.start_worker_server()
+    }
+
     pub fn add_route(
         &self,
         name: &str,

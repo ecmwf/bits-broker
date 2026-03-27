@@ -138,6 +138,22 @@ impl CheckAction for ScheduleReleased {
 
 bits::register_action!(check, "schedule_released", ScheduleReleased);
 
+/// Check that the authenticated user holds a required role in a listed realm.
+///
+/// `roles` maps realm names to allowed role lists. A user passes if their realm
+/// is present in the map **and** they hold at least one of the listed roles.
+///
+/// Reads the auth context from `job.user["auth"]`, which is set by polytope-server
+/// when it forwards the authenticated user into the job.
+///
+/// Returns `Reject` (non-silent, generic message) when:
+/// - No auth context is present in `job.user`
+/// - The user's realm is not listed in `roles`
+/// - The user's roles don't intersect with the allowed roles for their realm
+/// - The auth schema version is not `1`
+///
+/// Returns `ActionError::AuthError` when:
+/// - The auth context exists but cannot be deserialized into [`authotron_types::User`]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HasRole {
     pub roles: HashMap<String, Vec<String>>,

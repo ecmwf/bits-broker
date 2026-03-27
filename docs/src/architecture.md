@@ -131,8 +131,9 @@ One task runs an axum HTTP server on the configured bind address (default `0.0.0
 The `/work` endpoint calls `queue.dequeue()` directly when a remote worker long-polls — there
 is no intermediate feeder task. A second task scans in-progress jobs every
 `heartbeat_timeout / 2` seconds and evicts any worker that has stopped sending heartbeats.
-Only started when `executor: remote_pool` is configured (or when `target::remote` is used, which
-implies it).
+Started when `executor: remote_pool` is configured (or when `target::remote` is used, which
+implies it). When routes are added programmatically via `add_route()`, remote pools are
+registered during that call and the worker server listener is started automatically.
 
 For the wire protocol and worker implementation contract, see
 [External Workers](external-workers.md).
@@ -154,8 +155,8 @@ There is no separate timer task — the threshold logic lives inside this task v
 | Async pool scheduler | Tokio tasks | N per `async_pool` executor | At config parse, per dispatcher block |
 | Cost-weighted queue worker | Tokio task | 1 per `cost_weighted` queue | At config parse, if `queue: cost_weighted` |
 | Thread pool OS workers | OS threads | N per `thread_pool` executor | At config parse, if `executor: thread_pool` |
-| Remote pool HTTP server | Tokio task | 1 per `remote_pool` executor | At config parse, if `executor: remote_pool` |
-| Remote pool heartbeat reaper | Tokio task | 1 per `remote_pool` executor | At config parse, if `executor: remote_pool` |
+| Remote pool HTTP server | Tokio task | 1 per `remote_pool` executor | At config parse, or on first `add_route()` with remote pools |
+| Remote pool heartbeat reaper | Tokio task | 1 per `remote_pool` executor | At config parse, or on first `add_route()` with remote pools |
 | Job dispatch + persist timer | Tokio task | 1 per submitted job | Per `Bits::submit()` |
 
 ## Multi-broker cooperation

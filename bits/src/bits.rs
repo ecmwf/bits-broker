@@ -190,10 +190,6 @@ impl Bits {
             .collect()
     }
 
-    pub fn start_worker_server(&self) -> Result<(), String> {
-        self.route_factory.start_worker_server()
-    }
-
     pub fn add_route(
         &self,
         name: &str,
@@ -220,6 +216,10 @@ impl Bits {
             .write()
             .expect("route storage lock poisoned")
             .push(handle.clone());
+
+        // Start the worker server if any remote pools were registered by this route.
+        // Idempotent — safe to call on every add_route().
+        self.route_factory.start_worker_server()?;
 
         Ok(handle)
     }

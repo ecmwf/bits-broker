@@ -288,6 +288,7 @@ dependencies = [
  "tikv-client",
  "tokio",
  "tokio-stream",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
  "uuid",

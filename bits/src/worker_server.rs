@@ -1,9 +1,10 @@
 //! Shared HTTP server for all remote worker pools.
 //!
 //! Multiple [`RemotePoolExecutor`] instances register their per-pool routers
-//! here via [`WorkerServer::register_pool`]. Once all pools have registered,
-//! [`WorkerServer::start`] assembles a combined router using Axum's
-//! `Router::nest`, binds a single TCP listener, and spawns the server task.
+//! via [`WorkerServer::register_pool`]. The server binds its TCP listener
+//! lazily on the first registration and dispatches requests dynamically,
+//! so pools can be added at any time — including after the server is already
+//! serving traffic.
 //!
 //! Each pool's endpoints are nested under `/{pool_name}/`:
 //! - `GET  /{pool_name}/work?timeout_ms=N`
@@ -17,15 +18,13 @@
 //! It is intended to run on a trusted internal network; no authentication is
 //! provided.
 
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use axum::Router;
 use axum::http::{StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 
-/// Validates that a pool name is URL-safe.
-///
-/// Valid: alphanumeric characters, underscores, and hyphens.
-/// Returns an error if the name contains any other character.
 fn validate_pool_name(name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if name.is_empty() {
         return Err("pool name must not be empty".into());
@@ -45,39 +44,29 @@ fn validate_pool_name(name: &str) -> Result<(), Box<dyn std::error::Error + Send
 
 /// Shared HTTP server that routes worker requests across multiple remote pools.
 ///
-/// Call [`register_pool`] once per remote pool to register its sub-router,
-/// then call [`start`] to bind the listener and begin serving.
+/// Pools can be registered at any time via [`register_pool`]. The TCP listener
+/// is bound lazily on the first registration, and incoming requests are
+/// dispatched dynamically — so pools added after the server is already running
+/// become reachable immediately without a restart.
 ///
 /// [`register_pool`]: WorkerServer::register_pool
-/// [`start`]: WorkerServer::start
 pub struct WorkerServer {
     host: String,
     port: u16,
-    /// Accumulated per-pool (name, router) pairs, guarded by a mutex so that
-    /// `RemotePoolExecutor::start_scheduler` (called from multiple sites during
-    /// config parsing) can register in any order.
-    pools: Mutex<Vec<(String, Router)>>,
-    /// Ensures `start` is only called once.
+    pools: Arc<RwLock<HashMap<String, Router>>>,
     started: OnceLock<()>,
 }
 
 impl WorkerServer {
-    /// Creates a new `WorkerServer` that will bind to `host:port` when started.
     pub fn new(host: &str, port: u16) -> Self {
         Self {
             host: host.to_string(),
             port,
-            pools: Mutex::new(Vec::new()),
+            pools: Arc::new(RwLock::new(HashMap::new())),
             started: OnceLock::new(),
         }
     }
 
-    /// Registers a pool sub-router under `/{pool_name}/`.
-    ///
-    /// Must be called before [`start`]. Returns an error if the pool name
-    /// contains invalid characters (only `[a-zA-Z0-9_-]` are allowed).
-    ///
-    /// [`start`]: Self::start
     pub fn register_pool(
         &self,
         pool_name: &str,
@@ -85,52 +74,22 @@ impl WorkerServer {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         validate_pool_name(pool_name)?;
         self.pools
-            .lock()
+            .write()
             .unwrap_or_else(|p| p.into_inner())
-            .push((pool_name.to_string(), router));
+            .insert(pool_name.to_string(), router);
+        tracing::info!(pool = %pool_name, "registered worker pool");
+        self.ensure_started()
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
         Ok(())
     }
 
-    /// Starts the shared HTTP server.
-    ///
-    /// If no pools have been registered, this is a no-op — no listener is
-    /// bound and no task is spawned. Can be called again later once pools
-    /// have been registered.
-    ///
-    /// Returns an error if the TCP listener cannot bind (e.g. port in use).
-    /// Once the server is actually listening, subsequent calls are no-ops.
-    pub fn start(&self) -> Result<(), String> {
+    fn ensure_started(&self) -> Result<(), String> {
         if self.started.get().is_some() {
             return Ok(());
         }
-        let pools = self.pools.lock().unwrap_or_else(|p| p.into_inner());
-        if pools.is_empty() {
-            return Ok(());
-        }
+        let _ = self.started.set(());
 
-        let pool_names: Vec<String> = pools.iter().map(|(name, _)| name.clone()).collect();
-
-        let mut app = Router::new();
-        for (pool_name, pool_router) in pools.iter() {
-            app = app.nest(&format!("/{pool_name}"), pool_router.clone());
-        }
-
-        let fallback_pools = pool_names.clone();
-        app = app.fallback(move |uri: Uri| {
-            let pools = fallback_pools.clone();
-            async move {
-                let requested = uri.path().split('/').nth(1).unwrap_or(uri.path());
-                let available = pools.join(", ");
-                (
-                    StatusCode::NOT_FOUND,
-                    format!(
-                        "pool '{}' not found; available pools: [{}]",
-                        requested, available
-                    ),
-                )
-            }
-        });
-
+        let pools = self.pools.clone();
         let bind_addr = format!("{}:{}", self.host, self.port);
         let std_listener = std::net::TcpListener::bind(&bind_addr)
             .map_err(|e| format!("worker server failed to bind to {bind_addr}: {e}"))?;
@@ -141,13 +100,15 @@ impl WorkerServer {
             .map_err(|e| format!("worker server: failed to convert listener to async: {e}"))?;
         let local_addr = listener.local_addr();
 
-        let _ = self.started.set(());
+        let app = Router::new().fallback(move |req: axum::extract::Request| {
+            let pools = pools.clone();
+            async move { dispatch_to_pool(pools, req).await }
+        });
 
         tokio::spawn(async move {
-            let pools_list = pool_names.join(", ");
             match local_addr {
-                Ok(addr) => tracing::info!(address = %addr, pools = %pools_list, "worker server listening"),
-                Err(_) => tracing::info!(address = %bind_addr, pools = %pools_list, "worker server listening"),
+                Ok(addr) => tracing::info!(address = %addr, "worker server listening"),
+                Err(_) => tracing::info!(address = %bind_addr, "worker server listening"),
             }
             if let Err(e) = axum::serve(listener, app).await {
                 tracing::error!(error = %e, "worker server exited with error");
@@ -155,6 +116,84 @@ impl WorkerServer {
         });
         Ok(())
     }
+
+    pub fn start(&self) -> Result<(), String> {
+        if self.pools.read().unwrap_or_else(|p| p.into_inner()).is_empty() {
+            return Ok(());
+        }
+        self.ensure_started()
+    }
+}
+
+fn extract_pool_and_rest(path: &str) -> (&str, &str) {
+    let after_slash = path.strip_prefix('/').unwrap_or(path);
+    match after_slash.find('/') {
+        Some(pos) => (&after_slash[..pos], &after_slash[pos..]),
+        None if !after_slash.is_empty() => (after_slash, "/"),
+        _ => ("", "/"),
+    }
+}
+
+async fn dispatch_to_pool(
+    pools: Arc<RwLock<HashMap<String, Router>>>,
+    req: axum::extract::Request,
+) -> Response {
+    use tower_service::Service;
+
+    let path = req.uri().path().to_string();
+    let (pool_name, rest_path) = extract_pool_and_rest(&path);
+
+    if pool_name.is_empty() {
+        let available = available_pools_string(&pools);
+        return (
+            StatusCode::NOT_FOUND,
+            format!("no pool specified; available pools: [{available}]"),
+        )
+            .into_response();
+    }
+
+    let mut router = {
+        let map = pools.read().unwrap_or_else(|p| p.into_inner());
+        match map.get(pool_name) {
+            Some(r) => r.clone(),
+            None => {
+                let available = map.keys().cloned().collect::<Vec<_>>().join(", ");
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!(
+                        "pool '{}' not found; available pools: [{}]",
+                        pool_name, available
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let (mut parts, body) = req.into_parts();
+    let new_pq = match parts.uri.query() {
+        Some(q) => format!("{rest_path}?{q}"),
+        None => rest_path.to_string(),
+    };
+    let mut uri_parts = parts.uri.into_parts();
+    uri_parts.path_and_query = Some(new_pq.parse().expect("rewritten path must be valid"));
+    parts.uri = Uri::from_parts(uri_parts).expect("rewritten URI must be valid");
+    let req = axum::http::Request::from_parts(parts, body);
+
+    match router.call(req).await {
+        Ok(response) => response,
+        Err(err) => match err {},
+    }
+}
+
+fn available_pools_string(pools: &Arc<RwLock<HashMap<String, Router>>>) -> String {
+    pools
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -168,7 +207,6 @@ mod tests {
     async fn free_port() -> u16 {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         l.local_addr().unwrap().port()
-        // listener drops here, releasing the port
     }
 
     #[test]
@@ -176,8 +214,8 @@ mod tests {
         let _ws = WorkerServer::new("127.0.0.1", 0);
     }
 
-    #[test]
-    fn register_pool_valid_names_succeed() {
+    #[tokio::test]
+    async fn register_pool_valid_names_succeed() {
         let ws = WorkerServer::new("127.0.0.1", 0);
         ws.register_pool("mars", Router::new()).unwrap();
         ws.register_pool("fdb_slow", Router::new()).unwrap();
@@ -227,16 +265,10 @@ mod tests {
 
     #[tokio::test]
     async fn start_with_no_pools_does_not_bind() {
-        // `start` with zero registered pools must not bind a TCP listener.
-        // We verify indirectly: bind port 0 to get a free port, then start a
-        // WorkerServer on that port. If it bound a listener, a subsequent bind
-        // to the same port would fail; if it didn't, the subsequent bind succeeds.
         let port = free_port().await;
         let ws = WorkerServer::new("127.0.0.1", port);
         ws.start().expect("start with no pools should succeed");
-        // Give any async tasks a chance to run (should be none).
         tokio::time::sleep(Duration::from_millis(20)).await;
-        // The port should be free because no server was started.
         tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
             .await
             .expect("port should be available — worker server should not have bound it");
@@ -255,26 +287,17 @@ mod tests {
         let port = blocker.local_addr().unwrap().port();
 
         let ws = WorkerServer::new("127.0.0.1", port);
-        ws.register_pool("pool", Router::new()).unwrap();
-        let err = ws.start().unwrap_err();
-        assert!(
-            err.contains("failed to bind"),
-            "expected bind error, got: {err}"
-        );
+        ws.register_pool("pool", Router::new()).unwrap_err();
     }
 
     #[tokio::test]
     async fn start_serves_nested_routes() {
-        // Register a trivial pool router and verify that its routes are
-        // reachable under the pool name prefix.
         let port = free_port().await;
         let ws = WorkerServer::new("127.0.0.1", port);
 
         let pool_router = Router::new().route("/ping", get(|| async { StatusCode::OK }));
         ws.register_pool("mypool", pool_router).unwrap();
-        ws.start().expect("worker server should bind successfully");
 
-        // Wait for server to be ready.
         let client = reqwest::Client::new();
         for _ in 0..100 {
             if client
@@ -288,7 +311,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        // Prefixed path should work.
         let resp = client
             .get(format!("http://127.0.0.1:{port}/mypool/ping"))
             .send()
@@ -296,7 +318,6 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
 
-        // Flat path (no prefix) should return 404.
         let resp = client
             .get(format!("http://127.0.0.1:{port}/ping"))
             .send()
@@ -320,10 +341,8 @@ mod tests {
             Router::new().route("/ping", get(|| async { "beta" })),
         )
         .unwrap();
-        ws.start().expect("worker server should bind successfully");
 
         let client = reqwest::Client::new();
-        // Wait for ready.
         for _ in 0..100 {
             if client
                 .get(format!("http://127.0.0.1:{port}/alpha/ping"))
@@ -356,7 +375,6 @@ mod tests {
             .unwrap();
         assert_eq!(beta, "beta");
 
-        // Wrong prefix → 404 with helpful message.
         let resp = client
             .get(format!("http://127.0.0.1:{port}/gamma/ping"))
             .send()
@@ -372,5 +390,205 @@ mod tests {
             body.contains("alpha") && body.contains("beta"),
             "expected available pools in message, got: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn pool_added_after_start_is_reachable() {
+        let port = free_port().await;
+        let ws = Arc::new(WorkerServer::new("127.0.0.1", port));
+
+        ws.register_pool(
+            "first",
+            Router::new().route("/ping", get(|| async { "first" })),
+        )
+        .unwrap();
+
+        let client = reqwest::Client::new();
+        for _ in 0..100 {
+            if client
+                .get(format!("http://127.0.0.1:{port}/first/ping"))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        ws.register_pool(
+            "second",
+            Router::new().route("/ping", get(|| async { "second" })),
+        )
+        .unwrap();
+
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/second/ping"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "second");
+    }
+
+    #[tokio::test]
+    async fn pool_added_after_start_appears_in_404_message() {
+        let port = free_port().await;
+        let ws = Arc::new(WorkerServer::new("127.0.0.1", port));
+
+        ws.register_pool("initial", Router::new()).unwrap();
+
+        let client = reqwest::Client::new();
+        for _ in 0..100 {
+            if client
+                .get(format!("http://127.0.0.1:{port}/initial/work"))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        ws.register_pool("late_pool", Router::new()).unwrap();
+
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/unknown/work"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains("initial") && body.contains("late_pool"),
+            "404 should list all pools including late additions, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_replacement_serves_new_router() {
+        let port = free_port().await;
+        let ws = Arc::new(WorkerServer::new("127.0.0.1", port));
+
+        ws.register_pool(
+            "mypool",
+            Router::new().route("/ping", get(|| async { "v1" })),
+        )
+        .unwrap();
+
+        let client = reqwest::Client::new();
+        for _ in 0..100 {
+            if client
+                .get(format!("http://127.0.0.1:{port}/mypool/ping"))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/mypool/ping"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.text().await.unwrap(), "v1");
+
+        ws.register_pool(
+            "mypool",
+            Router::new().route("/ping", get(|| async { "v2" })),
+        )
+        .unwrap();
+
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/mypool/ping"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.text().await.unwrap(), "v2");
+    }
+
+    #[tokio::test]
+    async fn query_string_preserved_through_dispatch() {
+        let port = free_port().await;
+        let ws = WorkerServer::new("127.0.0.1", port);
+
+        ws.register_pool(
+            "pool",
+            Router::new().route(
+                "/work",
+                get(|req: axum::extract::Request| async move {
+                    req.uri().query().unwrap_or("none").to_string()
+                }),
+            ),
+        )
+        .unwrap();
+
+        let client = reqwest::Client::new();
+        for _ in 0..100 {
+            if client
+                .get(format!("http://127.0.0.1:{port}/pool/work"))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let resp = client
+            .get(format!(
+                "http://127.0.0.1:{port}/pool/work?timeout_ms=5000"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "timeout_ms=5000");
+    }
+
+    #[tokio::test]
+    async fn auto_starts_on_first_registration() {
+        let port = free_port().await;
+        let ws = WorkerServer::new("127.0.0.1", port);
+
+        let client = reqwest::Client::new();
+        assert!(
+            client
+                .get(format!("http://127.0.0.1:{port}/anything"))
+                .send()
+                .await
+                .is_err(),
+            "server should not be listening before any pool is registered"
+        );
+
+        ws.register_pool(
+            "pool",
+            Router::new().route("/ping", get(|| async { "ok" })),
+        )
+        .unwrap();
+
+        for _ in 0..100 {
+            if client
+                .get(format!("http://127.0.0.1:{port}/pool/ping"))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/pool/ping"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
     }
 }

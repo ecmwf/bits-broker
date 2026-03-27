@@ -145,11 +145,6 @@ bits::register_action!(check, "schedule_released", ScheduleReleased);
 /// Reads the auth context from `job.user["auth"]`, which is set by polytope-server
 /// when it forwards the authenticated user into the job.
 ///
-/// Use `HasRole` when a route **requires** specific credentials — rejections are
-/// non-silent with a generic "insufficient permissions" message (detailed reasons
-/// are logged).  For route selection based on auth *presence* alone, use
-/// [`HasAuth`] instead.
-///
 /// Returns `ActionError::AuthError` when:
 /// - The auth context exists but is malformed (can't deserialize into `User`)
 #[derive(Debug, Serialize, Deserialize)]
@@ -218,112 +213,6 @@ impl CheckAction for HasRole {
 }
 
 bits::register_action!(check, "has_role", HasRole);
-
-/// Routing discriminator: passes when the job carries a valid authenticated user.
-///
-/// Unlike [`HasRole`], rejections are **silent** so the router falls through to
-/// the next route (e.g. a public/anonymous path).  Use `HasAuth` to split traffic
-/// between authenticated and unauthenticated routes; use `HasRole` to enforce
-/// specific credentials within an authenticated route.
-///
-/// Returns `ActionError::AuthError` when `job.user["auth"]` exists but cannot
-/// be parsed as a valid `User` — this indicates a broken auth context, not
-/// simply an unauthenticated request.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HasAuth {}
-
-#[async_trait]
-impl CheckAction for HasAuth {
-    async fn evaluate(&self, job: &Job) -> Result<CheckResult, ActionError> {
-        let Some(auth_value) = job.user.get("auth") else {
-            return Ok(CheckResult::Reject {
-                reason: "no authentication context in job".to_string(),
-                silent: true,
-            });
-        };
-
-        if auth_value.is_null() {
-            return Ok(CheckResult::Reject {
-                reason: "no authentication context in job".to_string(),
-                silent: true,
-            });
-        }
-
-        serde_json::from_value::<AuthUser>(auth_value.clone())
-            .map_err(|e| ActionError::AuthError(format!("invalid auth context: {}", e)))?;
-
-        Ok(CheckResult::Pass)
-    }
-}
-
-bits::register_action!(check, "has_auth", HasAuth);
-
-#[cfg(test)]
-mod has_auth_tests {
-    use super::*;
-    use authotron_types::User;
-    use serde_json::json;
-
-    #[tokio::test]
-    async fn pass_when_auth_present() {
-        let user = User::new("ecmwf".into(), "alice".into(), None, None, None, None);
-        let mut job = Job::new(json!({}));
-        *job.user_mut() = json!({
-            "client_ip": "1.2.3.4",
-            "auth": serde_json::to_value(&user).unwrap(),
-        });
-        let result = (HasAuth {}).evaluate(&job).await.unwrap();
-        assert!(matches!(result, CheckResult::Pass));
-    }
-
-    #[tokio::test]
-    async fn reject_silently_when_no_auth() {
-        let mut job = Job::new(json!({}));
-        *job.user_mut() = json!({"client_ip": "1.2.3.4"});
-        let result = (HasAuth {}).evaluate(&job).await.unwrap();
-        match result {
-            CheckResult::Reject { silent, .. } => assert!(silent, "should be silent for routing"),
-            _ => panic!("expected Reject"),
-        }
-    }
-
-    #[tokio::test]
-    async fn reject_silently_when_user_empty() {
-        let job = Job::new(json!({}));
-        let result = (HasAuth {}).evaluate(&job).await.unwrap();
-        assert!(matches!(result, CheckResult::Reject { silent: true, .. }));
-    }
-
-    #[tokio::test]
-    async fn reject_silently_when_auth_is_null() {
-        let mut job = Job::new(json!({}));
-        *job.user_mut() = json!({"auth": null});
-        let result = (HasAuth {}).evaluate(&job).await.unwrap();
-        assert!(matches!(result, CheckResult::Reject { silent: true, .. }));
-    }
-
-    #[tokio::test]
-    async fn error_when_auth_is_malformed() {
-        let mut job = Job::new(json!({}));
-        *job.user_mut() = json!({"auth": "not a valid User object"});
-        let result = (HasAuth {}).evaluate(&job).await;
-        assert!(
-            matches!(result, Err(ActionError::AuthError(_))),
-            "malformed auth should be an error, not silent rejection"
-        );
-    }
-
-    #[tokio::test]
-    async fn error_when_auth_is_partial_object() {
-        let mut job = Job::new(json!({}));
-        *job.user_mut() = json!({"auth": {"username": "alice"}});
-        let result = (HasAuth {}).evaluate(&job).await;
-        assert!(
-            matches!(result, Err(ActionError::AuthError(_))),
-            "partial auth object missing required fields should be an error"
-        );
-    }
-}
 
 #[cfg(test)]
 mod has_role_tests {

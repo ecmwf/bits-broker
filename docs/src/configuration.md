@@ -63,6 +63,31 @@ Actions can be defined directly in a route without a registry entry:
 Inline actions are not reusable — each occurrence is an independent instance. Use the registry
 when you want to share an action (and its dispatcher) across multiple routes.
 
+### Role-based access control
+
+`has_role` checks that the authenticated user belongs to a listed realm and holds at least one of
+the allowed roles for that realm. The `roles` field is a map of realm name to allowed role lists:
+
+```yaml
+- check::has_role:
+    roles:
+      ecmwf:
+        - admin
+        - data_access
+      cds:
+        - viewer
+```
+
+A user passes if their realm appears in the map **and** they hold any of the roles listed under
+that realm. Users whose realm is not listed, or who lack a matching role, are rejected.
+
+Rejections use a generic `"insufficient permissions"` message to avoid leaking realm/role details.
+Two distinct `WARN`-level log messages help operators diagnose failures:
+
+- `"user realm not listed in allowed realms"` — the user's realm doesn't appear in the `roles` map.
+- `"realm matched but user lacks a required role"` — the realm matched but the user holds none of the
+  allowed roles.
+
 ## Dispatcher
 
 Any action step — check, transform, or target — can include a `dispatcher:` section to control
@@ -143,6 +168,7 @@ Built-in defaults:
 | Action | `silent` |
 |--------|----------|
 | `match` | `true` |
+| `has_role` | `false` |
 | `has_license` | `true` |
 | `has_key` | `true` |
 | `date_checker` | `false` |

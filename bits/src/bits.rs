@@ -4,17 +4,18 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::config::{RuntimeConfig, parse_bootstrap};
+use crate::config::{RouteFactory, RuntimeConfig, parse_bootstrap};
 use crate::db::{ClaimResult, DbError, PersistenceStore};
 use crate::job::Job;
 use crate::result::JobResult;
+use crate::route_handle::RouteHandle;
 use crate::routing::switch::Switch;
 use crate::runtime::maintenance::{ConnectedGuard, ShutdownSignal, start_sweeper};
 use crate::runtime::recovery::{LeaseLookup, owner_from_job_id};
 use crate::runtime::runner::spawn_job;
 
 /// Buffer added on top of the poll timeout to allow for the reconnect round-trip.
-const RECONNECT_BUFFER: Duration = Duration::from_secs(5);
+pub(crate) const RECONNECT_BUFFER: Duration = Duration::from_secs(5);
 /// Default sweep interval for removing expired completed jobs.
 const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -40,6 +41,8 @@ pub struct JobHandle {
 /// Main broker runtime used to submit, cancel, and poll jobs.
 pub struct Bits {
     pub(crate) router: Arc<Switch>,
+    #[allow(dead_code)]
+    pub(crate) route_factory: RouteFactory,
     pub(crate) jobs: Arc<DashMap<String, Arc<Job>>>,
     pub(crate) broker_id: String,
     pub(crate) internal_poll_base_url: String,
@@ -49,6 +52,7 @@ pub struct Bits {
     pub(crate) internal_client: reqwest::Client,
     pub(crate) shutdown: Arc<ShutdownSignal>,
     pub(crate) in_flight: Arc<AtomicUsize>,
+    pub(crate) added_routes: Arc<std::sync::RwLock<Vec<RouteHandle>>>,
     sweeper_handle: Option<std::thread::JoinHandle<()>>,
     heartbeat_handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -68,6 +72,7 @@ impl Bits {
         let shutdown = Arc::new(ShutdownSignal::new());
         let mut bits = Bits {
             router: Arc::new(router),
+            route_factory: RouteFactory::default(),
             jobs: Arc::new(DashMap::new()),
             broker_id,
             internal_poll_base_url,
@@ -80,6 +85,7 @@ impl Bits {
                 .expect("failed to build reqwest client"),
             shutdown: shutdown.clone(),
             in_flight: Arc::new(AtomicUsize::new(0)),
+            added_routes: Arc::new(std::sync::RwLock::new(vec![])),
             sweeper_handle: None,
             heartbeat_handle: None,
         };
@@ -106,6 +112,7 @@ impl Bits {
         let shutdown = Arc::new(ShutdownSignal::new());
         let mut bits = Bits {
             router: Arc::new(parsed.router),
+            route_factory: parsed.route_factory,
             jobs: Arc::new(DashMap::new()),
             broker_id: instance_id,
             internal_poll_base_url: parsed.internal_poll_base_url,
@@ -117,6 +124,7 @@ impl Bits {
                 .build()?,
             shutdown: shutdown.clone(),
             in_flight: Arc::new(AtomicUsize::new(0)),
+            added_routes: Arc::new(std::sync::RwLock::new(vec![])),
             sweeper_handle: None,
             heartbeat_handle: None,
         };
@@ -137,14 +145,79 @@ impl Bits {
         &self.broker_id
     }
 
+    pub fn route_factory(&self) -> &RouteFactory {
+        &self.route_factory
+    }
+
     /// Returns the names of the top-level routes configured on this broker.
-    pub fn route_names(&self) -> Vec<&str> {
-        self.router.route_names()
+    pub fn route_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .router
+            .route_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let added = self
+            .added_routes
+            .read()
+            .expect("route storage lock poisoned");
+        for handle in added.iter() {
+            names.extend(handle.router.route_names().iter().map(|s| s.to_string()));
+        }
+        names
     }
 
     /// Collects descriptors from every instantiated action in the routing tree.
     pub fn describe_actions(&self) -> Vec<serde_json::Value> {
-        self.router.describe_actions()
+        let mut out = self.router.describe_actions();
+        let added = self
+            .added_routes
+            .read()
+            .expect("route storage lock poisoned");
+        for handle in added.iter() {
+            out.extend(handle.router.describe_actions());
+        }
+        out
+    }
+
+    /// Returns the names of routes added via add_route() — used for collection enumeration.
+    pub fn added_route_names(&self) -> Vec<String> {
+        self.added_routes
+            .read()
+            .expect("route storage lock poisoned")
+            .iter()
+            .map(|h| h.name.clone())
+            .collect()
+    }
+
+    pub fn add_route(
+        &self,
+        name: &str,
+        route_value: &serde_json::Value,
+    ) -> Result<RouteHandle, Box<dyn std::error::Error>> {
+        let routes = self.route_factory.parse_route(name, route_value)?;
+        let switch = Switch::new(routes);
+        switch
+            .validate()
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+        let handle = RouteHandle {
+            name: name.to_string(),
+            router: Arc::new(switch),
+            jobs: self.jobs.clone(),
+            broker_id: self.broker_id.clone(),
+            job_store: self.job_store.clone(),
+            persist_after: self.persist_after,
+            in_flight: self.in_flight.clone(),
+        };
+
+        // Store a clone of the handle for enumeration
+        self.added_routes
+            .write()
+            .expect("route storage lock poisoned")
+            .push(handle.clone());
+
+        Ok(handle)
     }
 
     /// Submits a job for routing and execution.
@@ -351,5 +424,71 @@ impl Drop for Bits {
         {
             tracing::error!("heartbeat thread panicked during shutdown: {panic:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod route_handle_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::job::Job;
+
+    #[tokio::test]
+    async fn submit_via_route_handle_pollable_via_bits() {
+        let config = r#"
+targets:
+  my_target:
+    type: http
+    url: http://127.0.0.1:1
+"#;
+        let bits = Bits::from_config(config).expect("should build");
+        let route_val = serde_json::json!([{"my_route": ["target::my_target"]}]);
+        let handle = bits.add_route("my_route", &route_val).expect("add_route");
+
+        let job = Job::new(serde_json::json!({}));
+        let job_handle = handle.submit(job);
+
+        let outcome = bits
+            .poll(&job_handle.id, Some(Duration::from_secs(5)))
+            .await;
+        assert!(matches!(
+            outcome,
+            crate::PollOutcome::Ready(_) | crate::PollOutcome::Pending { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn route_handles_share_jobs_map_pollable_via_bits() {
+        let config = r#"
+targets:
+  my_target:
+    type: http
+    url: http://127.0.0.1:1
+"#;
+        let bits = Bits::from_config(config).expect("should build");
+        let route_val_a = serde_json::json!([{"route_a": ["target::my_target"]}]);
+        let route_val_b = serde_json::json!([{"route_b": ["target::my_target"]}]);
+        let handle_a = bits
+            .add_route("route_a", &route_val_a)
+            .expect("add_route_a");
+        let handle_b = bits
+            .add_route("route_b", &route_val_b)
+            .expect("add_route_b");
+
+        let job_a = handle_a.submit(Job::new(serde_json::json!({"n": 1})));
+        let job_b = handle_b.submit(Job::new(serde_json::json!({"n": 2})));
+
+        let outcome_a = bits.poll(&job_a.id, Some(Duration::from_secs(5))).await;
+        let outcome_b = bits.poll(&job_b.id, Some(Duration::from_secs(5))).await;
+
+        assert!(matches!(
+            outcome_a,
+            crate::PollOutcome::Ready(_) | crate::PollOutcome::Pending { .. }
+        ));
+        assert!(matches!(
+            outcome_b,
+            crate::PollOutcome::Ready(_) | crate::PollOutcome::Pending { .. }
+        ));
     }
 }

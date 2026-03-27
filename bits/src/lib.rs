@@ -12,6 +12,7 @@ pub mod dispatcher;
 pub mod job;
 /// Terminal job results returned to clients.
 pub mod result;
+mod route_handle;
 /// Routing types used to build pipelines and branching behavior.
 pub mod routing;
 mod runtime;
@@ -27,8 +28,9 @@ pub use actions::registry::{
 };
 pub use actions::*;
 pub use bits::{Bits, JobHandle, PollOutcome};
-pub use config::{Bootstrap, parse_bootstrap};
+pub use config::{Bootstrap, RouteFactory, parse_bootstrap};
 pub use db::*;
 pub use job::Job;
 pub use result::JobResult;
+pub use route_handle::RouteHandle;
 pub use server::ServerConfig;

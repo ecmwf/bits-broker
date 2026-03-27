@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -19,6 +20,12 @@ struct Registries {
     checks: HashMap<String, serde_json::Value>,
     transforms: HashMap<String, serde_json::Value>,
     targets: HashMap<String, serde_json::Value>,
+}
+
+pub struct RouteFactory {
+    registries: Registries,
+    resolved_targets: Mutex<HashMap<String, ResolvedTarget>>,
+    worker_server: Option<Arc<WorkerServer>>,
 }
 
 type ResolvedTarget = (
@@ -92,8 +99,54 @@ fn default_broker_lease_ttl_secs() -> f64 {
     30.0
 }
 
+impl RouteFactory {
+    fn from_parts(
+        registries: Registries,
+        resolved_targets: HashMap<String, ResolvedTarget>,
+        worker_server: Option<Arc<WorkerServer>>,
+    ) -> Self {
+        Self {
+            registries,
+            resolved_targets: Mutex::new(resolved_targets),
+            worker_server,
+        }
+    }
+
+    pub fn parse_route(
+        &self,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> Result<Vec<Route>, Box<dyn std::error::Error>> {
+        let cached_targets = self
+            .resolved_targets
+            .lock()
+            .map_err(|_| std::io::Error::other("route target cache mutex poisoned"))?
+            .clone();
+
+        let parse_ctx = ParseContext {
+            registries: self.registries.clone(),
+            resolved_targets: RefCell::new(cached_targets),
+            worker_server: self.worker_server.clone(),
+        };
+
+        let routes = parse_routes(value, name, &parse_ctx)?;
+        let resolved_targets = parse_ctx.resolved_targets.into_inner();
+
+        let mut shared_targets = self
+            .resolved_targets
+            .lock()
+            .map_err(|_| std::io::Error::other("route target cache mutex poisoned"))?;
+        for (target_name, target) in resolved_targets {
+            shared_targets.entry(target_name).or_insert(target);
+        }
+
+        Ok(routes)
+    }
+}
+
 pub(crate) struct RuntimeConfig {
     pub router: Switch,
+    pub route_factory: RouteFactory,
     pub sweep_interval: Option<Duration>,
     pub broker_id: String,
     pub internal_poll_base_url: String,
@@ -130,6 +183,9 @@ impl Bootstrap {
 /// Parses the top-level YAML configuration used by the BITS binaries.
 pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Error>> {
     let raw: serde_json::Value = serde_yaml::from_str(config)?;
+    if !raw.is_object() {
+        return Err("top-level config must be a mapping".into());
+    }
 
     let bits_cfg: BitsConfig = raw
         .get("bits")
@@ -230,27 +286,29 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
         .transpose()?
         .unwrap_or_default();
 
-    let parse_ctx = ParseContext {
-        registries: Registries {
+    let route_factory = RouteFactory::from_parts(
+        Registries {
             checks,
             transforms,
             targets,
         },
-        resolved_targets: RefCell::new(HashMap::new()),
-        worker_server: worker_server.clone(),
+        HashMap::new(),
+        worker_server.clone(),
+    );
+
+    let branches = if let Some(routes_val) = raw.get("routes") {
+        route_factory.parse_route("routes", routes_val)?
+    } else {
+        vec![]
     };
 
-    let branches = parse_routes(
-        raw.get("routes")
-            .ok_or("config must have a 'routes' section")?,
-        "routes",
-        &parse_ctx,
-    )?;
-
+    let has_branches = !branches.is_empty();
     let router = Switch::new(branches);
-    router
-        .validate()
-        .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+    if has_branches {
+        router
+            .validate()
+            .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+    }
 
     if let Some(ws) = &worker_server {
         ws.start()?;
@@ -259,6 +317,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
     Ok(Bootstrap {
         runtime_config: RuntimeConfig {
             router,
+            route_factory,
             sweep_interval,
             broker_id,
             internal_poll_base_url,
@@ -599,9 +658,37 @@ impl Clone for Registries {
     }
 }
 
+impl Default for Registries {
+    fn default() -> Self {
+        Self {
+            checks: HashMap::new(),
+            transforms: HashMap::new(),
+            targets: HashMap::new(),
+        }
+    }
+}
+
+impl Default for RouteFactory {
+    fn default() -> Self {
+        Self::from_parts(Registries::default(), HashMap::new(), None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::Bits;
+    use crate::actions::Action;
+
+    fn extract_target(route: &crate::routing::Route) -> Arc<dyn crate::actions::TargetAction> {
+        match route.actions.first() {
+            Some(Action::Target(target, _, _)) => Arc::clone(target),
+            _ => panic!("expected first action to be a target"),
+        }
+    }
+
+    fn assert_send_sync<T: Send + Sync>() {}
 
     #[tokio::test]
     async fn test_empty_pipeline() {
@@ -617,5 +704,62 @@ routes:
                 .contains("route 'test_pipeline' must not be empty"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn route_factory_is_send_sync() {
+        assert_send_sync::<crate::config::RouteFactory>();
+    }
+
+    #[tokio::test]
+    async fn test_no_routes_section() {
+        let config = r#"
+targets:
+  my_target:
+    type: http
+    url: http://127.0.0.1:1
+"#;
+        let bootstrap =
+            crate::config::parse_bootstrap(config).expect("should parse without routes section");
+        let bits = bootstrap.into_bits().expect("should build bits");
+        assert!(bits.route_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_route_factory_shared_targets() {
+        let config = r#"
+targets:
+  my_target:
+    type: http
+    url: http://127.0.0.1:1
+"#;
+
+        let bits = crate::config::parse_bootstrap(config)
+            .expect("should parse")
+            .into_bits()
+            .expect("should build bits");
+
+        let routes1 = bits
+            .route_factory
+            .parse_route(
+                "extra_routes_1",
+                &serde_json::json!([
+                    {"route_a": ["target::my_target"]}
+                ]),
+            )
+            .expect("parse route set 1");
+        let routes2 = bits
+            .route_factory
+            .parse_route(
+                "extra_routes_2",
+                &serde_json::json!([
+                    {"route_b": ["target::my_target"]}
+                ]),
+            )
+            .expect("parse route set 2");
+
+        let target1 = extract_target(&routes1[0]);
+        let target2 = extract_target(&routes2[0]);
+        assert!(Arc::ptr_eq(&target1, &target2));
     }
 }

@@ -354,8 +354,12 @@ fn missing_routes_section_is_rejected() {
 bits:
   job_cleanup_interval_ms: 100
 "#;
-    let err = Bits::from_config(config).err().unwrap().to_string();
-    assert!(err.contains("routes"), "expected routes error, got: {err}");
+    let bits = Bits::from_config(config);
+    assert!(
+        bits.is_ok(),
+        "missing routes section should now be accepted: {:?}",
+        bits.err()
+    );
 }
 
 #[test]

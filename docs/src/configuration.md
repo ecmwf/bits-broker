@@ -82,7 +82,11 @@ A user passes if their realm appears in the map **and** they hold any of the rol
 that realm. Users whose realm is not listed, or who lack a matching role, are rejected.
 
 Rejections use a generic `"insufficient permissions"` message to avoid leaking realm/role details.
-Detailed rejection reasons are logged at `WARN` level for operator visibility.
+Two distinct `WARN`-level log messages help operators diagnose failures:
+
+- `"user realm not listed in allowed realms"` — the user's realm doesn't appear in the `roles` map.
+- `"realm matched but user lacks a required role"` — the realm matched but the user holds none of the
+  allowed roles.
 
 ## Dispatcher
 

@@ -148,8 +148,9 @@ bits::register_action!(check, "schedule_released", ScheduleReleased);
 ///
 /// Returns `Reject` (non-silent, generic message) when:
 /// - No auth context is present in `job.user`
-/// - The user's realm is not listed in `roles`
+/// - The user's realm is not listed in `roles` (warns `"user realm not listed in allowed realms"`)
 /// - The user's roles don't intersect with the allowed roles for their realm
+///   (warns `"realm matched but user lacks a required role"`)
 /// - The auth schema version is not `1`
 ///
 /// Returns `ActionError::AuthError` when:
@@ -190,13 +191,19 @@ impl CheckAction for HasRole {
             if allowed_roles.iter().any(|r| auth_user.roles.contains(r)) {
                 return Ok(CheckResult::Pass);
             }
+            tracing::warn!(
+                user = auth_user.username,
+                realm = auth_user.realm,
+                "has_role: realm matched but user lacks a required role"
+            );
+        } else {
+            tracing::warn!(
+                user = auth_user.username,
+                realm = auth_user.realm,
+                "has_role: user realm not listed in allowed realms"
+            );
         }
 
-        tracing::warn!(
-            user = auth_user.username,
-            realm = auth_user.realm,
-            "has_role: no matching realm/role pair"
-        );
         Ok(CheckResult::Reject {
             reason: ACCESS_DENIED.to_string(),
             silent: false,

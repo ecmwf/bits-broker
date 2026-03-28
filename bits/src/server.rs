@@ -26,6 +26,30 @@ use tokio::net::TcpListener;
 
 use crate::{Bits, Job, JobResult, PollOutcome};
 
+pub async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "SIGTERM registration failed, falling back to Ctrl-C");
+                ctrl_c.await.ok();
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
+    }
+    tracing::info!("shutdown signal received, draining");
+}
+
 const DEFAULT_POLL_TIMEOUT_MS: u64 = 25_000;
 
 /// Configuration for the built-in HTTP server.
@@ -84,6 +108,7 @@ struct AppState {
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
+/// Start the HTTP server. Runs until the process is terminated.
 pub async fn serve(
     bits: Arc<Bits>,
     config: ServerConfig,
@@ -91,6 +116,10 @@ pub async fn serve(
     serve_with_shutdown(bits, config, std::future::pending()).await
 }
 
+/// Start the HTTP server with a graceful shutdown future.
+///
+/// When `shutdown` completes, the server stops accepting new connections
+/// and drains in-flight requests before returning.
 pub async fn serve_with_shutdown(
     bits: Arc<Bits>,
     config: ServerConfig,

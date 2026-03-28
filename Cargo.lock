@@ -335,7 +335,6 @@ version = "0.1.0"
 dependencies = [
  "bits",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 

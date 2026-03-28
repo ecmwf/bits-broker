@@ -175,9 +175,14 @@ impl RouteFactory {
 
     pub(crate) fn start_worker_server(&self) -> Result<(), BitsError> {
         if let Some(ws) = &self.worker_server {
-            ws.start().map_err(|e| WorkerServerError::Bind {
-                address: ws.address(),
-                reason: e,
+            ws.start().map_err(|e| {
+                let addr = ws.address();
+                let prefix = format!("worker server failed to bind to {addr}: ");
+                let reason = e.strip_prefix(&prefix).unwrap_or(&e).to_string();
+                WorkerServerError::Bind {
+                    address: addr,
+                    reason,
+                }
             })?;
         }
         Ok(())
@@ -207,18 +212,12 @@ impl Bootstrap {
     /// Consumes the bootstrap value and constructs a broker runtime.
     pub fn into_bits(self) -> Result<Bits, BitsError> {
         Bits::from_runtime_config(self.runtime_config)
-            .map_err(|e| ConfigError::validation("bits", e.to_string()).into())
     }
 
     /// Consumes the bootstrap value and returns both the broker and server config.
     pub fn into_parts(self) -> Result<(Bits, ServerConfig), BitsError> {
-        let Bootstrap {
-            runtime_config,
-            server_config,
-        } = self;
-        let bits = Bits::from_runtime_config(runtime_config)
-            .map_err(|e| ConfigError::validation("bits", e.to_string()))?;
-        Ok((bits, server_config))
+        let bits = Bits::from_runtime_config(self.runtime_config)?;
+        Ok((bits, self.server_config))
     }
 }
 
@@ -845,10 +844,8 @@ fn action_from_entry(
     } else {
         remaining.into()
     };
-    let action = create_action(type_name, config).map_err(|e| RoutingError::InvalidAction {
-        route: entry_name.to_string(),
-        action: type_name.to_string(),
-        reason: e.to_string(),
+    let action = create_action(type_name, config).map_err(|e| {
+        ConfigError::validation(format!("targets.{entry_name}.type"), e.to_string())
     })?;
     attach_dispatcher(entry_name, type_name, action, settings, silent, ctx)
 }

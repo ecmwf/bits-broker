@@ -48,7 +48,7 @@ impl Switch {
         out
     }
 
-    pub fn validate(&self) -> Result<(), ActionError> {
+    pub fn validate(&self) -> Result<(), crate::error::RoutingError> {
         for route in &self.routes {
             validate_route(route)?;
         }
@@ -56,12 +56,12 @@ impl Switch {
     }
 }
 
-fn validate_route(route: &Route) -> Result<(), ActionError> {
+fn validate_route(route: &Route) -> Result<(), crate::error::RoutingError> {
     if route.actions.is_empty() {
-        return Err(ActionError::ConfigError(format!(
-            "route '{}' must not be empty",
-            route.name
-        )));
+        return Err(crate::error::RoutingError::InvalidRoute {
+            route: route.name.clone(),
+            reason: "must not be empty".to_string(),
+        });
     }
 
     for (index, action) in route.actions.iter().enumerate() {
@@ -69,21 +69,21 @@ fn validate_route(route: &Route) -> Result<(), ActionError> {
             switch.validate()?;
         }
 
+        if action.is_terminal() && index + 1 != route.actions.len() {
+            return Err(crate::error::RoutingError::InvalidRoute {
+                route: route.name.clone(),
+                reason: format!("unreachable action(s) after terminal step at index {index}"),
+            });
+        }
+
         if action.is_terminal() {
-            if index + 1 != route.actions.len() {
-                return Err(ActionError::ConfigError(format!(
-                    "route '{}' has unreachable action(s) after terminal step at index {}",
-                    route.name, index
-                )));
-            }
             return Ok(());
         }
     }
 
-    Err(ActionError::ConfigError(format!(
-        "route '{}' must end with a target or switch",
-        route.name
-    )))
+    Err(crate::error::RoutingError::MissingTarget {
+        route: route.name.clone(),
+    })
 }
 
 // Switch implements TargetAction because its external contract is identical to a target's:

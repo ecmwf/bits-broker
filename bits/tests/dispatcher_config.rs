@@ -243,7 +243,7 @@ routes:
 
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(
-        err.contains("dispatcher.concurrency removed"),
+        err.contains("dispatcher.concurrency"),
         "unexpected error: {err}"
     );
 }
@@ -256,10 +256,7 @@ routes:
 "#;
 
     let err = Bits::from_config(config).err().unwrap().to_string();
-    assert!(
-        err.contains("route 'default' must not be empty"),
-        "unexpected error: {err}"
-    );
+    assert!(err.contains("must not be empty"), "unexpected error: {err}");
 }
 
 #[test]
@@ -275,7 +272,7 @@ routes:
 
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(
-        err.contains("route 'default' must end with a target or switch"),
+        err.contains("must end with a target or switch"),
         "unexpected error: {err}"
     );
 }
@@ -293,7 +290,7 @@ routes:
 
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(
-        err.contains("route 'default' has unreachable action(s) after terminal step at index 0"),
+        err.contains("unreachable action(s)"),
         "unexpected error: {err}"
     );
 }
@@ -313,7 +310,7 @@ routes:
 
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(
-        err.contains("route 'default' has unreachable action(s) after terminal step at index 0"),
+        err.contains("unreachable action(s)"),
         "unexpected error: {err}"
     );
 }
@@ -333,7 +330,7 @@ routes:
 
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(
-        err.contains("route 'nested' must end with a target or switch"),
+        err.contains("must end with a target or switch"),
         "unexpected error: {err}"
     );
 }

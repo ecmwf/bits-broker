@@ -36,7 +36,7 @@ impl TransformAction for AddField {
 
 register_action!(transform, "custom_add_field", AddField);
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), bits::ActionError> {
     let action = create_action(
         "custom_add_field",
         json!({ "key": "source", "value": "custom_transform" }),

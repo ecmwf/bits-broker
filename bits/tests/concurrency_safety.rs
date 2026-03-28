@@ -94,3 +94,41 @@ async fn concurrent_poll_and_sweep_do_not_deadlock() {
         );
     }
 }
+
+#[tokio::test]
+async fn panicking_action_produces_failed_result_and_broker_continues() {
+    let _ = common::TargetPanicking;
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - panicking:
+      - target::panicking: ~
+"#;
+    let bits = Arc::new(Bits::from_config(config).unwrap());
+
+    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let outcome = bits.poll(&handle.id, Some(Duration::from_secs(5))).await;
+    assert!(
+        matches!(outcome, PollOutcome::Ready(bits::JobResult::Failed { .. })),
+        "panicking action should produce Failed, got {outcome:?}"
+    );
+
+    let config2 = r#"
+routes:
+  - normal:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+    let bits2 = Arc::new(Bits::from_config(config2).unwrap());
+    let handle2 = bits2.submit(Job::new(serde_json::json!({})));
+    let outcome2 = bits2.poll(&handle2.id, Some(Duration::from_secs(5))).await;
+    assert!(
+        matches!(
+            outcome2,
+            PollOutcome::Ready(bits::JobResult::Redirect { .. })
+        ),
+        "subsequent job should succeed, got {outcome2:?}"
+    );
+}

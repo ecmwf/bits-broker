@@ -58,11 +58,7 @@ pub(crate) fn spawn_job(
 
             let result = if let Some(delay) = persist_after {
                 tokio::select! {
-                    result = &mut dispatch_fut => result.unwrap_or_else(|panic_payload| {
-                        let msg = panic_message(&panic_payload);
-                        tracing::error!(job.id = %job.id, reason = %msg, "action panicked");
-                        JobResult::Failed { reason: format!("internal panic: {msg}") }
-                    }),
+                    result = &mut dispatch_fut => result.unwrap_or_else(|p| handle_action_panic(&job.id, p)),
                     _ = tokio::time::sleep(delay) => {
                         if let Some(store) = &store
                             && !job.persisted.load(Ordering::Acquire)
@@ -81,19 +77,11 @@ pub(crate) fn spawn_job(
                                 Err(err) => tracing::warn!(job.id = %job.id, error = %err, "delayed persist failed"),
                             }
                         }
-                        (&mut dispatch_fut).await.unwrap_or_else(|panic_payload| {
-                            let msg = panic_message(&panic_payload);
-                            tracing::error!(job.id = %job.id, reason = %msg, "action panicked");
-                            JobResult::Failed { reason: format!("internal panic: {msg}") }
-                        })
+                        (&mut dispatch_fut).await.unwrap_or_else(|p| handle_action_panic(&job.id, p))
                     }
                 }
             } else {
-                (&mut dispatch_fut).await.unwrap_or_else(|panic_payload| {
-                    let msg = panic_message(&panic_payload);
-                    tracing::error!(job.id = %job.id, reason = %msg, "action panicked");
-                    JobResult::Failed { reason: format!("internal panic: {msg}") }
-                })
+                (&mut dispatch_fut).await.unwrap_or_else(|p| handle_action_panic(&job.id, p))
             };
 
             let ms = started.elapsed().as_millis();
@@ -113,13 +101,17 @@ pub(crate) fn spawn_job(
     );
 }
 
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
+fn handle_action_panic(job_id: &str, panic_payload: Box<dyn std::any::Any + Send>) -> JobResult {
+    let detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
         s.to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
+    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
         s.clone()
     } else {
         "unknown panic".to_string()
+    };
+    tracing::error!(job.id = %job_id, reason = %detail, "action panicked");
+    JobResult::Failed {
+        reason: "internal server error".to_string(),
     }
 }
 

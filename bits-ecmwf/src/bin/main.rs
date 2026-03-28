@@ -25,18 +25,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (bits, server_config) = bits::parse_bootstrap(&config_str)?.into_parts()?;
     let bits = Arc::new(bits);
 
-    bits::server::serve(bits, server_config, shutdown_signal()).await
+    bits::server::serve_with_shutdown(bits, server_config, shutdown_signal()).await
 }
 
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = sigterm.recv() => {}
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "SIGTERM registration failed, falling back to Ctrl-C");
+                ctrl_c.await.ok();
+            }
         }
     }
     #[cfg(not(unix))]

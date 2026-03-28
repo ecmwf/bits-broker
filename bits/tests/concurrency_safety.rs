@@ -114,21 +114,10 @@ routes:
         "panicking action should produce Failed, got {outcome:?}"
     );
 
-    let config2 = r#"
-routes:
-  - normal:
-      - target::dummy_dispatch:
-          duration_ms: 0
-          concurrency: 1
-"#;
-    let bits2 = Arc::new(Bits::from_config(config2).unwrap());
-    let handle2 = bits2.submit(Job::new(serde_json::json!({})));
-    let outcome2 = bits2.poll(&handle2.id, Some(Duration::from_secs(5))).await;
+    let handle2 = bits.submit(Job::new(serde_json::json!({})));
+    let outcome2 = bits.poll(&handle2.id, Some(Duration::from_secs(5))).await;
     assert!(
-        matches!(
-            outcome2,
-            PollOutcome::Ready(bits::JobResult::Redirect { .. })
-        ),
-        "subsequent job should succeed, got {outcome2:?}"
+        matches!(outcome2, PollOutcome::Ready(bits::JobResult::Failed { .. })),
+        "same broker should still accept jobs after panic, got {outcome2:?}"
     );
 }

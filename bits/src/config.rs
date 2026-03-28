@@ -16,6 +16,7 @@ use crate::routing::{Route, switch::Switch};
 use crate::server::ServerConfig;
 use crate::worker_server::WorkerServer;
 
+#[derive(Default)]
 struct Registries {
     checks: HashMap<String, serde_json::Value>,
     transforms: HashMap<String, serde_json::Value>,
@@ -750,16 +751,6 @@ impl Clone for Registries {
             checks: self.checks.clone(),
             transforms: self.transforms.clone(),
             targets: self.targets.clone(),
-        }
-    }
-}
-
-impl Default for Registries {
-    fn default() -> Self {
-        Self {
-            checks: HashMap::new(),
-            transforms: HashMap::new(),
-            targets: HashMap::new(),
         }
     }
 }

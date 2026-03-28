@@ -33,19 +33,30 @@ pub async fn shutdown_signal() {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut sigterm) => {
                 tokio::select! {
-                    _ = ctrl_c => {}
+                    result = ctrl_c => {
+                        if let Err(e) = result {
+                            tracing::error!(error = %e, "Ctrl-C listener failed, waiting on SIGTERM");
+                            sigterm.recv().await;
+                        }
+                    }
                     _ = sigterm.recv() => {}
                 }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "SIGTERM registration failed, falling back to Ctrl-C");
-                ctrl_c.await.ok();
+                if let Err(e) = ctrl_c.await {
+                    tracing::error!(error = %e, "Ctrl-C listener also failed, server will run until killed");
+                    std::future::pending::<()>().await;
+                }
             }
         }
     }
     #[cfg(not(unix))]
     {
-        ctrl_c.await.ok();
+        if let Err(e) = ctrl_c.await {
+            tracing::error!(error = %e, "Ctrl-C listener failed, server will run until killed");
+            std::future::pending::<()>().await;
+        }
     }
     tracing::info!("shutdown signal received, draining");
 }

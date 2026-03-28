@@ -844,9 +844,8 @@ fn action_from_entry(
     } else {
         remaining.into()
     };
-    let action = create_action(type_name, config).map_err(|e| {
-        ConfigError::validation(format!("targets.{entry_name}.type"), e.to_string())
-    })?;
+    let action = create_action(type_name, config)
+        .map_err(|e| ConfigError::validation(format!("{ns}.{entry_name}.type"), e.to_string()))?;
     attach_dispatcher(entry_name, type_name, action, settings, silent, ctx)
 }
 

@@ -6,7 +6,7 @@ use dashmap::DashMap;
 
 use crate::config::{RouteFactory, RuntimeConfig, parse_bootstrap};
 use crate::db::{ClaimResult, DbError, PersistenceStore};
-use crate::error::{BitsError, ConfigError, RoutingError};
+use crate::error::{BitsError, ConfigError};
 use crate::job::Job;
 use crate::result::JobResult;
 use crate::route_handle::RouteHandle;
@@ -195,10 +195,7 @@ impl Bits {
     ) -> Result<RouteHandle, BitsError> {
         let routes = self.route_factory.parse_route(name, route_value)?;
         let switch = Switch::new(routes);
-        switch.validate().map_err(|e| RoutingError::InvalidRoute {
-            route: name.to_string(),
-            reason: e.to_string(),
-        })?;
+        switch.validate()?;
 
         let handle = RouteHandle {
             name: name.to_string(),

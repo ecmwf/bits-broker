@@ -176,7 +176,7 @@ impl RouteFactory {
     pub(crate) fn start_worker_server(&self) -> Result<(), BitsError> {
         if let Some(ws) = &self.worker_server {
             ws.start().map_err(|e| WorkerServerError::Bind {
-                address: "bits.worker_server".to_string(),
+                address: ws.address(),
                 reason: e,
             })?;
         }
@@ -492,7 +492,7 @@ fn validate_switch(switch: &Switch) -> Result<(), BitsError> {
             let Some(rest) = message.strip_prefix("route '") else {
                 return ConfigError::validation("routes", message).into();
             };
-            let Some((route, reason)) = rest.split_once("': ") else {
+            let Some((route, reason)) = rest.split_once("' ") else {
                 return ConfigError::validation("routes", message).into();
             };
 
@@ -612,7 +612,13 @@ fn parse_action(
                         }
                         .into());
                     }
-                    let action = create_action(action_name, config.clone())?;
+                    let action = create_action(action_name, config.clone()).map_err(|e| {
+                        RoutingError::InvalidAction {
+                            route: route_name.to_string(),
+                            action: key.clone(),
+                            reason: e.to_string(),
+                        }
+                    })?;
                     validate_inline_action(ns, route_name, key, &action)?;
                     let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
                     let silent = map
@@ -839,7 +845,11 @@ fn action_from_entry(
     } else {
         remaining.into()
     };
-    let action = create_action(type_name, config)?;
+    let action = create_action(type_name, config).map_err(|e| RoutingError::InvalidAction {
+        route: entry_name.to_string(),
+        action: type_name.to_string(),
+        reason: e.to_string(),
+    })?;
     attach_dispatcher(entry_name, type_name, action, settings, silent, ctx)
 }
 
@@ -972,8 +982,7 @@ routes:
             .err()
             .expect("empty pipeline should be rejected");
         assert!(
-            err.to_string()
-                .contains("route 'test_pipeline' must not be empty"),
+            err.to_string().contains("must not be empty"),
             "unexpected error: {err}"
         );
     }

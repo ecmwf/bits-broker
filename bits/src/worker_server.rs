@@ -67,6 +67,10 @@ impl WorkerServer {
         }
     }
 
+    pub fn address(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
     pub fn register_pool(
         &self,
         pool_name: &str,

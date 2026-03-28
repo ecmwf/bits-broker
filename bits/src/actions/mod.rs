@@ -51,6 +51,28 @@ impl std::fmt::Display for ActionError {
 
 impl std::error::Error for ActionError {}
 
+impl ActionError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            ActionError::NetworkError(_) => "ACTION_NETWORK",
+            ActionError::QueueFull(_) => "ACTION_QUEUE_FULL",
+            ActionError::Timeout(_) => "ACTION_TIMEOUT",
+            ActionError::ConfigError(_) => "ACTION_CONFIG",
+            ActionError::AuthError(_) => "ACTION_AUTH",
+            ActionError::ResourceError(_) => "ACTION_RESOURCE",
+            ActionError::Cancelled => "ACTION_CANCELLED",
+            ActionError::ClientGone => "ACTION_CLIENT_GONE",
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            ActionError::NetworkError(_) | ActionError::Timeout(_) | ActionError::QueueFull(_)
+        )
+    }
+}
+
 // ================================
 //   Actions
 // ================================

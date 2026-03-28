@@ -243,7 +243,7 @@ routes:
 
     let err = Bits::from_config(config).err().unwrap().to_string();
     assert!(
-        err.contains("dispatcher.concurrency removed"),
+        err.contains("dispatcher.concurrency"),
         "unexpected error: {err}"
     );
 }

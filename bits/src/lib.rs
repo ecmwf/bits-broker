@@ -8,6 +8,8 @@ mod config;
 pub mod db;
 /// Queue and executor abstractions for scheduled action execution.
 pub mod dispatcher;
+/// Typed error hierarchy for the bits library.
+pub mod error;
 /// Job model and lifecycle state.
 pub mod job;
 /// Terminal job results returned to clients.
@@ -30,6 +32,7 @@ pub use actions::*;
 pub use bits::{Bits, JobHandle, PollOutcome};
 pub use config::{Bootstrap, RouteFactory, parse_bootstrap};
 pub use db::*;
+pub use error::{BitsError, ConfigError, RoutingError, WorkerServerError};
 pub use job::Job;
 pub use result::JobResult;
 pub use route_handle::RouteHandle;

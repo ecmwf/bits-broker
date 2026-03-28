@@ -12,6 +12,7 @@ use crate::actions::registry::create_action;
 use crate::actions::{TargetAction, TargetResult};
 use crate::db::PersistenceStore;
 use crate::dispatcher::{Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig};
+use crate::error::{BitsError, ConfigError, RoutingError, WorkerServerError};
 use crate::routing::{Route, switch::Switch};
 use crate::server::ServerConfig;
 use crate::worker_server::WorkerServer;
@@ -145,11 +146,11 @@ impl RouteFactory {
         &self,
         name: &str,
         value: &serde_json::Value,
-    ) -> Result<Vec<Route>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Route>, BitsError> {
         let cached_targets = self
             .resolved_targets
             .lock()
-            .map_err(|_| std::io::Error::other("route target cache mutex poisoned"))?
+            .map_err(|_| ConfigError::validation("routes", "route target cache mutex poisoned"))?
             .clone();
 
         let parse_ctx = ParseContext {
@@ -164,7 +165,7 @@ impl RouteFactory {
         let mut shared_targets = self
             .resolved_targets
             .lock()
-            .map_err(|_| std::io::Error::other("route target cache mutex poisoned"))?;
+            .map_err(|_| ConfigError::validation("routes", "route target cache mutex poisoned"))?;
         for (target_name, target) in resolved_targets {
             shared_targets.entry(target_name).or_insert(target);
         }
@@ -172,9 +173,12 @@ impl RouteFactory {
         Ok(routes)
     }
 
-    pub(crate) fn start_worker_server(&self) -> Result<(), String> {
+    pub(crate) fn start_worker_server(&self) -> Result<(), BitsError> {
         if let Some(ws) = &self.worker_server {
-            ws.start()?;
+            ws.start().map_err(|e| WorkerServerError::Bind {
+                address: "bits.worker_server".to_string(),
+                reason: e,
+            })?;
         }
         Ok(())
     }
@@ -201,32 +205,40 @@ pub struct Bootstrap {
 
 impl Bootstrap {
     /// Consumes the bootstrap value and constructs a broker runtime.
-    pub fn into_bits(self) -> Result<Bits, Box<dyn std::error::Error>> {
+    pub fn into_bits(self) -> Result<Bits, BitsError> {
         Bits::from_runtime_config(self.runtime_config)
+            .map_err(|e| ConfigError::validation("bits", e.to_string()).into())
     }
 
     /// Consumes the bootstrap value and returns both the broker and server config.
-    pub fn into_parts(self) -> Result<(Bits, ServerConfig), Box<dyn std::error::Error>> {
+    pub fn into_parts(self) -> Result<(Bits, ServerConfig), BitsError> {
         let Bootstrap {
             runtime_config,
             server_config,
         } = self;
-        let bits = Bits::from_runtime_config(runtime_config)?;
+        let bits = Bits::from_runtime_config(runtime_config)
+            .map_err(|e| ConfigError::validation("bits", e.to_string()))?;
         Ok((bits, server_config))
     }
 }
 
 /// Parses the top-level YAML configuration used by the BITS binaries.
-pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Error>> {
-    let raw: serde_json::Value = serde_yaml::from_str(config)?;
+pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
+    let raw: serde_json::Value = serde_yaml::from_str(config).map_err(ConfigError::from)?;
     if !raw.is_object() {
-        return Err("top-level config must be a mapping".into());
+        return Err(ConfigError::validation("", "top-level config must be a YAML mapping").into());
     }
 
     let bits_cfg: BitsConfig = raw
         .get("bits")
         .cloned()
-        .map(serde_json::from_value)
+        .map(|v| {
+            serde_json::from_value(v).map_err(|e| ConfigError::Decode {
+                path: "bits".to_string(),
+                target: "BitsConfig".to_string(),
+                source: e,
+            })
+        })
         .transpose()?
         .unwrap_or(BitsConfig {
             broker_id: None,
@@ -262,10 +274,11 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
     if let Some(persist_after) = persist_after
         && persist_after + persist_guard >= poll_timeout
     {
-        return Err(
-            "bits.persist_after_ms + bits.persist_guard_ms must be less than bits.poll_timeout_ms"
-                .into(),
-        );
+        return Err(ConfigError::validation(
+            "bits.persist_after_ms",
+            "bits.persist_after_ms + bits.persist_guard_ms must be less than bits.poll_timeout_ms",
+        )
+        .into());
     }
 
     let (job_store, broker_lease_ttl) = match bits_cfg.persistence {
@@ -274,23 +287,29 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             broker_lease_ttl_secs,
         }) => {
             if endpoints.is_empty() {
-                return Err("bits.persistence.endpoints must not be empty".into());
+                return Err(ConfigError::validation(
+                    "bits.persistence.endpoints",
+                    "must not be empty",
+                )
+                .into());
             }
-            let ttl = Duration::try_from_secs_f64(broker_lease_ttl_secs).map_err(
-                |e| -> Box<dyn std::error::Error> {
-                    format!("bits.persistence.broker_lease_ttl_secs: {e}").into()
-                },
-            )?;
+            let ttl = Duration::try_from_secs_f64(broker_lease_ttl_secs).map_err(|e| {
+                ConfigError::validation("bits.persistence.broker_lease_ttl_secs", e.to_string())
+            })?;
             if ttl < Duration::from_secs(1) {
-                return Err(
-                    "bits.persistence.broker_lease_ttl_secs must be at least 1 second".into(),
-                );
+                return Err(ConfigError::validation(
+                    "bits.persistence.broker_lease_ttl_secs",
+                    "must be at least 1 second",
+                )
+                .into());
             }
             #[cfg(not(feature = "tikv"))]
             {
-                return Err(
-                    "bits.persistence.type=tikv but crate built without 'tikv' feature".into(),
-                );
+                return Err(ConfigError::FeatureDisabled {
+                    path: "bits.persistence.type".into(),
+                    feature: "tikv".into(),
+                }
+                .into());
             }
             #[cfg(feature = "tikv")]
             {
@@ -308,32 +327,48 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
             num_replicas,
         }) => {
             if url.is_empty() {
-                return Err("bits.persistence.url must not be empty".into());
+                return Err(
+                    ConfigError::validation("bits.persistence.url", "must not be empty").into(),
+                );
             }
             if jobs_bucket.is_empty() {
-                return Err("bits.persistence.jobs_bucket must not be empty".into());
+                return Err(ConfigError::validation(
+                    "bits.persistence.jobs_bucket",
+                    "must not be empty",
+                )
+                .into());
             }
             if leases_bucket.is_empty() {
-                return Err("bits.persistence.leases_bucket must not be empty".into());
+                return Err(ConfigError::validation(
+                    "bits.persistence.leases_bucket",
+                    "must not be empty",
+                )
+                .into());
             }
             if num_replicas < 1 {
-                return Err("bits.persistence.num_replicas must be at least 1".into());
+                return Err(ConfigError::validation(
+                    "bits.persistence.num_replicas",
+                    "must be at least 1",
+                )
+                .into());
             }
-            let ttl = Duration::try_from_secs_f64(broker_lease_ttl_secs).map_err(
-                |e| -> Box<dyn std::error::Error> {
-                    format!("bits.persistence.broker_lease_ttl_secs: {e}").into()
-                },
-            )?;
+            let ttl = Duration::try_from_secs_f64(broker_lease_ttl_secs).map_err(|e| {
+                ConfigError::validation("bits.persistence.broker_lease_ttl_secs", e.to_string())
+            })?;
             if ttl < Duration::from_secs(1) {
-                return Err(
-                    "bits.persistence.broker_lease_ttl_secs must be at least 1 second".into(),
-                );
+                return Err(ConfigError::validation(
+                    "bits.persistence.broker_lease_ttl_secs",
+                    "must be at least 1 second",
+                )
+                .into());
             }
             #[cfg(not(feature = "nats"))]
             {
-                return Err(
-                    "bits.persistence.type=nats but crate built without 'nats' feature".into(),
-                );
+                return Err(ConfigError::FeatureDisabled {
+                    path: "bits.persistence.type".into(),
+                    feature: "nats".into(),
+                }
+                .into());
             }
             #[cfg(feature = "nats")]
             {
@@ -344,17 +379,19 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
                     ttl,
                     num_replicas,
                 );
-                let handle = tokio::runtime::Handle::try_current().map_err(
-                    |_| -> Box<dyn std::error::Error> {
-                        "bits.persistence.type=nats requires a running Tokio runtime for init"
-                            .into()
-                    },
-                )?;
-                tokio::task::block_in_place(|| handle.block_on(store.init())).map_err(
-                    |e| -> Box<dyn std::error::Error> {
-                        format!("NATS store init failed: {e}").into()
-                    },
-                )?;
+                let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+                    ConfigError::validation(
+                        "bits.persistence.type",
+                        "nats requires a running Tokio runtime for init",
+                    )
+                })?;
+                tokio::task::block_in_place(|| handle.block_on(store.init())).map_err(|e| {
+                    ConfigError::PersistenceInit {
+                        path: "bits.persistence".into(),
+                        backend: "nats".into(),
+                        reason: e.to_string(),
+                    }
+                })?;
                 (Some(Arc::new(store) as Arc<dyn PersistenceStore>), ttl)
             }
         }
@@ -367,23 +404,47 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
     let server_config: ServerConfig = raw
         .get("server")
         .cloned()
-        .map(serde_json::from_value)
+        .map(|v| {
+            serde_json::from_value(v).map_err(|e| ConfigError::Decode {
+                path: "server".to_string(),
+                target: "ServerConfig".to_string(),
+                source: e,
+            })
+        })
         .transpose()?
         .unwrap_or_default();
 
     let checks: HashMap<String, serde_json::Value> = raw
         .get("checks")
-        .map(|v| serde_json::from_value(v.clone()))
+        .map(|v| {
+            serde_json::from_value(v.clone()).map_err(|e| ConfigError::Decode {
+                path: "checks".to_string(),
+                target: "map".to_string(),
+                source: e,
+            })
+        })
         .transpose()?
         .unwrap_or_default();
     let transforms: HashMap<String, serde_json::Value> = raw
         .get("transforms")
-        .map(|v| serde_json::from_value(v.clone()))
+        .map(|v| {
+            serde_json::from_value(v.clone()).map_err(|e| ConfigError::Decode {
+                path: "transforms".to_string(),
+                target: "map".to_string(),
+                source: e,
+            })
+        })
         .transpose()?
         .unwrap_or_default();
     let targets: HashMap<String, serde_json::Value> = raw
         .get("targets")
-        .map(|v| serde_json::from_value(v.clone()))
+        .map(|v| {
+            serde_json::from_value(v.clone()).map_err(|e| ConfigError::Decode {
+                path: "targets".to_string(),
+                target: "map".to_string(),
+                source: e,
+            })
+        })
         .transpose()?
         .unwrap_or_default();
 
@@ -406,9 +467,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
     let has_branches = !branches.is_empty();
     let router = Switch::new(branches);
     if has_branches {
-        router
-            .validate()
-            .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+        validate_switch(&router)?;
     }
 
     Ok(Bootstrap {
@@ -427,6 +486,33 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, Box<dyn std::error::Er
     })
 }
 
+fn validate_switch(switch: &Switch) -> Result<(), BitsError> {
+    switch.validate().map_err(|err| match err {
+        crate::actions::ActionError::ConfigError(message) => {
+            let Some(rest) = message.strip_prefix("route '") else {
+                return ConfigError::validation("routes", message).into();
+            };
+            let Some((route, reason)) = rest.split_once("': ") else {
+                return ConfigError::validation("routes", message).into();
+            };
+
+            if reason == "must end with a target or switch" {
+                RoutingError::MissingTarget {
+                    route: route.to_string(),
+                }
+                .into()
+            } else {
+                RoutingError::InvalidRoute {
+                    route: route.to_string(),
+                    reason: reason.to_string(),
+                }
+                .into()
+            }
+        }
+        other => BitsError::Action(other),
+    })
+}
+
 /// Parses an ordered list of named routes from a JSON array of single-key objects.
 ///
 /// Each element must be a JSON object with exactly one key, where the key is the
@@ -442,32 +528,46 @@ fn parse_routes(
     value: &serde_json::Value,
     section: &str,
     ctx: &ParseContext,
-) -> Result<Vec<Route>, Box<dyn std::error::Error>> {
-    let entries = value
-        .as_array()
-        .ok_or_else(|| format!("{section} must be an array"))?;
+) -> Result<Vec<Route>, BitsError> {
+    let entries = value.as_array().ok_or_else(|| RoutingError::InvalidRoute {
+        route: section.to_string(),
+        reason: "must be an array".to_string(),
+    })?;
 
     let mut routes = Vec::new();
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
         let map = entry
             .as_object()
-            .ok_or_else(|| format!("each {section} entry must be an object"))?;
+            .ok_or_else(|| RoutingError::InvalidRoute {
+                route: format!("{section}[{index}]"),
+                reason: "entry must be an object".to_string(),
+            })?;
         if map.len() != 1 {
-            return Err(format!(
-                "each {section} entry must have exactly one key (the route name), got {}",
-                map.len()
-            )
+            return Err(RoutingError::InvalidRoute {
+                route: format!("{section}[{index}]"),
+                reason: format!(
+                    "entry must have exactly one key (the route name), got {}",
+                    map.len()
+                ),
+            }
             .into());
         }
-        let (name, route_val) = map.iter().next().ok_or_else(|| {
-            format!("each {section} entry must have exactly one key (the route name)")
-        })?;
+        let (name, route_val) = map
+            .iter()
+            .next()
+            .ok_or_else(|| RoutingError::InvalidRoute {
+                route: format!("{section}[{index}]"),
+                reason: "entry must have exactly one key (the route name)".to_string(),
+            })?;
         let action_values = route_val
             .as_array()
-            .ok_or_else(|| format!("{section} route '{name}' must be an array of actions"))?;
+            .ok_or_else(|| RoutingError::InvalidRoute {
+                route: name.clone(),
+                reason: format!("{section} route must be an array of actions"),
+            })?;
         let actions = action_values
             .iter()
-            .map(|v| parse_action(v, ctx))
+            .map(|v| parse_action(v, name, ctx))
             .collect::<Result<Vec<_>, _>>()?;
         routes.push(Route::new(name.clone(), actions));
     }
@@ -476,25 +576,28 @@ fn parse_routes(
 
 fn parse_action(
     value: &serde_json::Value,
+    route_name: &str,
     ctx: &ParseContext,
-) -> Result<Action, Box<dyn std::error::Error>> {
+) -> Result<Action, BitsError> {
     match value {
         serde_json::Value::String(name) => {
             if name == "persist" {
-                return Err(
-                    "'persist' step has been removed; use bits.persist_after_ms instead".into(),
-                );
+                return Err(RoutingError::InvalidAction {
+                    route: route_name.to_string(),
+                    action: name.clone(),
+                    reason: "'persist' step has been removed; use bits.persist_after_ms instead"
+                        .to_string(),
+                }
+                .into());
             }
             let (ns, entry_name) = split_ns(name)?;
-            resolve_named(ns, entry_name, ctx)
+            resolve_named(ns, entry_name, route_name, ctx)
         }
         serde_json::Value::Object(map) => {
             if let Some(switch_val) = map.get("switch") {
                 let routes = parse_routes(switch_val, "switch", ctx)?;
                 let switch = Switch::new(routes);
-                switch
-                    .validate()
-                    .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+                validate_switch(&switch)?;
                 return Ok(Action::Switch(switch));
             }
 
@@ -502,16 +605,24 @@ fn parse_action(
                 if key.contains("::") {
                     let (ns, action_name) = split_ns(key)?;
                     if action_name == "remote" {
-                        return Err("target::remote must be defined as a named registry entry (not inline); the pool name is derived from the registry entry name".into());
+                        return Err(RoutingError::InvalidAction {
+                            route: route_name.to_string(),
+                            action: key.clone(),
+                            reason: "target::remote must be defined as a named registry entry (not inline); the pool name is derived from the registry entry name".to_string(),
+                        }
+                        .into());
                     }
                     let action = create_action(action_name, config.clone())?;
-                    let action = validate_inline_action(ns, action)?;
+                    validate_inline_action(ns, route_name, key, &action)?;
                     let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
                     let silent = map
                         .get("silent")
                         .map(|v| {
-                            v.as_bool()
-                                .ok_or_else(|| format!("{key}: silent must be a boolean"))
+                            v.as_bool().ok_or_else(|| RoutingError::InvalidAction {
+                                route: route_name.to_string(),
+                                action: key.clone(),
+                                reason: "silent must be a boolean".to_string(),
+                            })
                         })
                         .transpose()?;
                     return attach_dispatcher(
@@ -525,43 +636,62 @@ fn parse_action(
                 }
             }
 
-            Err(format!("unrecognised action: {value:?}").into())
+            Err(RoutingError::InvalidAction {
+                route: route_name.to_string(),
+                action: value.to_string(),
+                reason: "unrecognised action".to_string(),
+            }
+            .into())
         }
-        _ => Err(format!("action must be string or object, got {value:?}").into()),
+        _ => Err(RoutingError::InvalidAction {
+            route: route_name.to_string(),
+            action: value.to_string(),
+            reason: "action must be string or object".to_string(),
+        }
+        .into()),
     }
 }
 
-fn split_ns(s: &str) -> Result<(&str, &str), Box<dyn std::error::Error>> {
+fn split_ns(s: &str) -> Result<(&str, &str), BitsError> {
     let mut parts = s.splitn(2, "::");
     let ns = parts
         .next()
-        .ok_or_else(|| format!("invalid reference '{s}'"))?;
-    let name = parts
-        .next()
-        .ok_or_else(|| format!("reference '{s}' must be namespace::name"))?;
+        .ok_or_else(|| ConfigError::validation("routes", format!("invalid reference '{s}'")))?;
+    let name = parts.next().ok_or_else(|| {
+        ConfigError::validation("routes", format!("reference '{s}' must be namespace::name"))
+    })?;
     Ok((ns, name))
 }
 
 fn resolve_named(
     ns: &str,
     name: &str,
+    route_name: &str,
     ctx: &ParseContext,
-) -> Result<Action, Box<dyn std::error::Error>> {
+) -> Result<Action, BitsError> {
     match ns {
         "check" => {
-            let entry = ctx
-                .registries
-                .checks
-                .get(name)
-                .ok_or_else(|| format!("unknown check '{name}'"))?;
+            let entry =
+                ctx.registries
+                    .checks
+                    .get(name)
+                    .ok_or_else(|| RoutingError::InvalidAction {
+                        route: route_name.to_string(),
+                        action: format!("{ns}::{name}"),
+                        reason: format!("unknown check '{name}'"),
+                    })?;
             action_from_entry(ns, name, entry, ctx)
         }
         "transform" => {
-            let entry = ctx
-                .registries
-                .transforms
-                .get(name)
-                .ok_or_else(|| format!("unknown transform '{name}'"))?;
+            let entry =
+                ctx.registries
+                    .transforms
+                    .get(name)
+                    .ok_or_else(|| RoutingError::InvalidAction {
+                        route: route_name.to_string(),
+                        action: format!("{ns}::{name}"),
+                        reason: format!("unknown transform '{name}'"),
+                    })?;
             action_from_entry(ns, name, entry, ctx)
         }
         "target" => {
@@ -572,11 +702,15 @@ fn resolve_named(
                     *surface,
                 ));
             }
-            let entry = ctx
-                .registries
-                .targets
-                .get(name)
-                .ok_or_else(|| format!("unknown target '{name}'"))?;
+            let entry =
+                ctx.registries
+                    .targets
+                    .get(name)
+                    .ok_or_else(|| RoutingError::InvalidAction {
+                        route: route_name.to_string(),
+                        action: format!("{ns}::{name}"),
+                        reason: format!("unknown target '{name}'"),
+                    })?;
             let action = action_from_entry(ns, name, entry, ctx)?;
             if let Action::Target(target, dispatcher, surface) = &action {
                 ctx.resolved_targets.borrow_mut().insert(
@@ -586,45 +720,76 @@ fn resolve_named(
             }
             Ok(action)
         }
-        _ => Err(format!("unknown namespace '{ns}' in '{ns}::{name}'").into()),
+        _ => Err(RoutingError::InvalidAction {
+            route: route_name.to_string(),
+            action: format!("{ns}::{name}"),
+            reason: format!("unknown namespace '{ns}'"),
+        }
+        .into()),
     }
 }
 
-fn validate_inline_action(ns: &str, action: Action) -> Result<Action, Box<dyn std::error::Error>> {
+fn validate_inline_action(
+    ns: &str,
+    route_name: &str,
+    action_name: &str,
+    action: &Action,
+) -> Result<(), BitsError> {
     match (ns, &action) {
-        ("check", Action::Check(..)) => Ok(action),
-        ("transform", Action::Transform(..)) => Ok(action),
-        ("target", Action::Target(..)) => Ok(action),
-        _ => Err(format!("inline action namespace '{ns}' does not match action type").into()),
+        ("check", Action::Check(..)) => Ok(()),
+        ("transform", Action::Transform(..)) => Ok(()),
+        ("target", Action::Target(..)) => Ok(()),
+        _ => Err(RoutingError::InvalidAction {
+            route: route_name.to_string(),
+            action: action_name.to_string(),
+            reason: format!("inline action namespace '{ns}' does not match action type"),
+        }
+        .into()),
     }
 }
 
 fn parse_dispatcher_fields(
     dispatcher: Option<&serde_json::Value>,
-) -> Result<DispatcherSettings, Box<dyn std::error::Error>> {
+) -> Result<DispatcherSettings, BitsError> {
     let mut settings = DispatcherSettings::default();
 
     if let Some(d) = dispatcher {
-        let map = d.as_object().ok_or("dispatcher must be an object")?;
+        let map = d
+            .as_object()
+            .ok_or_else(|| ConfigError::validation("dispatcher", "must be an object"))?;
         settings.queue = map
             .get("queue")
-            .map(|v| serde_json::from_value(v.clone()))
+            .map(|v| {
+                serde_json::from_value(v.clone()).map_err(|e| ConfigError::Decode {
+                    path: "dispatcher.queue".to_string(),
+                    target: "QueueKind".to_string(),
+                    source: e,
+                })
+            })
             .transpose()?;
         settings.executor = map
             .get("executor")
-            .map(|v| serde_json::from_value(v.clone()))
+            .map(|v| {
+                serde_json::from_value(v.clone()).map_err(|e| ConfigError::Decode {
+                    path: "dispatcher.executor".to_string(),
+                    target: "ExecutorKind".to_string(),
+                    source: e,
+                })
+            })
             .transpose()?;
         if map.contains_key("concurrency") {
-            return Err(
-                "dispatcher.concurrency removed; set concurrency inside the executor block instead"
-                    .into(),
-            );
+            return Err(ConfigError::validation(
+                "dispatcher.concurrency",
+                "removed; set concurrency inside the executor block instead",
+            )
+            .into());
         }
         if map.contains_key("persistent") || map.contains_key("lock_ttl_secs") {
-            return Err(
-                "dispatcher.persistent/lock_ttl_secs removed; use bits.persist_after_ms policy"
-                    .into(),
-            );
+            return Err(ConfigError::validation(
+                "dispatcher",
+                "persistent/lock_ttl_secs removed; use bits.persist_after_ms policy",
+            )
+            .into());
         }
     }
 
@@ -636,26 +801,31 @@ fn action_from_entry(
     entry_name: &str,
     entry: &serde_json::Value,
     ctx: &ParseContext,
-) -> Result<Action, Box<dyn std::error::Error>> {
-    let map = entry
-        .as_object()
-        .ok_or_else(|| format!("{ns} '{entry_name}' must be an object, got: {entry}"))?;
+) -> Result<Action, BitsError> {
+    let map = entry.as_object().ok_or_else(|| {
+        ConfigError::validation(
+            format!("{ns}.{entry_name}"),
+            format!("must be an object, got: {entry}"),
+        )
+    })?;
     if map.contains_key("persistent") || map.contains_key("lock_ttl_secs") {
-        return Err(format!(
-            "{ns} '{entry_name}': persistent/lock_ttl_secs removed; use bits.persist_after_ms"
+        return Err(ConfigError::validation(
+            format!("{ns}.{entry_name}"),
+            "persistent/lock_ttl_secs removed; use bits.persist_after_ms",
         )
         .into());
     }
     let type_name = map
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("{ns} '{entry_name}' is missing a 'type' field (got: {entry})"))?;
+        .ok_or_else(|| ConfigError::missing(format!("{ns}.{entry_name}.type")))?;
     let settings = parse_dispatcher_fields(map.get("dispatcher"))?;
     let silent = map
         .get("silent")
         .map(|v| {
-            v.as_bool()
-                .ok_or_else(|| format!("{ns} '{entry_name}': silent must be a boolean"))
+            v.as_bool().ok_or_else(|| {
+                ConfigError::validation(format!("{ns}.{entry_name}.silent"), "must be a boolean")
+            })
         })
         .transpose()?;
 
@@ -680,7 +850,7 @@ fn attach_dispatcher(
     mut settings: DispatcherSettings,
     silent: Option<bool>,
     ctx: &ParseContext,
-) -> Result<Action, Box<dyn std::error::Error>> {
+) -> Result<Action, BitsError> {
     let is_remote_action = action_name == "remote";
     let is_remote_pool = matches!(&settings.executor, Some(ExecutorKind::RemotePool { .. }));
 
@@ -694,13 +864,23 @@ fn attach_dispatcher(
                 })
             }
             Some(ExecutorKind::RemotePool { .. }) => {}
-            Some(_) => return Err("'remote' target requires executor: remote_pool".into()),
+            Some(_) => {
+                return Err(ConfigError::validation(
+                    "dispatcher.executor",
+                    "'remote' target requires executor: remote_pool",
+                )
+                .into());
+            }
         }
         if ctx.worker_server.is_none() {
-            return Err("remote_pool executor requires bits.worker_server to be configured (add 'worker_server: { host: ..., port: ... }' under 'bits:')".into());
+            return Err(ConfigError::missing("bits.worker_server").into());
         }
     } else if is_remote_pool {
-        return Err("executor: remote_pool requires a 'remote' target action".into());
+        return Err(ConfigError::validation(
+            "dispatcher.executor",
+            "remote_pool requires a 'remote' target action",
+        )
+        .into());
     }
 
     let has_dispatcher = settings.queue.is_some() || settings.executor.is_some();
@@ -712,7 +892,8 @@ fn attach_dispatcher(
                 settings.executor.as_ref(),
                 None,
                 None,
-            )?;
+            )
+            .map_err(|e| ConfigError::validation("dispatcher", e))?;
             Ok(Action::Check(check, dispatcher, silent))
         }
         Action::Transform(transform, _, _) => {
@@ -721,7 +902,8 @@ fn attach_dispatcher(
                 settings.executor.as_ref(),
                 None,
                 None,
-            )?;
+            )
+            .map_err(|e| ConfigError::validation("dispatcher", e))?;
             Ok(Action::Transform(transform, dispatcher, silent))
         }
         Action::Target(target, _, _) => {
@@ -735,12 +917,15 @@ fn attach_dispatcher(
                 settings.executor.as_ref(),
                 pool_name,
                 ctx.worker_server.clone(),
-            )?;
+            )
+            .map_err(|e| ConfigError::validation("dispatcher", e))?;
             Ok(Action::Target(target, dispatcher, silent))
         }
-        _ if has_dispatcher => {
-            Err("dispatcher config only valid for Check, Transform, and Target actions".into())
-        }
+        _ if has_dispatcher => Err(ConfigError::validation(
+            "dispatcher",
+            "config only valid for Check, Transform, and Target actions",
+        )
+        .into()),
         _ => Ok(action),
     }
 }

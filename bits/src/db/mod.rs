@@ -53,6 +53,19 @@ impl std::fmt::Display for DbError {
 
 impl std::error::Error for DbError {}
 
+impl DbError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            DbError::Conflict(_) => "PERSISTENCE_CONFLICT",
+            DbError::Backend(_) => "PERSISTENCE_BACKEND",
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        true
+    }
+}
+
 #[async_trait]
 /// Durable storage contract for job records.
 ///

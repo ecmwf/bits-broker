@@ -6,6 +6,7 @@ use dashmap::DashMap;
 
 use crate::config::{RouteFactory, RuntimeConfig, parse_bootstrap};
 use crate::db::{ClaimResult, DbError, PersistenceStore};
+use crate::error::{BitsError, ConfigError, RoutingError};
 use crate::job::Job;
 use crate::result::JobResult;
 use crate::route_handle::RouteHandle;
@@ -100,13 +101,11 @@ impl Bits {
     }
 
     /// Builds a broker from the YAML configuration format used by the binaries.
-    pub fn from_config(config: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_config(config: &str) -> Result<Self, BitsError> {
         parse_bootstrap(config)?.into_bits()
     }
 
-    pub(crate) fn from_runtime_config(
-        parsed: RuntimeConfig,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn from_runtime_config(parsed: RuntimeConfig) -> Result<Self, BitsError> {
         let sweep_interval = parsed.sweep_interval.unwrap_or(DEFAULT_SWEEP_INTERVAL);
         let instance_id = format!("{}-{}", parsed.broker_id, uuid::Uuid::new_v4());
         let shutdown = Arc::new(ShutdownSignal::new());
@@ -121,7 +120,8 @@ impl Bits {
             job_store: parsed.job_store,
             internal_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .build()?,
+                .build()
+                .map_err(|e| ConfigError::validation("internal_client", e.to_string()))?,
             shutdown: shutdown.clone(),
             in_flight: Arc::new(AtomicUsize::new(0)),
             added_routes: Arc::new(std::sync::RwLock::new(vec![])),
@@ -184,7 +184,7 @@ impl Bits {
             .collect()
     }
 
-    pub fn start_worker_server(&self) -> Result<(), String> {
+    pub fn start_worker_server(&self) -> Result<(), BitsError> {
         self.route_factory.start_worker_server()
     }
 
@@ -192,12 +192,13 @@ impl Bits {
         &self,
         name: &str,
         route_value: &serde_json::Value,
-    ) -> Result<RouteHandle, Box<dyn std::error::Error>> {
+    ) -> Result<RouteHandle, BitsError> {
         let routes = self.route_factory.parse_route(name, route_value)?;
         let switch = Switch::new(routes);
-        switch
-            .validate()
-            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        switch.validate().map_err(|e| RoutingError::InvalidRoute {
+            route: name.to_string(),
+            reason: e.to_string(),
+        })?;
 
         let handle = RouteHandle {
             name: name.to_string(),

@@ -1,0 +1,161 @@
+mod common;
+
+use bits::{Bits, BitsError, ConfigError, RoutingError};
+
+fn must_fail(config: &str) -> BitsError {
+    Bits::from_config(config)
+        .err()
+        .expect("expected from_config to fail")
+}
+
+#[test]
+fn invalid_yaml_produces_config_yaml_variant() {
+    let err = must_fail("{{{{not yaml");
+    assert!(
+        matches!(err, BitsError::Config(ConfigError::Yaml(_))),
+        "expected Config(Yaml), got {err:?}"
+    );
+    assert_eq!(err.code(), "CONFIG_YAML_SYNTAX");
+    assert!(!err.is_retryable());
+}
+
+#[test]
+fn non_mapping_yaml_produces_config_validation() {
+    let err = must_fail("just a string");
+    assert!(
+        matches!(err, BitsError::Config(ConfigError::Validation { .. })),
+        "expected Config(Validation), got {err:?}"
+    );
+    assert_eq!(err.code(), "CONFIG_VALIDATION");
+}
+
+#[test]
+fn empty_persistence_url_produces_config_validation_not_missing() {
+    let config = r#"
+bits:
+  persistence:
+    type: nats
+    url: ""
+routes:
+  - default: []
+"#;
+    let err = must_fail(config);
+    assert!(
+        matches!(
+            err,
+            BitsError::Config(ConfigError::Validation { ref path, .. })
+            if path.contains("url")
+        ),
+        "empty URL should produce Validation, not MissingField, got {err:?}"
+    );
+    assert_eq!(err.code(), "CONFIG_VALIDATION");
+}
+
+#[test]
+#[cfg(not(feature = "tikv"))]
+fn feature_disabled_produces_config_feature_disabled() {
+    let config = r#"
+bits:
+  persistence:
+    type: tikv
+    endpoints:
+      - 127.0.0.1:2379
+routes:
+  - default: []
+"#;
+    let err = must_fail(config);
+    assert!(
+        matches!(err, BitsError::Config(ConfigError::FeatureDisabled { .. })),
+        "expected Config(FeatureDisabled), got {err:?}"
+    );
+    assert_eq!(err.code(), "CONFIG_FEATURE_DISABLED");
+}
+
+#[test]
+fn unknown_action_produces_routing_invalid_action() {
+    let config = r#"
+routes:
+  - default:
+      - banana::something: ~
+"#;
+    let err = must_fail(config);
+    assert!(
+        matches!(err, BitsError::Routing(RoutingError::InvalidAction { .. })),
+        "expected Routing(InvalidAction), got {err:?}"
+    );
+    assert_eq!(err.code(), "ROUTING_INVALID_ACTION");
+    assert!(!err.is_retryable());
+}
+
+#[test]
+fn route_without_target_is_rejected() {
+    let _ = common::CheckDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - no_target:
+      - check::dummy_delay:
+          duration_ms: 0
+"#;
+    let err = must_fail(config);
+    assert!(
+        matches!(err, BitsError::Routing(RoutingError::MissingTarget { .. })),
+        "expected Routing(MissingTarget), got {err:?}"
+    );
+    assert_eq!(err.code(), "ROUTING_MISSING_TARGET");
+    assert!(!err.is_retryable());
+}
+
+#[test]
+fn invalid_persistence_ttl_produces_config_validation() {
+    let config = r#"
+bits:
+  persistence:
+    type: tikv
+    endpoints:
+      - 127.0.0.1:2379
+    broker_lease_ttl_secs: 0.1
+routes:
+  - default: []
+"#;
+    let err = must_fail(config);
+    assert!(
+        matches!(
+            err,
+            BitsError::Config(ConfigError::Validation { ref path, .. })
+            if path.contains("broker_lease_ttl_secs")
+        ),
+        "expected Config(Validation) for TTL, got {err:?}"
+    );
+    assert_eq!(err.code(), "CONFIG_VALIDATION");
+}
+
+#[test]
+fn routes_as_map_produces_routing_error() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  default:
+    - target::dummy_dispatch:
+        duration_ms: 0
+        concurrency: 1
+"#;
+    let err = must_fail(config);
+    assert!(
+        matches!(err, BitsError::Routing(_)),
+        "expected Routing error for non-array routes, got {err:?}"
+    );
+}
+
+#[test]
+fn config_errors_are_not_retryable() {
+    let cases = [must_fail("{{{{"), must_fail("just a string")];
+    for err in &cases {
+        assert!(
+            !err.is_retryable(),
+            "{} should not be retryable",
+            err.code()
+        );
+    }
+}

@@ -181,8 +181,15 @@ async fn dispatch_to_pool(
         None => rest_path.to_string(),
     };
     let mut uri_parts = parts.uri.into_parts();
-    uri_parts.path_and_query = Some(new_pq.parse().expect("rewritten path must be valid"));
-    parts.uri = Uri::from_parts(uri_parts).expect("rewritten URI must be valid");
+    let pq = match new_pq.parse() {
+        Ok(pq) => pq,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid request path").into_response(),
+    };
+    uri_parts.path_and_query = Some(pq);
+    let Ok(uri) = Uri::from_parts(uri_parts) else {
+        return (StatusCode::BAD_REQUEST, "invalid request URI").into_response();
+    };
+    parts.uri = uri;
     let req = axum::http::Request::from_parts(parts, body);
 
     match router.call(req).await {

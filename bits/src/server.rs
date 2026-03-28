@@ -8,7 +8,7 @@
 //! ```ignore
 //! let (bits, server_config) = bits::parse_bootstrap(&config_str)?.into_parts()?;
 //! let bits = Arc::new(bits);
-//! bits::server::serve(bits, server_config).await?;
+//! bits::server::serve(bits, server_config, shutdown_signal()).await?;
 //! ```
 
 use std::sync::Arc;
@@ -86,10 +86,13 @@ struct AppState {
 
 /// Start the HTTP server, binding to the address in `config`.
 ///
-/// This function runs until the process is terminated.
+/// Runs until the process is terminated or `shutdown` completes. When shutdown
+/// fires, the server stops accepting new connections and drains in-flight requests
+/// before returning.
 pub async fn serve(
     bits: Arc<Bits>,
     config: ServerConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let broker_id = bits.broker_id().to_string();
     let routes = bits.route_names().join(", ");
@@ -115,7 +118,9 @@ pub async fn serve(
     eprintln!("  \x1b[2mroutes\x1b[0m  {routes}");
     eprintln!();
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
 }
 

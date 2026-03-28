@@ -30,7 +30,7 @@ impl CheckAction for MatchField {
 
 register_action!(check, "custom_match_field", MatchField);
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), bits::ActionError> {
     let action = create_action(
         "custom_match_field",
         json!({ "field": "type", "value": "fc" }),

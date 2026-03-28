@@ -31,7 +31,7 @@ impl TargetAction for Echo {
 
 register_action!(target, "custom_echo_target", Echo);
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), bits::ActionError> {
     let action = create_action("custom_echo_target", json!({ "label": "main" }))?;
     println!("created: {:?}", action);
 

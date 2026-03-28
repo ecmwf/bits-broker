@@ -75,7 +75,7 @@ routes:
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), bits::BitsError> {
     let bits = Bits::from_config(CONFIG)?;
 
     let jobs = vec![

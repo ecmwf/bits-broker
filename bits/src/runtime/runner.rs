@@ -1,7 +1,9 @@
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use futures::FutureExt;
 use tracing::Instrument;
 
 use crate::actions::{TargetAction, TargetResult};
@@ -44,7 +46,10 @@ pub(crate) fn spawn_job(
             let started = Instant::now();
             let router_for_dispatch = Arc::clone(&router);
             let job_for_dispatch = (*job).clone();
-            let dispatch_fut = async move { dispatch(&router_for_dispatch, job_for_dispatch).await };
+            let dispatch_fut = AssertUnwindSafe(async move {
+                dispatch(&router_for_dispatch, job_for_dispatch).await
+            })
+            .catch_unwind();
             tokio::pin!(dispatch_fut);
 
             if already_persisted {
@@ -53,7 +58,11 @@ pub(crate) fn spawn_job(
 
             let result = if let Some(delay) = persist_after {
                 tokio::select! {
-                    result = &mut dispatch_fut => result,
+                    result = &mut dispatch_fut => result.unwrap_or_else(|panic_payload| {
+                        let msg = panic_message(&panic_payload);
+                        tracing::error!(job.id = %job.id, reason = %msg, "action panicked");
+                        JobResult::Failed { reason: format!("internal panic: {msg}") }
+                    }),
                     _ = tokio::time::sleep(delay) => {
                         if let Some(store) = &store
                             && !job.persisted.load(Ordering::Acquire)
@@ -72,11 +81,19 @@ pub(crate) fn spawn_job(
                                 Err(err) => tracing::warn!(job.id = %job.id, error = %err, "delayed persist failed"),
                             }
                         }
-                        (&mut dispatch_fut).await
+                        (&mut dispatch_fut).await.unwrap_or_else(|panic_payload| {
+                            let msg = panic_message(&panic_payload);
+                            tracing::error!(job.id = %job.id, reason = %msg, "action panicked");
+                            JobResult::Failed { reason: format!("internal panic: {msg}") }
+                        })
                     }
                 }
             } else {
-                (&mut dispatch_fut).await
+                (&mut dispatch_fut).await.unwrap_or_else(|panic_payload| {
+                    let msg = panic_message(&panic_payload);
+                    tracing::error!(job.id = %job.id, reason = %msg, "action panicked");
+                    JobResult::Failed { reason: format!("internal panic: {msg}") }
+                })
             };
 
             let ms = started.elapsed().as_millis();
@@ -94,6 +111,16 @@ pub(crate) fn spawn_job(
         }
         .instrument(span),
     );
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 async fn dispatch(router: &Switch, job: Job) -> JobResult {

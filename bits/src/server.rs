@@ -8,7 +8,7 @@
 //! ```ignore
 //! let (bits, server_config) = bits::parse_bootstrap(&config_str)?.into_parts()?;
 //! let bits = Arc::new(bits);
-//! bits::server::serve(bits, server_config, shutdown_signal()).await?;
+//! bits::server::serve(bits, server_config).await?;
 //! ```
 
 use std::sync::Arc;
@@ -84,12 +84,14 @@ struct AppState {
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
-/// Start the HTTP server, binding to the address in `config`.
-///
-/// Runs until the process is terminated or `shutdown` completes. When shutdown
-/// fires, the server stops accepting new connections and drains in-flight requests
-/// before returning.
 pub async fn serve(
+    bits: Arc<Bits>,
+    config: ServerConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    serve_with_shutdown(bits, config, std::future::pending()).await
+}
+
+pub async fn serve_with_shutdown(
     bits: Arc<Bits>,
     config: ServerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,

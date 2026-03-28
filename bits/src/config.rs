@@ -175,14 +175,9 @@ impl RouteFactory {
 
     pub(crate) fn start_worker_server(&self) -> Result<(), BitsError> {
         if let Some(ws) = &self.worker_server {
-            ws.start().map_err(|e| {
-                let addr = ws.address();
-                let prefix = format!("worker server failed to bind to {addr}: ");
-                let reason = e.strip_prefix(&prefix).unwrap_or(&e).to_string();
-                WorkerServerError::Bind {
-                    address: addr,
-                    reason,
-                }
+            ws.start().map_err(|e| WorkerServerError::Bind {
+                address: ws.address(),
+                reason: e,
             })?;
         }
         Ok(())

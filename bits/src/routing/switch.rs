@@ -142,7 +142,11 @@ impl TargetAction for Switch {
                                     .await?;
                                 if matches!(result, TransformResult::Continue) {
                                     let modified = Arc::try_unwrap(job_mux)
-                                        .expect("work future completed; Arc should be unique")
+                                        .map_err(|_| {
+                                            ActionError::ResourceError(
+                                                "transform Arc still shared after dispatch".into(),
+                                            )
+                                        })?
                                         .into_inner();
                                     *current_job.to_mut() = modified;
                                 }

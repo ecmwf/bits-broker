@@ -157,10 +157,7 @@ impl Bits {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let added = self
-            .added_routes
-            .read()
-            .expect("route storage lock poisoned");
+        let added = self.added_routes.read().unwrap_or_else(|p| p.into_inner());
         for handle in added.iter() {
             names.extend(handle.router.route_names().iter().map(|s| s.to_string()));
         }
@@ -170,10 +167,7 @@ impl Bits {
     /// Collects descriptors from every instantiated action in the routing tree.
     pub fn describe_actions(&self) -> Vec<serde_json::Value> {
         let mut out = self.router.describe_actions();
-        let added = self
-            .added_routes
-            .read()
-            .expect("route storage lock poisoned");
+        let added = self.added_routes.read().unwrap_or_else(|p| p.into_inner());
         for handle in added.iter() {
             out.extend(handle.router.describe_actions());
         }
@@ -184,7 +178,7 @@ impl Bits {
     pub fn added_route_names(&self) -> Vec<String> {
         self.added_routes
             .read()
-            .expect("route storage lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .iter()
             .map(|h| h.name.clone())
             .collect()
@@ -218,7 +212,7 @@ impl Bits {
         // Store a clone of the handle for enumeration
         self.added_routes
             .write()
-            .expect("route storage lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .push(handle.clone());
 
         // Start the worker server if any remote pools were registered by this route.
@@ -228,7 +222,10 @@ impl Bits {
         Ok(handle)
     }
 
-    /// Submits a job for routing and execution.
+    /// Submit a job for processing through the routing pipeline.
+    ///
+    /// Must be called from within a Tokio runtime (`#[tokio::main]` or `#[tokio::test]`).
+    /// Panics if no runtime is available.
     pub fn submit(&self, job: Job) -> JobHandle {
         self.submit_with_state(job, false)
     }

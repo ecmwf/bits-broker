@@ -34,13 +34,16 @@ impl JobStore for MemoryStore {
     async fn upsert_job(&self, record: PersistentJobRecord) -> Result<(), DbError> {
         self.jobs
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .insert(record.job_id.clone(), record);
         Ok(())
     }
 
     async fn delete_job(&self, job_id: &str) -> Result<(), DbError> {
-        self.jobs.lock().unwrap().remove(job_id);
+        self.jobs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(job_id);
         Ok(())
     }
 
@@ -50,7 +53,7 @@ impl JobStore for MemoryStore {
         expected_owner_broker_id: &str,
         claimant_broker_id: &str,
     ) -> Result<ClaimResult, DbError> {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().unwrap_or_else(|p| p.into_inner());
         let Some(record) = jobs.get_mut(job_id) else {
             return Ok(ClaimResult::NotFound);
         };
@@ -79,17 +82,20 @@ impl BrokerLeaseStore for MemoryStore {
         ttl: Duration,
     ) -> Result<(), DbError> {
         let now = Utc::now();
-        self.brokers.lock().unwrap().insert(
-            broker_id.to_string(),
-            BrokerLeaseRecord {
-                broker_id: broker_id.to_string(),
-                internal_poll_base_url: internal_poll_base_url.to_string(),
-                lease_until: now
-                    + chrono::Duration::from_std(ttl)
-                        .unwrap_or_else(|_| chrono::Duration::seconds(60)),
-                updated_at: now,
-            },
-        );
+        self.brokers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                broker_id.to_string(),
+                BrokerLeaseRecord {
+                    broker_id: broker_id.to_string(),
+                    internal_poll_base_url: internal_poll_base_url.to_string(),
+                    lease_until: now
+                        + chrono::Duration::from_std(ttl)
+                            .unwrap_or_else(|_| chrono::Duration::seconds(60)),
+                    updated_at: now,
+                },
+            );
         Ok(())
     }
 
@@ -97,12 +103,20 @@ impl BrokerLeaseStore for MemoryStore {
         &self,
         broker_id: &str,
     ) -> Result<Option<BrokerLeaseRecord>, DbError> {
-        let lease = self.brokers.lock().unwrap().get(broker_id).cloned();
+        let lease = self
+            .brokers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(broker_id)
+            .cloned();
         Ok(lease)
     }
 
     async fn delete_broker_lease(&self, broker_id: &str) -> Result<(), DbError> {
-        self.brokers.lock().unwrap().remove(broker_id);
+        self.brokers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(broker_id);
         Ok(())
     }
 }

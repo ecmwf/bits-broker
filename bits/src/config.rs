@@ -225,7 +225,9 @@ impl Bootstrap {
 pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
     let raw: serde_json::Value = serde_yaml::from_str(config).map_err(ConfigError::from)?;
     if !raw.is_object() {
-        return Err(ConfigError::validation("", "top-level config must be a YAML mapping").into());
+        return Err(
+            ConfigError::validation("config", "top-level config must be a YAML mapping").into(),
+        );
     }
 
     let bits_cfg: BitsConfig = raw
@@ -486,30 +488,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
 }
 
 fn validate_switch(switch: &Switch) -> Result<(), BitsError> {
-    switch.validate().map_err(|err| match err {
-        crate::actions::ActionError::ConfigError(message) => {
-            let Some(rest) = message.strip_prefix("route '") else {
-                return ConfigError::validation("routes", message).into();
-            };
-            let Some((route, reason)) = rest.split_once("' ") else {
-                return ConfigError::validation("routes", message).into();
-            };
-
-            if reason == "must end with a target or switch" {
-                RoutingError::MissingTarget {
-                    route: route.to_string(),
-                }
-                .into()
-            } else {
-                RoutingError::InvalidRoute {
-                    route: route.to_string(),
-                    reason: reason.to_string(),
-                }
-                .into()
-            }
-        }
-        other => BitsError::Action(other),
-    })
+    switch.validate().map_err(BitsError::from)
 }
 
 /// Parses an ordered list of named routes from a JSON array of single-key objects.
@@ -589,7 +568,7 @@ fn parse_action(
                 }
                 .into());
             }
-            let (ns, entry_name) = split_ns(name)?;
+            let (ns, entry_name) = split_ns(name, route_name)?;
             resolve_named(ns, entry_name, route_name, ctx)
         }
         serde_json::Value::Object(map) => {
@@ -602,7 +581,7 @@ fn parse_action(
 
             for (key, config) in map {
                 if key.contains("::") {
-                    let (ns, action_name) = split_ns(key)?;
+                    let (ns, action_name) = split_ns(key, route_name)?;
                     if action_name == "remote" {
                         return Err(RoutingError::InvalidAction {
                             route: route_name.to_string(),
@@ -657,13 +636,17 @@ fn parse_action(
     }
 }
 
-fn split_ns(s: &str) -> Result<(&str, &str), BitsError> {
+fn split_ns<'a>(s: &'a str, route_name: &str) -> Result<(&'a str, &'a str), BitsError> {
     let mut parts = s.splitn(2, "::");
-    let ns = parts
-        .next()
-        .ok_or_else(|| ConfigError::validation("routes", format!("invalid reference '{s}'")))?;
-    let name = parts.next().ok_or_else(|| {
-        ConfigError::validation("routes", format!("reference '{s}' must be namespace::name"))
+    let ns = parts.next().ok_or_else(|| RoutingError::InvalidAction {
+        route: route_name.to_string(),
+        action: s.to_string(),
+        reason: "invalid reference".to_string(),
+    })?;
+    let name = parts.next().ok_or_else(|| RoutingError::InvalidAction {
+        route: route_name.to_string(),
+        action: s.to_string(),
+        reason: "must be namespace::name".to_string(),
     })?;
     Ok((ns, name))
 }

@@ -125,7 +125,7 @@ For **inline steps**, `dispatcher:` is a sibling key in the action mapping:
 routes:
   - default:
       - target::http:
-            url: "http://my-service/api"
+          url: "http://my-service/api"
         dispatcher:
           queue: cost_weighted
           executor:

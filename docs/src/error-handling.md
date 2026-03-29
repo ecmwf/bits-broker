@@ -138,7 +138,7 @@ if err.is_retryable() {
     // 503 Service Unavailable + Retry-After
     (StatusCode::SERVICE_UNAVAILABLE, [("Retry-After", "1")])
 } else {
-    // 400 or 500, no retry
+    // 500, no retry
     (StatusCode::INTERNAL_SERVER_ERROR, [])
 }
 ```

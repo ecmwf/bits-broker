@@ -44,6 +44,7 @@ jobs:
     env:
       MDBOOK_VERSION: "0.5.2"
       MDBOOK_TABS_VERSION: "0.3.4"
+      MDBOOK_MERMAID_VERSION: "0.14.0"
     outputs:
       artifact-id: ${{ steps.upload-docs.outputs.artifact-id }}
     steps:
@@ -63,7 +64,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: ${{ runner.os }}-docs-tools-${{ env.MDBOOK_VERSION }}-${{ env.MDBOOK_TABS_VERSION }}
+          key: ${{ runner.os }}-docs-tools-${{ env.MDBOOK_VERSION }}-${{ env.MDBOOK_TABS_VERSION }}-${{ env.MDBOOK_MERMAID_VERSION }}
           restore-keys: |
             ${{ runner.os }}-docs-tools-
 
@@ -90,6 +91,7 @@ jobs:
 
           ensure_tool mdbook mdbook "${MDBOOK_VERSION}"
           ensure_tool mdbook-tabs mdbook-tabs "${MDBOOK_TABS_VERSION}"
+          ensure_tool mdbook-mermaid mdbook-mermaid "${MDBOOK_MERMAID_VERSION}"
 
       - name: Build mdBook
         run: |

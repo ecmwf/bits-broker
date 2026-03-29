@@ -4,7 +4,6 @@
 
 - Rust toolchain matching the version in `rust-toolchain.toml`
 - Cargo workspace checked out locally
-- A YAML configuration file defining your checks, transforms, targets, and routes
 
 ## Workspace layout
 
@@ -25,16 +24,46 @@ cargo build
 cargo test
 ```
 
-## Run locally
+## Run the hello_bits example
 
-The `bits-ecmwf` crate contains runnable examples. Start by copying and adapting one of the
-example configs from `bits-ecmwf/examples/`, or adapt `design_config.yaml` in the repository root.
-
-To run an example:
+The fastest way to see BITS in action:
 
 ```bash
-cargo run --bin <example-name>
+cargo run --example hello_bits
 ```
+
+This demonstrates custom actions and conditional routing. The config is embedded
+in the example source. See `bits/examples/hello_bits.rs`.
+
+## Write your own config
+
+Create a file called `my-config.yaml`:
+
+```yaml
+routes:
+  - default:
+      - target::http:
+          url: "http://httpbin.org/post"
+```
+
+This routes every job to `httpbin.org` which echoes back whatever you send.
+
+Start the server:
+
+```bash
+cargo run -p bits-server -- my-config.yaml
+```
+
+Then submit a job from another terminal:
+
+```bash
+curl -X POST http://localhost:8080/job \
+  -H "Content-Type: application/json" \
+  -d '{"dataset": "era5", "date": "2024-01-15"}'
+```
+
+You'll get back either the result directly (if the backend responds within the
+poll timeout) or a `303` redirect to `/job/{id}` for reconnection.
 
 ## Python extension
 

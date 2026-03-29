@@ -10,7 +10,6 @@ build-dir = "book"
 [preprocessor.tabs]
 [preprocessor.mermaid]
 command = "mdbook-mermaid"
-optional = true
 
 [output.html]
 additional-css = ["theme/tabs.css", "theme/mermaid.css"]

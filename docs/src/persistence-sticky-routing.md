@@ -15,7 +15,7 @@ table or database.
 ## Why sticky ingress matters
 
 On poll, a broker first checks its **local in-memory state**. If the job is found there, the
-result is returned immediately — no database access, no network call. If the job is not found
+result is returned immediately with no database access and no network call. If the job is not found
 locally but the parsed owner prefix names a different broker, the request must be proxied or
 the job must be recovered.
 
@@ -27,7 +27,7 @@ path. Without affinity, every poll may incur an internal proxy call.
 
 When a poll misses locally and the job ID names another broker, BITS looks up that broker's
 registered endpoint from the [broker lease table](persistence-broker-leases.md) and proxies the
-poll directly — without involving the client. The client receives the same response it would
+poll directly without involving the client. The client receives the same response it would
 have received had it contacted the owner directly.
 
 Proxy failure (network error, timeout) while the owner's lease is still active returns

@@ -21,7 +21,7 @@ written exactly once.
 
 ## Reclaim is strictly lease-gated
 
-BITS does not use per-job heartbeats. Instead, each broker maintains a **broker lease** — a
+BITS does not use per-job heartbeats. Instead, each broker maintains a **broker lease**, a
 record in durable storage that proves the broker is alive and advertises its internal endpoint.
 
 A non-owner broker may only claim and recover a persistent job if the owner's broker lease is
@@ -30,11 +30,11 @@ reclaim. This prevents split-brain recovery and avoids double-execution.
 
 ## What is covered in this section
 
-- [Concepts](persistence-concepts.md) — data model, owner-aware job IDs, and the store abstraction.
-- [Sticky Routing](persistence-sticky-routing.md) — why sticky ingress matters and how BITS handles
+- [Concepts](persistence-concepts.md) - data model, owner-aware job IDs, and the store abstraction.
+- [Sticky Routing](persistence-sticky-routing.md) - why sticky ingress matters and how BITS handles
   off-owner polls.
-- [Poll Proxying and Recovery](persistence-poll-recovery.md) — the full decision sequence a broker
+- [Poll Proxying and Recovery](persistence-poll-recovery.md) - the full decision sequence a broker
   follows when a poll arrives.
-- [Broker Leases](persistence-broker-leases.md) — how brokers register themselves and how lease
+- [Broker Leases](persistence-broker-leases.md) - how brokers register themselves and how lease
   expiry enables recovery.
-- [Operational Notes](persistence-operations.md) — tuning guidance for production deployments.
+- [Operational Notes](persistence-operations.md) - tuning guidance for production deployments.

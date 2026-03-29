@@ -160,7 +160,7 @@ class ComputeCost(TransformAction):
         cost = float((job.request or {}).get(self.cost_field, 1.0))
         meta = dict(job.metadata) if job.metadata else {}
         meta["cost"] = cost
-        job.metadata = meta  # must assign back — in-place mutation is not detected
+        job.metadata = meta  # must assign back - in-place mutation is not detected
         return Continue()
 
 register_action("compute_cost", ComputeCost)
@@ -194,7 +194,7 @@ A target dispatches the job and returns one of four outcome types:
 | `Success.json(value)` | Serialise a Python dict / list as `application/json`. |
 | `Redirect(location, message="")` | Tell the client to follow a redirect URL. |
 | `Error(message)` | Job-level error (invalid request, auth failure, etc.). |
-| `Reject(reason)` | This route cannot handle the job — try the next branch. |
+| `Reject(reason)` | This route cannot handle the job - try the next branch. |
 
 When using `target::remote`, an external worker can return the same redirect outcome by posting
 `{"status":"redirect", "location":"...", "message":"..."}` to
@@ -303,7 +303,7 @@ targets:
 ### `register_action!` macro
 
 Call the macro at the bottom of the same file as the implementation. It uses the
-[`inventory`](https://docs.rs/inventory) crate for compile-time distributed registration — no
+[`inventory`](https://docs.rs/inventory) crate for compile-time distributed registration. No
 central file needs to be edited.
 
 ```rust
@@ -386,7 +386,7 @@ checks:
 
 Prefer returning `Reject(reason)` for expected policy rejections. Pass `silent=False` when the
 rejection reason should reach the user (e.g. data not yet released); the default is `silent=True`
-(route-selection). For unexpected failures, raise an exception — it surfaces as a `Failed` result
+(route-selection). For unexpected failures, raise an exception. It surfaces as a `Failed` result
 to the client.
 
 {{#endtab }}

@@ -14,54 +14,50 @@ This mode is useful when:
 You can define a named target:
 
 ```yaml
+bits:
+  worker_server:
+    host: "0.0.0.0"
+    port: 9001
+
 targets:
   worker_pool:
     type: remote
     dispatcher:
       queue: cost_weighted
       executor:
-        remote_pool:
-          bind: "0.0.0.0:9001"
-          heartbeat_timeout_secs: 60
+        type: remote_pool
+        heartbeat_timeout_secs: 60
 
 routes:
-  default:
-    - target::worker_pool
-```
-
-Or inline:
-
-```yaml
-routes:
-  default:
-    - target::remote: ~
-      dispatcher:
-        executor:
-          remote_pool:
-            bind: "0.0.0.0:9001"
-            heartbeat_timeout_secs: 60
+  - default:
+      - target::worker_pool
 ```
 
 Important rules:
 
 - `target::remote` must use `executor: remote_pool`.
 - `executor: remote_pool` is only valid with `target::remote`.
-- If you use `target::remote` without an explicit executor, BITS injects a default
-  remote pool config (`bind: 0.0.0.0:9001`, `heartbeat_timeout_secs: 60`).
+- If you use `target::remote` without an explicit executor, BITS injects a
+  default remote pool config (`heartbeat_timeout_secs: 60`).
+- The worker server bind address is configured at `bits.worker_server`, not
+  inside the executor. All remote pools share a single HTTP server.
 
 ## 2) Worker API contract
 
 When `remote_pool` is configured, BITS starts an HTTP server with dedicated work, heartbeat,
 and terminal outcome endpoints.
 
+All endpoints are namespaced under `/{pool_name}/`, where `pool_name` is the
+target's registry entry name (e.g., `mars`):
+
 | Endpoint | Method | Purpose | Success codes |
 |---|---|---|---|
-| `/work?timeout_ms=N` | `GET` | Long-poll for one available job | `200`, `204` |
-| `/heartbeat/{job_id}` | `POST` | Keep an in-progress job alive | `200`, `404` |
-| `/complete/data/{job_id}` | `POST` | Stream successful response body | `200`, `404` |
-| `/complete/reject/{job_id}` | `POST` | Submit business rejection JSON | `200`, `404` |
-| `/complete/error/{job_id}` | `POST` | Submit worker failure JSON | `200`, `404` |
-| `/complete/redirect/{job_id}` | `POST` | Submit redirect JSON | `200`, `404` |
+| `/{pool}/work?timeout_ms=N` | `GET` | Long-poll for one available job | `200`, `204` |
+| `/{pool}/heartbeat/{job_id}` | `POST` | Keep an in-progress job alive | `200`, `404` |
+| `/{pool}/complete/data/{job_id}` | `POST` | Stream successful response body | `200`, `404` |
+| `/{pool}/complete/reject/{job_id}` | `POST` | Submit business rejection JSON | `200`, `404` |
+| `/{pool}/complete/error/{job_id}` | `POST` | Submit worker failure JSON | `200`, `404` |
+| `/{pool}/complete/redirect/{job_id}` | `POST` | Submit redirect JSON | `200`, `404` |
 
 ### `GET /work?timeout_ms=N`
 

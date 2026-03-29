@@ -44,7 +44,7 @@ jobs:
     env:
       MDBOOK_VERSION: "0.5.2"
       MDBOOK_TABS_VERSION: "0.3.4"
-      MDBOOK_MERMAID_VERSION: "0.14.0"
+      MDBOOK_MERMAID_VERSION: "0.17.0"
     outputs:
       artifact-id: ${{ steps.upload-docs.outputs.artifact-id }}
     steps:

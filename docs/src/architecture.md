@@ -7,13 +7,13 @@
 A **job** is the unit of work in BITS. When a client submits a request, BITS creates a job
 carrying:
 
-- `original_request` — the payload exactly as submitted. Never mutated. Used as the restart
+- `original_request` - the payload exactly as submitted. Never mutated. Used as the restart
   point if the job needs to be recovered after a broker failure.
-- `request` — a working copy of the payload, mutated by transform actions as the job flows
+- `request` - a working copy of the payload, mutated by transform actions as the job flows
   through the pipeline.
-- `metadata` — mutable annotations added by transforms during routing (for example, a computed
+- `metadata` - mutable annotations added by transforms during routing (for example, a computed
   cost value).
-- `user` — identity of the submitting user.
+- `user` - identity of the submitting user.
 
 ## Pipelines
 
@@ -42,10 +42,17 @@ end with a target.
 
 Examples: `target::http`, `target::remote`
 
+> **Note:** The core `bits` crate ships only `target::http` and
+> `target::remote`. All other actions (`match`, `has_license`,
+> `metkit_expansion`, `schedule_released`, etc.) are provided by the
+> `bits-ecmwf` application crate. Your application registers its own
+> actions using `register_action!`. See
+> [Custom Actions](custom-actions.md).
+
 ## Switch
 
 A `switch` contains named routes and tries them **in order**, returning the result of the first
-route whose checks all pass. This is the branching primitive — use it to express conditional
+route whose checks all pass. This is the branching primitive. Use it to express conditional
 routing such as privileged versus public access paths. Switches can be nested inside routes.
 
 When all routes reject, the switch collects rejection reasons from non-silent actions and returns
@@ -55,23 +62,23 @@ a matched route still failed.
 
 ## Dispatcher
 
-Any action step — check, transform, or target — can have an optional **dispatcher** that controls
+Any action step (check, transform, or target) can have an optional **dispatcher** that controls
 ordering and concurrency before the action runs.
 
 A dispatcher has two concerns:
 
-- **Queue** — controls which job runs next (`fifo`, `cost_weighted`, or `age_priority`). The queue
+- **Queue**: controls which job runs next (`fifo`, `cost_weighted`, or `age_priority`). The queue
   only stores `Job` metadata; it knows nothing about work futures or result types.
-- **Executor** — owns the scheduling loop that pulls jobs from the queue and runs the associated
+- **Executor**: owns the scheduling loop that pulls jobs from the queue and runs the associated
   work (`async_pool`, `thread_pool`, or `remote_pool`).
 
 Each executor implements its own scheduling model:
 
-- **Async pool** — N Tokio tasks (one per concurrency slot) each loop on `queue.dequeue()` and run
+- **Async pool** - N Tokio tasks (one per concurrency slot) each loop on `queue.dequeue()` and run
   work inline.
-- **Thread pool** — dedicated OS threads each call `queue.dequeue()` directly, run work via
+- **Thread pool** - dedicated OS threads each call `queue.dequeue()` directly, run work via
   `block_on`, and send results back.
-- **Remote pool** — the `/work` HTTP handler calls `queue.dequeue()` directly when a remote worker
+- **Remote pool** - the `/work` HTTP handler calls `queue.dequeue()` directly when a remote worker
   polls, so external workers pull work at their own pace with no intermediate feeder task.
 
 This makes scheduling behavior explicit at the step level rather than a global setting. See
@@ -89,7 +96,7 @@ The `bits-ecmwf` binary uses `#[tokio::main]` with the default multi-thread sche
 spawns one worker thread per logical CPU. These are OS threads managed entirely by Tokio and
 are not counted in the items below.
 
-### Started at `Bits::from_config()` — always
+### Started at `Bits::from_config()` - always
 
 **Completed-job sweeper (1 OS thread)**
 A single `std::thread::spawn` thread that wakes every 5 seconds (configurable via
@@ -97,7 +104,7 @@ A single `std::thread::spawn` thread that wakes every 5 seconds (configurable vi
 is polling them. A real blocking OS thread is used deliberately so it cannot interfere with the
 Tokio scheduler even if it is saturated.
 
-### Started at `Bits::from_config()` — only when persistence is configured
+### Started at `Bits::from_config()` - only when persistence is configured
 
 **Broker lease heartbeat (1 Tokio task)**
 A long-running async task that periodically upserts this broker's lease record in the persistence
@@ -105,10 +112,10 @@ store. It renews at half the configured lease TTL (minimum 100 ms between renewa
 is the mechanism by which other brokers determine that this instance is alive. See
 [Broker Leases](persistence-broker-leases.md).
 
-### Started per dispatcher — at config parse time
+### Started per dispatcher - at config parse time
 
 Each action step with a `dispatcher:` block starts background workers when the configuration is
-loaded. The executor owns the scheduling loop — the number and kind of workers depend on the
+loaded. The executor owns the scheduling loop. The number and kind of workers depend on the
 executor type configured.
 
 **Async pool scheduler (N Tokio tasks, if `executor: async_pool`)**
@@ -118,7 +125,7 @@ by the number of tasks.
 
 **Cost-weighted queue worker (1 Tokio task, if `queue: cost_weighted`)**
 Maintains the priority heap and services dequeue requests in cost order. Not started when
-`queue: fifo` is used — FIFO uses a plain channel with no background task.
+`queue: fifo` is used. FIFO uses a plain channel with no background task.
 
 **Thread pool workers (N OS threads, if `executor: thread_pool`)**
 One OS thread per `concurrency` unit. Each thread calls `queue.dequeue()` directly (via
@@ -128,7 +135,7 @@ is explicitly configured.
 
 **Remote pool HTTP server + heartbeat reaper (2 Tokio tasks, if `executor: remote_pool`)**
 One task runs an axum HTTP server on the configured bind address (default `0.0.0.0:9001`).
-The `/work` endpoint calls `queue.dequeue()` directly when a remote worker long-polls — there
+The `/work` endpoint calls `queue.dequeue()` directly when a remote worker long-polls. There
 is no intermediate feeder task. A second task scans in-progress jobs every
 `heartbeat_timeout / 2` seconds and evicts any worker that has stopped sending heartbeats.
 Started when `executor: remote_pool` is configured (or when `target::remote` is used, which
@@ -144,7 +151,7 @@ For the wire protocol and worker implementation contract, see
 Runs the full pipeline for one job. If `bits.persist_after_ms` is configured, this task also
 handles the persistence threshold: it races the pipeline against a timer, and if the timer fires
 first it writes the durable job record before continuing to wait for the pipeline to complete.
-There is no separate timer task — the threshold logic lives inside this task via `tokio::select!`.
+There is no separate timer task. The threshold logic lives inside this task via `tokio::select!`.
 
 ### Summary
 

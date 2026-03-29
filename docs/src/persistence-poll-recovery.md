@@ -39,14 +39,14 @@ When proxying to the owner broker, BITS translates the HTTP response back to a `
 
 | Owner response | Caller receives |
 |---|---|
-| `200 OK` | `Ready(Success)` — body streamed through |
-| `303`/`307` with `Location` containing the job ID | `Pending` — job is still in progress |
-| `303`/`307` with `Location` not containing the job ID | `Ready(Redirect)` — result is a redirect |
+| `200 OK` | `Ready(Success)` - body streamed through |
+| `303`/`307` with `Location` containing the job ID | `Pending` - job is still in progress |
+| `303`/`307` with `Location` not containing the job ID | `Ready(Redirect)` - result is a redirect |
 | `404 Not Found` | `NotFound` |
 | `400 Bad Request` | `Ready(Error)` |
 | `410 Gone` | `Ready(Cancelled)` |
-| `5xx` | `Pending` — owner is alive but errored; client should retry |
-| Network/timeout failure | `Pending` — no ownership transfer while lease is active |
+| `5xx` | `Pending` - owner is alive but errored; client should retry |
+| Network/timeout failure | `Pending` - no ownership transfer while lease is active |
 
 ## Claim and recovery
 
@@ -59,12 +59,12 @@ runs `claim_with_backoff`:
 
 On a successful claim, `Job::restore` reconstructs the job from the durable record:
 
-- `request` is reset to `original_request` — the pipeline re-runs from the beginning
+- `request` is reset to `original_request`. The pipeline re-runs from the beginning
 - `created_at` is preserved from the original submission timestamp
 - All runtime state (cancelled flag, client-connected flag, etc.) starts fresh
 
 The job is submitted immediately and the polling request is attached to it, so the client
-receives `Pending` in response to the recovery poll — not an extra round-trip.
+receives `Pending` in response to the recovery poll without an extra round-trip.
 
 ## Claim outcomes
 

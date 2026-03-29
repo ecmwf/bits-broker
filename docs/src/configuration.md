@@ -141,6 +141,9 @@ routes:
 | `executor.type` | `async_pool`, `thread_pool`, `remote_pool` | `async_pool` |
 | `executor.concurrency` | positive integer | 256 |
 
+- `executor.concurrency` applies to `async_pool` and `thread_pool` only.
+  `remote_pool` does not accept a concurrency setting; parallelism is
+  determined by how many workers are polling.
 - `cost_weighted` ordering requires a `metadata["cost"]` value set by a prior transform.
 - `age_priority` ages waiting jobs into service while still making larger-cost jobs wait longer to gain queue priority.
 - `thread_pool` offloads work to dedicated OS threads. Use this for CPU-bound or blocking work.

@@ -332,7 +332,8 @@ bits-2.bits-headless.default.svc.cluster.local
 ### Readiness and liveness probes
 
 Dedicated health endpoints are planned but not yet implemented. For now, use
-TCP socket checks or HTTP checks against `/job` with a dummy request.
+TCP socket checks. If you need HTTP probes, use `GET /job/healthcheck` which
+returns a fast `404` without creating a job or long-polling.
 
 ```yaml
 livenessProbe:

@@ -59,7 +59,7 @@ target's registry entry name (e.g., `mars`):
 | `/{pool}/complete/error/{job_id}` | `POST` | Submit worker failure JSON | `200`, `404` |
 | `/{pool}/complete/redirect/{job_id}` | `POST` | Submit redirect JSON | `200`, `404` |
 
-### `GET /work?timeout_ms=N`
+### `GET /{pool}/work?timeout_ms=N`
 
 - Blocks until a job is available or timeout expires.
 - Returns `200 OK` with JSON when a job is assigned.
@@ -82,7 +82,7 @@ Notes:
 - `metadata` includes values produced by earlier transforms.
 - One poll returns at most one job.
 
-### `POST /heartbeat/{job_id}`
+### `POST /{pool}/heartbeat/{job_id}`
 
 Send heartbeats while processing a job.
 
@@ -92,7 +92,7 @@ Send heartbeats while processing a job.
 If no heartbeat arrives within `heartbeat_timeout_secs`, BITS evicts the in-progress job and
 the broker side returns a failed result.
 
-### `POST /complete/data/{job_id}`
+### `POST /{pool}/complete/data/{job_id}`
 
 Submit exactly one successful terminal outcome for a claimed job.
 
@@ -109,7 +109,7 @@ Content-Type: application/x-grib
 ...streamed bytes...
 ```
 
-### `POST /complete/reject/{job_id}`
+### `POST /{pool}/complete/reject/{job_id}`
 
 ```json
 {
@@ -117,7 +117,7 @@ Content-Type: application/x-grib
 }
 ```
 
-### `POST /complete/redirect/{job_id}`
+### `POST /{pool}/complete/redirect/{job_id}`
 
 ```json
 {
@@ -128,7 +128,7 @@ Content-Type: application/x-grib
 
 `message` is optional for redirect.
 
-### `POST /complete/error/{job_id}`
+### `POST /{pool}/complete/error/{job_id}`
 
 ```json
 {

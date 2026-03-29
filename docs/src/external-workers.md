@@ -35,10 +35,12 @@ routes:
 
 Important rules:
 
-- `target::remote` must use `executor: remote_pool`.
-- `executor: remote_pool` is only valid with `target::remote`.
-- If you use `target::remote` without an explicit executor, BITS injects a
-  default remote pool config (`heartbeat_timeout_secs: 60`).
+- Remote targets must be defined as named entries in the `targets:` registry
+  (not inline). The registry entry name becomes the pool name in the worker
+  API path (e.g. `targets.mars` exposes `/mars/work`).
+- `type: remote` automatically uses the `remote_pool` executor. If you omit
+  the `dispatcher.executor` block, BITS injects a default remote pool config
+  (`heartbeat_timeout_secs: 60`).
 - The worker server bind address is configured at `bits.worker_server`, not
   inside the executor. All remote pools share a single HTTP server.
 

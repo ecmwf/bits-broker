@@ -107,6 +107,16 @@ polls return `Gone`.
 - Ensure clients poll reliably within the deadline window
 - Consider increasing the deadline only if the architecture requires it
 
+**Owner broker disappeared without durable state**
+
+The broker that owned the job crashed before persisting it (the job completed
+before `persist_after_ms`). Another broker detects the expired lease but
+finds no durable record to recover from. The job is permanently lost.
+
+- This only affects jobs that complete faster than `persist_after_ms`
+- Lower `persist_after_ms` to reduce the window of vulnerability
+- See [Persistence](persistence.md) for how the threshold works
+
 ---
 
 ## Config errors at startup

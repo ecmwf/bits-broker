@@ -140,9 +140,9 @@ targets:
   echo:
     type: echo
 routes:
-  default:
-    - check::gate
-    - target::echo
+  - default:
+      - check::gate
+      - target::echo
 """
 
 async def main():
@@ -190,27 +190,33 @@ targets:
     url: "http://mars/api"
     dispatcher:
       queue: cost_weighted
-      concurrency: 10
+      executor:
+        type: async_pool
+        concurrency: 10
 
 # Inline step
 routes:
-  default:
-    - transform::metkit_expansion:
-        expand_parameters: true
-      dispatcher:
-        concurrency: 4
-    - target::http:
-        url: "http://mars/api"
-      dispatcher:
-        queue: cost_weighted
-        concurrency: 10
+  - default:
+      - transform::metkit_expansion:
+            expand_parameters: true
+        dispatcher:
+          executor:
+            type: async_pool
+            concurrency: 4
+      - target::http:
+            url: "http://mars/api"
+        dispatcher:
+          queue: cost_weighted
+          executor:
+            type: async_pool
+            concurrency: 10
 ```
 
 | Field | Values | Default |
 |-------|--------|---------|
-| `queue` | `fifo`, `cost_weighted`, `age_priority` | none (FIFO when `concurrency` is set) |
+| `queue` | `fifo`, `cost_weighted`, `age_priority` | `fifo` |
 | `executor` | `async_pool`, `thread_pool`, `remote_pool`* | `async_pool` |
-| `concurrency` | positive integer | unlimited |
+| `executor.concurrency` | positive integer | 256 |
 
 \* `remote_pool` is only valid with `target::remote`.
 

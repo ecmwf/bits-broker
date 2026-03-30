@@ -87,16 +87,19 @@ targets:
     url: "http://mars.ecmwf.int:8080"
     dispatcher:
       queue: cost_weighted   # dispatcher config — see Dispatcher section
-      concurrency: 8
+      executor:
+        type: async_pool
+        concurrency: 8
 
   fdb_workers:
     type: remote           # noop; work is done by external workers
     dispatcher:
       queue: cost_weighted
-      concurrency: 50
+      executor:
+        type: remote_pool
 
 routes:
-  ecmwf_data:
+  - ecmwf_data:
     - transform::expand         # evaluate the cost of the request
     - switch:                   # try privileged path first, fall back to public
         privileged:
@@ -162,7 +165,7 @@ concerns: a **queue** that controls *which* job runs next, and an **executor** t
 
 | Kind | Behaviour |
 |------|-----------|
-| `semaphore` | Runs work inline on the async scheduler, bounded by `concurrency`. Default. |
+| `async_pool` | Runs work on the async scheduler, bounded by `concurrency`. Default. |
 | `thread_pool` | Offloads work to a pool of `concurrency` dedicated OS threads. Use for CPU-bound or blocking work that would otherwise starve the async runtime. |
 | `remote_pool` | Hands the job to an external worker via HTTP long-poll. Used exclusively with `target::remote`. |
 
@@ -177,22 +180,26 @@ targets:
     url: "http://mars.ecmwf.int:8080"
     dispatcher:
       queue: cost_weighted
-      concurrency: 8
+      executor:
+        type: async_pool
+        concurrency: 8
 ```
 
 For **inline steps**, `dispatcher:` is a sibling key in the action mapping:
 
 ```yaml
 routes:
-  default:
-    - target::http:
-        url: "http://mars.ecmwf.int:8080"
-      dispatcher:
-        queue: cost_weighted
-        concurrency: 8
+  - default:
+      - target::http:
+            url: "http://mars.ecmwf.int:8080"
+        dispatcher:
+          queue: cost_weighted
+          executor:
+            type: async_pool
+            concurrency: 8
 ```
 
-Dispatcher config is valid on any step type — Check, Transform, or Target:
+Dispatcher config is valid on any step type:
 
 ```yaml
 transforms:
@@ -200,15 +207,17 @@ transforms:
     type: metkit_expansion
     expand_parameters: true
     dispatcher:
-      concurrency: 4            # limit concurrent expansion calls
+      executor:
+        type: async_pool
+        concurrency: 4
 ```
 
-`queue` accepts `fifo` or `cost_weighted`. `executor` accepts `semaphore`, `thread_pool`, or
-`remote_pool`. `concurrency` is a positive integer; omitting it with a queue defaults to unlimited.
+`queue` accepts `fifo`, `cost_weighted`, or `age_priority`. `executor` accepts `async_pool`,
+`thread_pool`, or `remote_pool`. Concurrency is set inside the executor block; default is 256.
 
 ### Remote pool
 
-`target::remote` is a no-op action paired exclusively with `executor: remote_pool`. When a job
+`target::remote` is a no-op action paired exclusively with `executor.type: remote_pool`. When a job
 reaches this step, the dispatcher holds the caller suspended and hands the job to an external
 worker via HTTP long-poll. The worker posts the result back; the caller is woken and the result
 is returned to the client.

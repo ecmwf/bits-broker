@@ -17,6 +17,11 @@ use crate::routing::{Route, switch::Switch};
 use crate::server::ServerConfig;
 use crate::worker_server::WorkerServer;
 
+fn duration_secs(field: &str, secs: f64) -> Result<Duration, BitsError> {
+    Duration::try_from_secs_f64(secs)
+        .map_err(|e| ConfigError::validation(field, e.to_string()).into())
+}
+
 #[derive(Default)]
 struct Registries {
     checks: HashMap<String, serde_json::Value>,
@@ -269,10 +274,18 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .unwrap_or_else(|| format!("broker-{}", uuid::Uuid::new_v4()));
     let has_explicit_endpoint = bits_cfg.internal_poll_endpoint.is_some();
     let has_explicit_poll_timeout = bits_cfg.internal_poll_timeout_secs.is_some();
-    let internal_poll_timeout =
-        Duration::from_secs_f64(bits_cfg.internal_poll_timeout_secs.unwrap_or(2.5));
-    let sweep_interval = bits_cfg.sweep_interval_secs.map(Duration::from_secs_f64);
-    let persist_after = bits_cfg.persist_after_secs.map(Duration::from_secs_f64);
+    let internal_poll_timeout = duration_secs(
+        "bits.internal_poll_timeout_secs",
+        bits_cfg.internal_poll_timeout_secs.unwrap_or(2.5),
+    )?;
+    let sweep_interval = bits_cfg
+        .sweep_interval_secs
+        .map(|v| duration_secs("bits.sweep_interval_secs", v))
+        .transpose()?;
+    let persist_after = bits_cfg
+        .persist_after_secs
+        .map(|v| duration_secs("bits.persist_after_secs", v))
+        .transpose()?;
 
     let server_config: ServerConfig = raw
         .get("server")
@@ -287,6 +300,8 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .transpose()?
         .unwrap_or_default();
 
+    let poll_timeout = duration_secs("server.poll_timeout_secs", server_config.poll_timeout_secs)?;
+
     let internal_poll_endpoint = bits_cfg.internal_poll_endpoint.unwrap_or_else(|| {
         let host = if server_config.host == "0.0.0.0" {
             "127.0.0.1"
@@ -300,7 +315,6 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
     // otherwise the client sees a redirect before the job is durable.
     // Guard margin (1 s) accounts for I/O jitter on the persistence write.
     const PERSIST_GUARD: Duration = Duration::from_secs(1);
-    let poll_timeout = server_config.poll_timeout();
     if let Some(persist_after) = persist_after
         && persist_after + PERSIST_GUARD >= poll_timeout
     {

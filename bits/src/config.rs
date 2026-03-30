@@ -22,6 +22,14 @@ fn duration_secs(field: &str, secs: f64) -> Result<Duration, BitsError> {
         .map_err(|e| ConfigError::validation(field, e.to_string()).into())
 }
 
+fn positive_duration_secs(field: &str, secs: f64) -> Result<Duration, BitsError> {
+    let d = duration_secs(field, secs)?;
+    if d.is_zero() {
+        return Err(ConfigError::validation(field, "must be greater than zero").into());
+    }
+    Ok(d)
+}
+
 #[derive(Default)]
 struct Registries {
     checks: HashMap<String, serde_json::Value>,
@@ -203,6 +211,8 @@ pub struct Bootstrap {
     runtime_config: RuntimeConfig,
     /// Configuration for the built-in HTTP server.
     pub server_config: ServerConfig,
+    /// Whether the input YAML contained a `server:` section.
+    pub had_server_section: bool,
 }
 
 impl Bootstrap {
@@ -274,22 +284,22 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .unwrap_or_else(|| format!("broker-{}", uuid::Uuid::new_v4()));
     let has_explicit_endpoint = bits_cfg.internal_poll_endpoint.is_some();
     let has_explicit_poll_timeout = bits_cfg.internal_poll_timeout_secs.is_some();
-    let internal_poll_timeout = duration_secs(
+    let internal_poll_timeout = positive_duration_secs(
         "bits.internal_poll_timeout_secs",
         bits_cfg.internal_poll_timeout_secs.unwrap_or(2.5),
     )?;
     let sweep_interval = bits_cfg
         .sweep_interval_secs
-        .map(|v| duration_secs("bits.sweep_interval_secs", v))
+        .map(|v| positive_duration_secs("bits.sweep_interval_secs", v))
         .transpose()?;
-    let persist_after = bits_cfg
+    let mut persist_after = bits_cfg
         .persist_after_secs
         .map(|v| duration_secs("bits.persist_after_secs", v))
         .transpose()?;
 
-    let server_config: ServerConfig = raw
-        .get("server")
-        .cloned()
+    let server_value = raw.get("server").cloned();
+    let had_server_section = server_value.is_some();
+    let server_config: ServerConfig = server_value
         .map(|v| {
             serde_json::from_value(v).map_err(|e| ConfigError::Decode {
                 path: "server".to_string(),
@@ -300,10 +310,18 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .transpose()?
         .unwrap_or_default();
 
-    let poll_timeout = duration_secs("server.poll_timeout_secs", server_config.poll_timeout_secs)?;
+    let poll_timeout =
+        positive_duration_secs("server.poll_timeout_secs", server_config.poll_timeout_secs)?;
 
     let internal_poll_endpoint = bits_cfg.internal_poll_endpoint.unwrap_or_else(|| {
-        let host = if server_config.host == "0.0.0.0" {
+        let is_wildcard = server_config.host == "0.0.0.0" || server_config.host == "::";
+        let host = if is_wildcard {
+            tracing::warn!(
+                "server.host is a wildcard address ({}); deriving internal_poll_endpoint \
+                 as 127.0.0.1 which is only reachable from localhost. Set \
+                 bits.internal_poll_endpoint explicitly for multi-broker deployments.",
+                server_config.host,
+            );
             "127.0.0.1"
         } else {
             &server_config.host
@@ -445,6 +463,12 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             }
         }
         None => {
+            if persist_after.is_some() {
+                tracing::warn!(
+                    "bits.persist_after_secs is set but has no effect without bits.persistence"
+                );
+                persist_after = None;
+            }
             if has_explicit_endpoint {
                 tracing::warn!(
                     "bits.internal_poll_endpoint is set but has no effect without bits.persistence"
@@ -531,6 +555,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             persist_after,
         },
         server_config,
+        had_server_section,
     })
 }
 

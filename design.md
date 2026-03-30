@@ -119,7 +119,7 @@ routes:
 - Dispatcher config (`queue`, `executor`, `concurrency`) is a **route-step concern** — it sits
   under a `dispatcher:` key in a registry entry, or as a sibling `dispatcher:` key for inline
   step definitions. See the Dispatcher section below.
-- Persistence is configured at `bits` top level (`persist_after_ms`, `poll_timeout_ms`, `persist_guard_ms`).
+- Persistence is configured at `bits` top level (`persist_after_secs`) and validated against `server.poll_timeout_secs`.
 - YAML anchors are deliberately not used — the named registries are an explicit feature of the
   schema, not a YAML trick. Named entries also ensure shared resources are the same instance in memory.
 - Inline actions (e.g. `check::match:` directly in a pipeline) bypass the registry entirely and
@@ -261,7 +261,7 @@ target is present.
 BITS supports threshold persistence for long-running work.
 
 - Jobs start in-memory immediately.
-- If `bits.persist_after_ms` is configured and a job remains in-flight past that threshold, BITS
+- If `bits.persist_after_secs` is configured and a job remains in-flight past that threshold, BITS
   writes a durable record (`job_id`, owner `broker_id`, `original_request`, `user`, `metadata`,
   `created_at`).
 - On terminal completion, the durable record is deleted.

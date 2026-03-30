@@ -105,6 +105,12 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     /// Returns the poll timeout as a [`Duration`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `poll_timeout_secs` is negative, NaN, or infinite.
+    /// Configs produced by [`parse_bootstrap`](crate::parse_bootstrap) are
+    /// always validated, so this only affects manually constructed instances.
     pub fn poll_timeout(&self) -> Duration {
         Duration::from_secs_f64(self.poll_timeout_secs)
     }

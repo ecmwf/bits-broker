@@ -107,13 +107,14 @@ impl Bits {
     /// returned. Use [`parse_bootstrap`] + [`Bootstrap::into_parts`] when you
     /// need both.
     pub fn from_config(config: &str) -> Result<Self, BitsError> {
-        if config.contains("server:") {
+        let bootstrap = parse_bootstrap(config)?;
+        if bootstrap.had_server_section {
             tracing::warn!(
                 "server: section is parsed but not returned by Bits::from_config(); \
                  use parse_bootstrap().into_parts() to access ServerConfig"
             );
         }
-        parse_bootstrap(config)?.into_bits()
+        bootstrap.into_bits()
     }
 
     pub(crate) fn from_runtime_config(parsed: RuntimeConfig) -> Result<Self, BitsError> {

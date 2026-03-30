@@ -42,9 +42,7 @@ Define your routing policy in YAML:
 
 ```yaml
 bits:
-  persist_after_ms: 10000
-  poll_timeout_ms: 30000
-  persist_guard_ms: 1000
+  persist_after_secs: 10.0
 
 checks:
   is_operational:

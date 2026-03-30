@@ -78,7 +78,7 @@ fn default_worker_server_port() -> u16 {
     9001
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BitsConfig {
     #[serde(default)]
@@ -264,15 +264,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             })
         })
         .transpose()?
-        .unwrap_or(BitsConfig {
-            broker_id_prefix: None,
-            internal_poll_endpoint: None,
-            internal_poll_timeout_secs: None,
-            sweep_interval_secs: None,
-            persist_after_secs: None,
-            persistence: None,
-            worker_server: None,
-        });
+        .unwrap_or_default();
 
     let worker_server: Option<Arc<WorkerServer>> = bits_cfg
         .worker_server

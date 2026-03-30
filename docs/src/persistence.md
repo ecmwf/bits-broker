@@ -9,7 +9,7 @@ BITS persistence is designed around two goals:
 
 ## How it works
 
-When `bits.persist_after_ms` is set, BITS uses a threshold approach:
+When `bits.persist_after_secs` is set, BITS uses a threshold approach:
 
 - A job starts entirely in-memory, immediately.
 - If the job is still in-flight when the threshold elapses, BITS writes a single durable record

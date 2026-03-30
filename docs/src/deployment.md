@@ -12,7 +12,7 @@ in memory and are lost on restart.
 server:
   host: "0.0.0.0"
   port: 8080
-  poll_timeout_ms: 25000
+  poll_timeout_secs: 25.0
 
 targets:
   backend:
@@ -53,8 +53,8 @@ graph TD
 
 Each broker needs:
 
-1. A unique `broker_id` prefix (for example `bits-api`)
-2. Reachable `internal_poll_base_url` for broker-to-broker communication
+1. A unique `broker_id_prefix` (for example `bits-api`)
+2. Reachable `internal_poll_endpoint` for broker-to-broker communication
 3. Access to the shared persistence backend
 
 ## Persistence backend setup
@@ -69,9 +69,9 @@ Build BITS with the `nats` feature enabled.
 
 ```yaml
 bits:
-  broker_id: "bits-dev"
-  internal_poll_base_url: "http://127.0.0.1:8080/job"
-  persist_after_ms: 10000
+  broker_id_prefix: "bits-dev"
+  internal_poll_endpoint: "http://127.0.0.1:8080/job"
+  persist_after_secs: 10.0
   persistence:
     type: nats
     url: "nats://localhost:4222"
@@ -94,9 +94,9 @@ Configure BITS with cluster endpoints and replication:
 
 ```yaml
 bits:
-  broker_id: "bits-prod"
-  internal_poll_base_url: "http://bits-0.bits-headless:8080/job"
-  persist_after_ms: 10000
+  broker_id_prefix: "bits-prod"
+  internal_poll_endpoint: "http://bits-0.bits-headless:8080/job"
+  persist_after_secs: 10.0
   persistence:
     type: nats
     url: "nats://nats-0:4222,nats://nats-1:4222,nats://nats-2:4222"
@@ -127,9 +127,9 @@ A minimal production cluster needs:
 
 ```yaml
 bits:
-  broker_id: "bits-prod"
-  internal_poll_base_url: "http://bits-0.bits-headless:8080/job"
-  persist_after_ms: 10000
+  broker_id_prefix: "bits-prod"
+  internal_poll_endpoint: "http://bits-0.bits-headless:8080/job"
+  persist_after_secs: 10.0
   persistence:
     type: tikv
     endpoints: ["pd-0:2379", "pd-1:2379", "pd-2:2379"]
@@ -321,7 +321,7 @@ spec:
 ```
 
 The headless service (`clusterIP: None`) gives each pod a stable DNS name
-for `internal_poll_base_url`:
+for `internal_poll_endpoint`:
 
 ```
 bits-0.bits-headless.default.svc.cluster.local
@@ -351,9 +351,9 @@ readinessProbe:
 
 ## Operator notes
 
-### `internal_poll_base_url` must be broker-to-broker reachable
+### `internal_poll_endpoint` must be broker-to-broker reachable
 
-The `internal_poll_base_url` is used by peer brokers to proxy polls. It must
+The `internal_poll_endpoint` is used by peer brokers to proxy polls. It must
 be reachable from all other brokers in the cluster. Common mistakes:
 
 - Using `localhost` or `127.0.0.1`
@@ -371,33 +371,22 @@ internal to your cluster:
 - Use network policies to restrict access
 - In Kubernetes, do not include port 9001 in the public service
 
-### `persist_after_ms` tuning
+### `persist_after_secs` tuning
 
-Set `persist_after_ms` shorter than your expected job duration but with enough
+Set `persist_after_secs` shorter than your expected job duration but with enough
 margin for the persistence write to complete before client polls time out.
-
-The startup validation checks:
-
-```
-server.poll_timeout_ms > bits.persist_after_ms + bits.persist_guard_ms
-```
-
-`bits.poll_timeout_ms` is only used for this validation. Set it to match
-`server.poll_timeout_ms` (or whatever timeout your custom API layer uses).
 
 Example for 30-second client poll timeout:
 
 ```yaml
 server:
-  poll_timeout_ms: 30000     # actual client long-poll timeout
+  poll_timeout_secs: 30.0    # actual client long-poll timeout
 
 bits:
-  persist_after_ms: 25000    # persist after 25 seconds
-  poll_timeout_ms: 30000     # validation only, match server.poll_timeout_ms
-  persist_guard_ms: 1000     # 1 second guard buffer
+  persist_after_secs: 25.0   # persist after 25 seconds
 ```
 
-Jobs that complete before `persist_after_ms` never touch the database, keeping
+Jobs that complete before `persist_after_secs` never touch the database, keeping
 short requests fast.
 
 ### `broker_lease_ttl_secs` controls recovery window
@@ -421,30 +410,27 @@ Complete production configuration:
 server:
   host: "0.0.0.0"
   port: 8080
-  poll_timeout_ms: 30000
+  poll_timeout_secs: 30.0
 
 # =============================================================================
 # BITS broker identity and persistence
 # =============================================================================
 bits:
   # Stable prefix for this broker set. Each instance appends a UUID.
-  broker_id: "bits-prod"
+  broker_id_prefix: "bits-prod"
 
   # URL at which peer brokers can reach this instance
-  internal_poll_base_url: "http://bits-0.bits-headless:8080/job"
+  # (auto-derived from server.host/port when omitted)
+  internal_poll_endpoint: "http://bits-0.bits-headless:8080/job"
 
-  # How long to wait for internal proxy polls
-  internal_poll_timeout_ms: 2500
+  # How long to wait for internal proxy polls (seconds)
+  internal_poll_timeout_secs: 2.5
 
-  # How often to sweep completed jobs from memory
-  job_cleanup_interval_ms: 5000
+  # How often to sweep completed jobs from memory (seconds)
+  sweep_interval_secs: 5.0
 
   # Persist jobs still in-flight after 25 seconds
-  persist_after_ms: 25000
-
-  # Poll timeout and guard buffer for validation
-  poll_timeout_ms: 30000
-  persist_guard_ms: 1000
+  persist_after_secs: 25.0
 
   # Persistence backend: NATS or TiKV
   persistence:
@@ -516,9 +502,9 @@ routes:
 
 Before deploying to production:
 
-- [ ] `broker_id` is set to a stable, human-readable prefix
-- [ ] `internal_poll_base_url` uses a broker-to-broker reachable address
-- [ ] `persist_after_ms + persist_guard_ms < poll_timeout_ms`
+- [ ] `broker_id_prefix` is set to a stable, human-readable prefix
+- [ ] `internal_poll_endpoint` uses a broker-to-broker reachable address
+- [ ] `persist_after_secs < poll_timeout_secs`
 - [ ] Load balancer uses session affinity (sticky routing)
 - [ ] Worker server port (9001) is not exposed externally
 - [ ] Persistence backend is accessible from all brokers

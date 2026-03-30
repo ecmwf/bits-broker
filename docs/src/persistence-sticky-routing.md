@@ -3,7 +3,7 @@
 BITS assigns every job an ID that encodes the owning broker:
 
 ```
-{broker_id}-{instance_uuid}~{job_uuid}
+{broker_id_prefix}-{instance_uuid}~{job_uuid}
 ```
 
 For example: `api-broker-a1b2c3d4~f7e6d5c4-b3a2-...`
@@ -37,16 +37,16 @@ See [Poll Proxying and Recovery](persistence-poll-recovery.md) for the full deci
 
 ## Configuration
 
-Set `broker_id` in your config to a stable, human-readable string. Each process instance
-appends its own UUID at startup, so replicas of the same service share a common `broker_id`
-prefix but have distinct per-process identities:
+Set `broker_id_prefix` in your config to a stable, human-readable string. Each process instance
+appends its own UUID at startup, so replicas of the same service share a common `broker_id_prefix`
+but have distinct per-process identities:
 
 ```yaml
 bits:
-  broker_id: api-broker             # stable prefix; instance ID becomes api-broker-{uuid}
-  internal_poll_base_url: "http://bits-0.bits-headless.default.svc.cluster.local:8080/job"
+  broker_id_prefix: api-broker      # stable prefix; instance ID becomes api-broker-{uuid}
+  internal_poll_endpoint: "http://bits-0.bits-headless.default.svc.cluster.local:8080/job"
 ```
 
-`internal_poll_base_url` is the URL at which **other brokers** can reach this instance's poll
+`internal_poll_endpoint` is the URL at which **other brokers** can reach this instance's poll
 endpoint. It must be reachable from all peer brokers. Each job ID appended to this base URL
-forms the proxy target: `{internal_poll_base_url}/{job_id}`.
+forms the proxy target: `{internal_poll_endpoint}/{job_id}`.

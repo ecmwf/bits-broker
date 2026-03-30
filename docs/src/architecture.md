@@ -100,7 +100,7 @@ are not counted in the items below.
 
 **Completed-job sweeper (1 OS thread)**
 A single `std::thread::spawn` thread that wakes every 5 seconds (configurable via
-`bits.job_cleanup_interval_ms`) and removes finished jobs from the in-memory map once no client
+`bits.sweep_interval_secs`) and removes finished jobs from the in-memory map once no client
 is polling them. A real blocking OS thread is used deliberately so it cannot interfere with the
 Tokio scheduler even if it is saturated.
 
@@ -148,7 +148,7 @@ For the wire protocol and worker implementation contract, see
 ### Started per submitted job
 
 **Job dispatch task (1 Tokio task per job)**
-Runs the full pipeline for one job. If `bits.persist_after_ms` is configured, this task also
+Runs the full pipeline for one job. If `bits.persist_after_secs` is configured, this task also
 handles the persistence threshold: it races the pipeline against a timer, and if the timer fires
 first it writes the durable job record before continuing to wait for the pipeline to complete.
 There is no separate timer task. The threshold logic lives inside this task via `tokio::select!`.

@@ -18,14 +18,14 @@ The server is started by calling `bits::server::serve()` or
 server:
   host: "0.0.0.0"
   port: 8080
-  poll_timeout_ms: 25000
+  poll_timeout_secs: 25.0
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `host` | `0.0.0.0` | Interface to bind to. |
 | `port` | `8080` | TCP port. |
-| `poll_timeout_ms` | `25000` | Long-poll timeout in milliseconds. |
+| `poll_timeout_secs` | `25.0` | Long-poll timeout in seconds. |
 
 ## Endpoints
 
@@ -87,7 +87,7 @@ GET /job/broker-1-abc123~def456 HTTP/1.1
 Host: bits-broker:8080
 ```
 
-This starts another long-poll. The server waits up to `poll_timeout_ms` for
+This starts another long-poll. The server waits up to `poll_timeout_secs` for
 the result. If the job finishes, the result is returned. If not, another
 pending redirect is returned and the cycle repeats.
 

@@ -18,7 +18,7 @@ The target action is taking longer than the client poll timeout. BITS returns
 `Pending` to the client, but work continues in the background.
 
 - Check target health and response times
-- Increase `poll_timeout_ms` if the target is legitimately slow
+- Increase `server.poll_timeout_secs` if the target is legitimately slow
 - Add metrics/logging at the target to confirm requests arrive
 
 **Dispatcher queue is full**
@@ -123,11 +123,11 @@ polls return `Gone`.
 **Owner broker disappeared without durable state**
 
 The broker that owned the job crashed before persisting it (the job completed
-before `persist_after_ms`). Another broker detects the expired lease but
+before `persist_after_secs`). Another broker detects the expired lease but
 finds no durable record to recover from. The job is permanently lost.
 
-- This only affects jobs that complete faster than `persist_after_ms`
-- Lower `persist_after_ms` to reduce the window of vulnerability
+- This only affects jobs that complete faster than `persist_after_secs`
+- Lower `persist_after_secs` to reduce the window of vulnerability
 - See [Persistence](persistence.md) for how the threshold works
 
 ---
@@ -381,10 +381,10 @@ job, because the owner's lease is still valid.
 **Causes**:
 - Owner broker crashed but lease has not expired yet
 - Network partition between brokers
-- Owner broker's `internal_poll_base_url` is misconfigured
+- Owner broker's `internal_poll_endpoint` is misconfigured
 
 **Solutions**:
-- Verify `internal_poll_base_url` is reachable from peer brokers
+- Verify `internal_poll_endpoint` is reachable from peer brokers
 - Reduce `broker_lease_ttl_secs` for faster failover
 - Monitor inter-broker network health
 

@@ -8,13 +8,11 @@ All options live under the `bits:` key in your YAML config file.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `broker_id` | string | `"broker-{uuid}"` | Stable prefix embedded in every job ID. The full per-process identity is `{broker_id}-{uuid}`. |
-| `internal_poll_base_url` | string | `"http://127.0.0.1:8080/job"` | URL at which **peer brokers** can reach this instance's poll endpoint. |
-| `internal_poll_timeout_ms` | integer (ms) | `2500` | Timeout for outbound proxy poll requests to peer brokers. |
-| `job_cleanup_interval_ms` | integer (ms) | `5000` | How often the sweeper thread evicts completed, unpolled jobs from memory. |
-| `persist_after_ms` | integer (ms) | *(none)* | Threshold before a job is written to durable storage. Omitting this key disables persistence. |
-| `poll_timeout_ms` | integer (ms) | `30000` | Used only for config validation (see below). Not enforced at runtime. |
-| `persist_guard_ms` | integer (ms) | `1000` | Used only for config validation (see below). Not enforced at runtime. |
+| `broker_id_prefix` | string | `"broker-{uuid}"` | Stable prefix embedded in every job ID. The full per-process identity is `{broker_id_prefix}-{uuid}`. |
+| `internal_poll_endpoint` | string | auto-derived from `server.host`/`port` | URL at which **peer brokers** can reach this instance's poll endpoint. When not set, defaults to `http://127.0.0.1:{server.port}/job` using the server configuration. |
+| `internal_poll_timeout_secs` | float (secs) | `2.5` | Timeout for outbound proxy poll requests to peer brokers. |
+| `sweep_interval_secs` | float (secs) | `5.0` | How often the sweeper thread evicts completed, unpolled jobs from memory. |
+| `persist_after_secs` | float (secs) | *(none)* | Threshold before a job is written to durable storage. Omitting this key disables persistence. |
 
 ### Persistence options (`bits.persistence`)
 
@@ -30,14 +28,9 @@ All options live under the `bits:` key in your YAML config file.
 
 ## Config validation
 
-At startup, BITS rejects configurations where:
-
-```
-persist_after_ms + persist_guard_ms >= poll_timeout_ms
-```
-
+At startup, BITS validates that `persist_after_secs` is less than `server.poll_timeout_secs`.
 This check ensures a job has time to be persisted before any client's poll window could expire.
-Adjust `persist_after_ms` downward (write sooner) or `poll_timeout_ms` upward (wider window) if
+Adjust `persist_after_secs` downward (write sooner) or `server.poll_timeout_secs` upward (wider window) if
 you hit this error.
 
 ## Removed configuration options
@@ -46,7 +39,7 @@ BITS actively rejects several legacy keys to prevent silent misconfiguration:
 
 | Old key | Replacement |
 |---|---|
-| `dispatcher.persistent` | Use `bits.persist_after_ms` |
+| `dispatcher.persistent` | Use `bits.persist_after_secs` |
 | `dispatcher.lock_ttl_secs` | Use `bits.persistence.broker_lease_ttl_secs` |
 | `bits.tikv` | Use `bits.persistence` with `type: tikv` |
 | `bits.nats` | Use `bits.persistence` with `type: nats` |
@@ -54,11 +47,11 @@ BITS actively rejects several legacy keys to prevent silent misconfiguration:
 
 ## Tuning guidance
 
-### `persist_after_ms`
+### `persist_after_secs`
 
 Set this to a value comfortably shorter than your clients' expected poll timeout window. For
-example, if clients poll with a 30-second timeout and you require a 1-second guard buffer,
-`persist_after_ms: 28000` is a reasonable starting point.
+example, if clients poll with a 30-second timeout, `persist_after_secs: 28.0` is a reasonable
+starting point.
 
 Jobs that complete before this threshold are never written to storage, so short requests pay no
 I/O cost for persistence.

@@ -154,7 +154,7 @@ fn unknown_server_field_is_rejected() {
 server:
   host: "0.0.0.0"
   port: 8080
-  poll_timeout_mss: 25000
+  poll_timeout_secss: 25.0
 routes:
   - default: []
 "#;

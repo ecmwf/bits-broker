@@ -61,7 +61,7 @@ pub async fn shutdown_signal() {
     tracing::info!("shutdown signal received, draining");
 }
 
-const DEFAULT_POLL_TIMEOUT_MS: u64 = 25_000;
+const DEFAULT_POLL_TIMEOUT_SECS: f64 = 25.0;
 
 /// Configuration for the built-in HTTP server.
 #[derive(Debug, Clone, Deserialize)]
@@ -75,10 +75,10 @@ pub struct ServerConfig {
     #[serde(default = "default_server_port")]
     pub port: u16,
 
-    /// Long-poll timeout in milliseconds for the initial submit response
+    /// Long-poll timeout in seconds for the initial submit response
     /// and reconnect polls.
-    #[serde(default = "default_poll_timeout_ms")]
-    pub poll_timeout_ms: u64,
+    #[serde(default = "default_poll_timeout_secs")]
+    pub poll_timeout_secs: f64,
 }
 
 fn default_server_host() -> String {
@@ -89,8 +89,8 @@ fn default_server_port() -> u16 {
     8080
 }
 
-fn default_poll_timeout_ms() -> u64 {
-    DEFAULT_POLL_TIMEOUT_MS
+fn default_poll_timeout_secs() -> f64 {
+    DEFAULT_POLL_TIMEOUT_SECS
 }
 
 impl Default for ServerConfig {
@@ -98,7 +98,7 @@ impl Default for ServerConfig {
         Self {
             host: default_server_host(),
             port: default_server_port(),
-            poll_timeout_ms: default_poll_timeout_ms(),
+            poll_timeout_secs: default_poll_timeout_secs(),
         }
     }
 }
@@ -106,7 +106,7 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// Returns the poll timeout as a [`Duration`].
     pub fn poll_timeout(&self) -> Duration {
-        Duration::from_millis(self.poll_timeout_ms)
+        Duration::from_secs_f64(self.poll_timeout_secs)
     }
 }
 

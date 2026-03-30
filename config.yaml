@@ -1,5 +1,5 @@
 bits:
-  job_cleanup_interval_ms: 5000
+  sweep_interval_secs: 5.0
   worker_server:
     host: "0.0.0.0"        # shared server for all remote pools
     port: 9001

@@ -437,7 +437,7 @@ async fn expired_lease_without_record_is_job_lost() {
 
 #[tokio::test]
 async fn config_rejects_invalid_threshold_ordering() {
-    // persist_after + 1 s guard must be less than server.poll_timeout_ms.
+    // persist_after + 1 s guard must be less than server.poll_timeout_secs.
     // Set a short poll timeout so persist_after violates the constraint.
     let cfg = r#"
 server:

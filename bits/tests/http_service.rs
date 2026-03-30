@@ -22,20 +22,26 @@ struct TestServer {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TargetClientGoneAfterDelay {
-    duration_ms: u64,
+    check_interval_ms: u64,
 }
 
 #[async_trait]
 impl TargetAction for TargetClientGoneAfterDelay {
     async fn dispatch(&self, job: &Job) -> Result<TargetResult, ActionError> {
-        tokio::time::sleep(Duration::from_millis(self.duration_ms)).await;
-        if !job.client_present() {
-            return Err(ActionError::ClientGone);
+        let interval = Duration::from_millis(self.check_interval_ms);
+        let timeout = tokio::time::Instant::now() + Duration::from_secs(6);
+        loop {
+            if !job.client_present() {
+                return Err(ActionError::ClientGone);
+            }
+            if tokio::time::Instant::now() > timeout {
+                return Ok(TargetResult::Complete(JobResult::Redirect {
+                    location: String::new(),
+                    message: "still connected".to_string(),
+                }));
+            }
+            tokio::time::sleep(interval).await;
         }
-        Ok(TargetResult::Complete(JobResult::Redirect {
-            location: String::new(),
-            message: "client still present".to_string(),
-        }))
     }
 }
 
@@ -576,13 +582,15 @@ async fn job_lost_returns_json_error_body() {
 
 #[tokio::test]
 async fn client_gone_returns_json_error_body() {
-    let _ = TargetClientGoneAfterDelay { duration_ms: 0 };
+    let _ = TargetClientGoneAfterDelay {
+        check_interval_ms: 100,
+    };
 
     let config = r#"
 routes:
   - default:
       - target::client_gone_after_delay:
-          duration_ms: 5200
+          check_interval_ms: 100
 "#;
 
     let server = start_server(config, Duration::from_millis(50)).await;
@@ -609,6 +617,9 @@ routes:
         .unwrap()
         .to_string();
 
+    // This test runs against a real TCP server (`reqwest` + `axum`), so
+    // `tokio::time::pause` cannot reliably advance socket I/O timing.
+    // We wait for reconnect buffer expiry plus a small margin.
     tokio::time::sleep(Duration::from_millis(5600)).await;
 
     let resp = client

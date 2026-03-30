@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8945748a.js";
+            window.path_to_searchindex_js = "searchindex-12718aac.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-4f4f24e7.js"></script>
@@ -220,7 +220,8 @@ Content-Type: application/json
 </table>
 </div>
 <h2 id="structured-error-responses"><a class="header" href="#structured-error-responses">Structured error responses</a></h2>
-<p>All non-success job/poll outcomes return a JSON body with three fields:</p>
+<p>Application-level 4xx/5xx responses from the direct owner broker return a JSON
+body with three fields:</p>
 <pre><code class="language-json">{
   "code": "JOB_NOT_FOUND",
   "message": "job does not exist or was already consumed",
@@ -235,7 +236,7 @@ Content-Type: application/json
 <tbody>
 <tr><td><code>code</code></td><td>string</td><td>Stable machine-readable error code. Safe to use in monitoring, alerting, and client-side branching.</td></tr>
 <tr><td><code>message</code></td><td>string</td><td>Human-readable description. May change between releases.</td></tr>
-<tr><td><code>retryable</code></td><td>boolean</td><td>Whether the client should retry the request. Currently <code>false</code> for all poll outcomes.</td></tr>
+<tr><td><code>retryable</code></td><td>boolean</td><td>Whether the client should retry the same HTTP request (GET poll or POST submit). Currently <code>false</code> for all outcomes.</td></tr>
 </tbody>
 </table>
 </div>
@@ -255,12 +256,27 @@ Content-Type: application/json
 </tbody>
 </table>
 </div>
+<h3 id="two-code-namespaces"><a class="header" href="#two-code-namespaces">Two code namespaces</a></h3>
+<p>The <code>code</code> field uses two naming conventions:</p>
+<ul>
+<li><strong><code>JOB_*</code> codes</strong> are HTTP-layer codes for poll and result outcomes. They
+exist only in HTTP responses and are defined in <code>bits::server</code>.</li>
+<li><strong><code>ACTION_*</code> codes</strong> bridge the library error system (<code>ActionError::code()</code>)
+and the HTTP layer. <code>ACTION_CANCELLED</code> and <code>ACTION_CLIENT_GONE</code> are the
+same codes used by <code>BitsError::code()</code>.</li>
+</ul>
+<p>Library-level codes like <code>CONFIG_YAML_SYNTAX</code> or <code>PERSISTENCE_BACKEND</code> don’t
+appear in HTTP responses because config and persistence errors happen at
+startup, not during job processing.</p>
 <h3 id="what-is-not-structured"><a class="header" href="#what-is-not-structured">What is NOT structured</a></h3>
 <p>Success responses (<code>200 OK</code>) return the raw streaming body from the backend,
 not JSON. Redirect responses (<code>303 See Other</code>) return headers only.</p>
 <p>Framework-level rejections (malformed JSON body, wrong Content-Type) are
 handled by Axum before the handler runs and currently return plain text
 errors, not structured JSON.</p>
+<p>Proxied responses from a non-owner broker currently preserve the HTTP status
+code but may not carry the structured error body. The <code>code</code> field is
+guaranteed only when the client reaches the job’s owner directly.</p>
 <h2 id="graceful-shutdown"><a class="header" href="#graceful-shutdown">Graceful shutdown</a></h2>
 <p>The server supports graceful shutdown via <code>serve_with_shutdown()</code>:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]

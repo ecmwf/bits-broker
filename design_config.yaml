@@ -21,9 +21,6 @@
 bits:
   # For long-running jobs: persist once after this threshold.
   persist_after_ms: 10000
-  # Guarantee persistence happens before a poll timeout can naturally elapse.
-  poll_timeout_ms: 30000
-  persist_guard_ms: 1000
   worker_server:
     host: "0.0.0.0"
     port: 9001

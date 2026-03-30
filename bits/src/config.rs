@@ -79,10 +79,6 @@ struct BitsConfig {
     #[serde(default)]
     persist_after_ms: Option<u64>,
     #[serde(default)]
-    poll_timeout_ms: Option<u64>,
-    #[serde(default)]
-    persist_guard_ms: Option<u64>,
-    #[serde(default)]
     persistence: Option<PersistenceConfig>,
     #[serde(default)]
     worker_server: Option<WorkerServerConfig>,
@@ -243,8 +239,6 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             internal_poll_timeout_ms: None,
             job_cleanup_interval_ms: None,
             persist_after_ms: None,
-            poll_timeout_ms: None,
-            persist_guard_ms: None,
             persistence: None,
             worker_server: None,
         });
@@ -263,17 +257,39 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
     let internal_poll_timeout =
         Duration::from_millis(bits_cfg.internal_poll_timeout_ms.unwrap_or(2500));
     let sweep_interval = bits_cfg.job_cleanup_interval_ms.map(Duration::from_millis);
-
-    let poll_timeout = Duration::from_millis(bits_cfg.poll_timeout_ms.unwrap_or(30_000));
-    let persist_guard = Duration::from_millis(bits_cfg.persist_guard_ms.unwrap_or(1_000));
     let persist_after = bits_cfg.persist_after_ms.map(Duration::from_millis);
 
+    // Parse server config early so we can reference its poll timeout
+    // for the persist_after constraint.
+    let server_config: ServerConfig = raw
+        .get("server")
+        .cloned()
+        .map(|v| {
+            serde_json::from_value(v).map_err(|e| ConfigError::Decode {
+                path: "server".to_string(),
+                target: "ServerConfig".to_string(),
+                source: e,
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    // The persistence write must complete before the HTTP poll returns,
+    // otherwise the client sees a redirect before the job is durable.
+    // Guard margin (1 s) accounts for I/O jitter on the persistence write.
+    const PERSIST_GUARD: Duration = Duration::from_secs(1);
+    let poll_timeout = server_config.poll_timeout();
     if let Some(persist_after) = persist_after
-        && persist_after + persist_guard >= poll_timeout
+        && persist_after + PERSIST_GUARD >= poll_timeout
     {
         return Err(ConfigError::validation(
             "bits.persist_after_ms",
-            "bits.persist_after_ms + bits.persist_guard_ms must be less than bits.poll_timeout_ms",
+            format!(
+                "bits.persist_after_ms ({} ms) + 1 s guard must be less than \
+                 server.poll_timeout_ms ({} ms)",
+                persist_after.as_millis(),
+                poll_timeout.as_millis(),
+            ),
         )
         .into());
     }
@@ -397,19 +413,6 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             Duration::from_secs_f64(default_broker_lease_ttl_secs()),
         ),
     };
-
-    let server_config: ServerConfig = raw
-        .get("server")
-        .cloned()
-        .map(|v| {
-            serde_json::from_value(v).map_err(|e| ConfigError::Decode {
-                path: "server".to_string(),
-                target: "ServerConfig".to_string(),
-                source: e,
-            })
-        })
-        .transpose()?
-        .unwrap_or_default();
 
     let checks: HashMap<String, serde_json::Value> = raw
         .get("checks")

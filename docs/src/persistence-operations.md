@@ -83,7 +83,7 @@ from local in-memory state, avoiding proxy or recovery paths entirely.
 | Store unreachable at claim (repeated) | Exponential backoff (100 ms → 1 s), budget `min(timeout, 2 s)`. Returns `Pending` on exhaustion. |
 | Two brokers claim the same job simultaneously | Backend-specific CAS ensures only one wins (TiKV: optimistic transaction, NATS: revision-based update). Loser returns `Pending`; next poll finds the new owner. |
 | `upsert_job` fails at persist threshold | Logged as a warning; job continues in memory. If the broker subsequently crashes, the job is unrecoverable. |
-| `delete_job` fails at job completion | Error is silently ignored. The stale record remains in the store but is harmless — the reading broker will see an active lease for the owning broker. |
+| `delete_job` fails at job completion | Logged as a warning (`durable record cleanup failed`). The stale record remains in the store. While the owning broker's lease is active, peers still see that lease. If the owner later loses its lease, the stale record may be treated as recoverable. |
 | Broker crashes without lease cleanup | Lease expires after `broker_lease_ttl_secs` (default 30 s). Jobs become recoverable after that window. NATS leases auto-expire via bucket `max_age`; TiKV lease records require application-level expiry checks. |
 | `persistence.type` set, feature not compiled | `Bits::from_config` returns an error immediately at startup. |
 | Missing required backend fields | `Bits::from_config` returns an error immediately at startup (e.g., empty `endpoints` for TiKV, empty `url` for NATS). |

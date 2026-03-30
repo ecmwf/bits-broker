@@ -5,7 +5,7 @@
 Every job ID has the form `{broker_id}~{uuid}`.
 
 The `broker_id` prefix encodes which broker originally accepted the job. This means any broker
-that receives a poll for that job can determine the likely owner from the ID alone — without
+that receives a poll for that job can determine the likely owner from the ID alone without
 scanning all broker instances or querying a central coordinator.
 
 ## Threshold persistence
@@ -30,15 +30,18 @@ periodically renews a lease record in durable storage. If a broker's lease expir
 is considered unavailable and its persisted jobs are eligible for reclaim.
 
 This means the persistence store sees one write per long-running job (on persist) and one delete
-(on completion), plus periodic lease renewals per broker — not one heartbeat per in-flight job.
+(on completion), plus periodic lease renewals per broker, not one heartbeat per in-flight job.
 
 ## Store abstraction
 
-The persistence layer is implemented behind a trait interface, so the same behavior works with
-different backends. An in-memory store (for testing) and a TiKV store (for production) both
-implement this interface.
+The persistence layer is implemented behind a trait interface (`PersistenceStore`),
+so the same behavior works with different backends. Three implementations exist:
+
+- **MemoryStore** for testing (no durability)
+- **NatsStore** using NATS JetStream KV (build with `--features nats`)
+- **TiKvStore** using TiKV (build with `--features tikv`)
 
 Two logical namespaces keep records separate:
 
-- **Job records** — one record per persisted job.
-- **Broker lease records** — one record per live broker.
+- **Job records** - one record per persisted job.
+- **Broker lease records** - one record per live broker.

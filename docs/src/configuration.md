@@ -34,25 +34,30 @@ Named registry entries are referenced in routes using the `check::`, `transform:
 `target::` prefixes. This makes the type of each step visible in the route and ensures shared
 resources (such as a target with a dispatcher) are the same instance in memory.
 
+> The examples in this page use actions from the `bits-ecmwf` application crate
+> (`match`, `metkit_expansion`, `has_role`, `schedule_released`, etc.). The core
+> `bits` library ships only `target::http` and `target::remote`. Your application
+> registers its own actions. See [Custom Actions](custom-actions.md).
+
 ## Routes
 
 The `routes` section is **optional**. When present, it defines ordered pipelines of action steps
 that are loaded at config parse time. Steps reference named registry entries or define actions
-inline. When omitted, routes must be added programmatically via `add_route()` — see
+inline. When omitted, routes must be added programmatically via `add_route()`. See
 [Programmatic Routes](#programmatic-routes).
 
 ```yaml
 routes:
-  default:
-    - transform::expand          # reference a named registry entry
-    - switch:
-        privileged:
-          - check::is_privileged
-          - target::backend
-        public:
-          - check::match:        # inline action — no registry entry needed
-              class: ea
-          - target::backend
+  - default:
+      - transform::expand          # reference a named registry entry
+      - switch:
+          - privileged:
+              - check::is_privileged
+              - target::backend
+          - public:
+              - check::match:      # inline action - no registry entry needed
+                  class: ea
+              - target::backend
 ```
 
 A `switch` tries its named routes in order and returns the result of the first route whose checks
@@ -67,7 +72,7 @@ Actions can be defined directly in a route without a registry entry:
     class: od
 ```
 
-Inline actions are not reusable — each occurrence is an independent instance. Use the registry
+Inline actions are not reusable. Each occurrence is an independent instance. Use the registry
 when you want to share an action (and its dispatcher) across multiple routes.
 
 ### Role-based access control
@@ -91,13 +96,13 @@ that realm. Users whose realm is not listed, or who lack a matching role, are re
 Rejections use a generic `"insufficient permissions"` message to avoid leaking realm/role details.
 Two distinct `WARN`-level log messages help operators diagnose failures:
 
-- `"user realm not listed in allowed realms"` — the user's realm doesn't appear in the `roles` map.
-- `"realm matched but user lacks a required role"` — the realm matched but the user holds none of the
+- `"user realm not listed in allowed realms"`: the user's realm doesn't appear in the `roles` map.
+- `"realm matched but user lacks a required role"`: the realm matched but the user holds none of the
   allowed roles.
 
 ## Dispatcher
 
-Any action step — check, transform, or target — can include a `dispatcher:` section to control
+Any action step (check, transform, or target) can include a `dispatcher:` section to control
 queuing and concurrency.
 
 For **named registry entries**, `dispatcher:` is nested inside the entry alongside `type:`:
@@ -109,32 +114,39 @@ targets:
     url: "http://my-service/api"
     dispatcher:
       queue: cost_weighted
-      concurrency: 8
+      executor:
+        type: async_pool
+        concurrency: 8
 ```
 
 For **inline steps**, `dispatcher:` is a sibling key in the action mapping:
 
 ```yaml
 routes:
-  default:
-    - target::http:
-        url: "http://my-service/api"
-      dispatcher:
-        queue: cost_weighted
-        concurrency: 8
+  - default:
+      - target::http:
+          url: "http://my-service/api"
+        dispatcher:
+          queue: cost_weighted
+          executor:
+            type: async_pool
+            concurrency: 8
 ```
 
 ### Dispatcher fields
 
 | Field | Values | Default |
 |-------|--------|---------|
-| `queue` | `fifo`, `cost_weighted`, `age_priority` | none (FIFO when `concurrency` is set) |
-| `executor` | `async_pool`, `thread_pool`, `remote_pool` | `async_pool` |
-| `concurrency` | positive integer | unlimited |
+| `queue` | `fifo`, `cost_weighted`, `age_priority` | `fifo` |
+| `executor.type` | `async_pool`, `thread_pool`, `remote_pool` | `async_pool` |
+| `executor.concurrency` | positive integer | 256 |
 
+- `executor.concurrency` applies to `async_pool` and `thread_pool` only.
+  `remote_pool` does not accept a concurrency setting; parallelism is
+  determined by how many workers are polling.
 - `cost_weighted` ordering requires a `metadata["cost"]` value set by a prior transform.
 - `age_priority` ages waiting jobs into service while still making larger-cost jobs wait longer to gain queue priority.
-- `thread_pool` offloads work to dedicated OS threads — use this for CPU-bound or blocking work.
+- `thread_pool` offloads work to dedicated OS threads. Use this for CPU-bound or blocking work.
 - `remote_pool` is only valid with `target::remote` and is auto-inserted when using that target
   type. Any other combination is rejected at config parse time.
 - For the remote worker HTTP API and worker lifecycle, see
@@ -144,8 +156,8 @@ routes:
 
 When all routes in a switch reject a job, the error returned to the user includes rejection
 reasons from actions that are **not silent**. Route-selection checks (like `match`) are silent by
-default — their rejections are internal routing decisions. Validation checks (like
-`schedule_released`) are not silent — their rejections should reach the user.
+default, so their rejections are internal routing decisions. Validation checks (like
+`schedule_released`) are not silent, so their rejections should reach the user.
 
 Each action sets its own default. You can override per-step with the `silent` key:
 
@@ -170,7 +182,7 @@ routes:
       - target::backend
 ```
 
-Built-in defaults:
+Built-in defaults (from `bits-ecmwf`):
 
 | Action | `silent` |
 |--------|----------|
@@ -188,19 +200,25 @@ The optional `bits:` section configures broker identity and persistence policy:
 ```yaml
 bits:
   persist_after_ms: 10000    # persist jobs still in-flight after this many milliseconds
-  poll_timeout_ms: 30000     # how long a poll can wait before returning Pending
-  persist_guard_ms: 1000     # extra margin before a persisted job is eligible for reclaim
+  poll_timeout_ms: 30000     # validation only: should match your API layer's poll timeout
+  persist_guard_ms: 1000     # extra margin for the persist_after + guard < poll_timeout check
 ```
 
 | Field | Purpose |
 |-------|---------|
 | `persist_after_ms` | Threshold before a job is written to durable storage. Jobs completing before this threshold are never persisted. |
-| `poll_timeout_ms` | Maximum time a poll request waits before returning a `Pending` response to the client. |
-| `persist_guard_ms` | Grace period added to the lease TTL before another broker may reclaim a persisted job. |
+| `poll_timeout_ms` | Used for startup validation only (`persist_after_ms + persist_guard_ms < poll_timeout_ms`). Set this to match whatever your API layer uses for polling. The built-in HTTP server's actual poll timeout is `server.poll_timeout_ms`. Library users pass a timeout per `Bits::poll()` call. |
+| `persist_guard_ms` | Extra margin in the validation inequality. Ensures persistence has time to complete before the client poll would time out. |
 
-Persistence requires a configured storage backend. TiKV is supported when the `tikv` Cargo
-feature is enabled. If TiKV configuration is present but the crate is built without the `tikv`
-feature, startup fails immediately with a configuration error.
+Persistence requires a storage backend configured under `bits.persistence`.
+Two backends are supported:
+
+- **NATS JetStream KV** (`type: nats`): build with `--features nats`
+- **TiKV** (`type: tikv`): build with `--features tikv`
+
+If a persistence backend is configured but the crate is built without the
+matching feature, startup fails immediately with a `CONFIG_FEATURE_DISABLED`
+error. See [Deployment](deployment.md) for backend setup details.
 
 ## Programmatic Routes
 
@@ -208,7 +226,7 @@ When the host application manages its own routing model (e.g. per-collection or 
 routing), routes can be added after config load via `Bits::add_route()`.
 
 The YAML file still defines registries (`checks`, `targets`, `transforms`), `bits:` settings, and
-optionally a `worker_server:` block — but the `routes` section can be omitted entirely.
+optionally a `worker_server:` block, but the `routes` section can be omitted entirely.
 
 ### add_route
 
@@ -218,7 +236,7 @@ returns a `RouteHandle`:
 ```rust
 let bits = Bits::from_config(config)?;
 
-// Parse a route from a YAML value — actions that reference named
+// Parse a route from a YAML value. Actions that reference named
 // registry entries (e.g. target::backend) share the same Arc instances.
 let handle: RouteHandle = bits.add_route("my_collection", &route_yaml_value)?;
 
@@ -228,7 +246,7 @@ let job_handle = handle.submit(Job::new(json!({"class": "od"})));
 
 ### RouteHandle
 
-`add_route()` returns a `RouteHandle` — an opaque handle the host application uses to submit
+`add_route()` returns a `RouteHandle`, an opaque handle the host application uses to submit
 jobs to a specific route. The host keeps the mapping from its own collection/tenant names to
 route handles.
 
@@ -236,14 +254,14 @@ route handles.
 
 Routes added via `add_route()` share the same action registries and target `Arc`s as routes
 defined in the YAML. This means a named target like `target::backend` with a dispatcher is the
-same instance across all routes — jobs from any route contend on the same concurrency pool and
+same instance across all routes, so jobs from any route contend on the same concurrency pool and
 queue.
 
 ### Worker server
 
 When using `target::remote` with programmatic routes, remote pool targets may be registered
-during `add_route()` — after the initial config parse. The worker server is started
+during `add_route()`, after the initial config parse. The worker server is started
 automatically inside `add_route()` whenever remote pools have been registered. The call is
-idempotent — once the listener is bound, subsequent `add_route()` calls skip re-binding.
+idempotent. Once the listener is bound, subsequent `add_route()` calls skip re-binding.
 
 No explicit worker server management is needed from the host application.

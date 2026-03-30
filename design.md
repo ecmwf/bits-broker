@@ -100,15 +100,15 @@ targets:
 
 routes:
   - ecmwf_data:
-    - transform::expand         # evaluate the cost of the request
-    - switch:                   # try privileged path first, fall back to public
-        privileged:
-          - check::is_privileged
-          - target::mars_retrieval
-        public:
-          - check::match:       # inline — no registry entry needed
-              class: ea
-          - target::fdb_workers
+      - transform::expand         # evaluate the cost of the request
+      - switch:                   # try privileged path first, fall back to public
+          privileged:
+            - check::is_privileged
+            - target::mars_retrieval
+          public:
+            - check::match:       # inline — no registry entry needed
+                class: ea
+            - target::fdb_workers
 ```
 
 **Key decisions:**

@@ -114,9 +114,9 @@ routes:
   `check::`, `transform::`, and `target::` prefixes in routes are meaningful — they identify
   which registry to look up. This makes the type of each route step visible at a glance.
 - `type:` is the reserved key within each registry entry. The optional `dispatcher:` key holds
-  dispatcher config (`queue`, `executor`, `concurrency`); the optional `silent:` key overrides
+  dispatcher config (`queue`, `executor`); the optional `silent:` key overrides
   rejection visibility; all other keys are config for the action.
-- Dispatcher config (`queue`, `executor`, `concurrency`) is a **route-step concern** — it sits
+- Dispatcher config (`queue`, `executor`) is a **route-step concern** — it sits
   under a `dispatcher:` key in a registry entry, or as a sibling `dispatcher:` key for inline
   step definitions. See the Dispatcher section below.
 - Persistence is configured at `bits` top level (`persist_after_secs`) and validated against `server.poll_timeout_secs`.
@@ -214,7 +214,7 @@ worker via HTTP long-poll. The worker posts the result back; the caller is woken
 is returned to the client.
 
 **Worker server**: All remote pools share a single HTTP server configured at
-`bits.worker_server.bind`. Each pool's endpoints are namespaced under `/{pool_name}/`:
+`bits.worker_server.host` / `bits.worker_server.port`. Each pool's endpoints are namespaced under `/{pool_name}/`:
 
 - `GET  /{pool_name}/work?timeout_ms=N`           — long-poll; returns job JSON or 204
 - `POST /{pool_name}/heartbeat/{job_id}`           — worker keepalive

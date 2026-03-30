@@ -444,6 +444,9 @@ server:
   poll_timeout_secs: 1.0
 bits:
   persist_after_secs: 0.5
+  persistence:
+    type: nats
+    url: "nats://localhost:4222"
 routes:
   - default: []
 "#;

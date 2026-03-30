@@ -11,7 +11,7 @@ A lease record contains:
 | Field | Description |
 |---|---|
 | `broker_id` | The unique per-process broker identity (`{configured_broker_id_prefix}-{uuid}`). |
-| `internal_poll_endpoint` | The URL at which this broker's poll endpoint is reachable from peers. |
+| `internal_poll_base_url` | The URL at which this broker's poll endpoint is reachable from peers (set via `bits.internal_poll_endpoint` in config). |
 | `lease_until` | Wall-clock timestamp after which this lease is considered expired. |
 | `updated_at` | Timestamp of the last upsert. |
 

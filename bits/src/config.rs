@@ -251,16 +251,11 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
     let broker_id = bits_cfg
         .broker_id_prefix
         .unwrap_or_else(|| format!("broker-{}", uuid::Uuid::new_v4()));
-    let internal_poll_base_url = bits_cfg
-        .internal_poll_endpoint
-        .unwrap_or_else(|| "http://127.0.0.1:8080/job".to_string());
     let internal_poll_timeout =
         Duration::from_secs_f64(bits_cfg.internal_poll_timeout_secs.unwrap_or(2.5));
     let sweep_interval = bits_cfg.sweep_interval_secs.map(Duration::from_secs_f64);
     let persist_after = bits_cfg.persist_after_secs.map(Duration::from_secs_f64);
 
-    // Parse server config early so we can reference its poll timeout
-    // for the persist_after constraint.
     let server_config: ServerConfig = raw
         .get("server")
         .cloned()
@@ -273,6 +268,15 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         })
         .transpose()?
         .unwrap_or_default();
+
+    let internal_poll_endpoint = bits_cfg.internal_poll_endpoint.unwrap_or_else(|| {
+        let host = if server_config.host == "0.0.0.0" {
+            "127.0.0.1"
+        } else {
+            &server_config.host
+        };
+        format!("http://{}:{}/job", host, server_config.port)
+    });
 
     // The persistence write must complete before the HTTP poll returns,
     // otherwise the client sees a redirect before the job is durable.
@@ -476,7 +480,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             route_factory,
             sweep_interval,
             broker_id_prefix: broker_id,
-            internal_poll_endpoint: internal_poll_base_url,
+            internal_poll_endpoint,
             internal_poll_timeout,
             job_store,
             broker_lease_ttl,

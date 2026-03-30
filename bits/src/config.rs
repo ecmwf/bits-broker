@@ -49,6 +49,7 @@ struct DispatcherSettings {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkerServerConfig {
     #[serde(default = "default_worker_server_host")]
     host: String,

@@ -65,6 +65,7 @@ const DEFAULT_POLL_TIMEOUT_MS: u64 = 25_000;
 
 /// Configuration for the built-in HTTP server.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Host interface to bind to (e.g. `"0.0.0.0"`).
     #[serde(default = "default_server_host")]

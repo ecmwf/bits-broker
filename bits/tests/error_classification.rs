@@ -149,6 +149,42 @@ routes:
 }
 
 #[test]
+fn unknown_server_field_is_rejected() {
+    let config = r#"
+server:
+  host: "0.0.0.0"
+  port: 8080
+  poll_timeout_mss: 25000
+routes:
+  - default: []
+"#;
+    let err = must_fail(config);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown field"),
+        "expected unknown field rejection for server typo, got: {msg}"
+    );
+}
+
+#[test]
+fn unknown_worker_server_field_is_rejected() {
+    let config = r#"
+bits:
+  worker_server:
+    host: "0.0.0.0"
+    portt: 9001
+routes:
+  - default: []
+"#;
+    let err = must_fail(config);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown field"),
+        "expected unknown field rejection for worker_server typo, got: {msg}"
+    );
+}
+
+#[test]
 fn config_errors_are_not_retryable() {
     let cases = [must_fail("{{{{"), must_fail("just a string")];
     for err in &cases {

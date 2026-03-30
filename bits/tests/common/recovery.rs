@@ -16,7 +16,7 @@ use bits::db::{
     PersistentJobRecord,
 };
 use bits::routing::{Route, switch::Switch};
-use bits::server::{CODE_ACTION_CANCELLED, CODE_JOB_ERROR};
+use bits::server::{CODE_ACTION_CANCELLED, CODE_JOB_ERROR, CODE_JOB_NOT_FOUND};
 use bits::{Bits, Job, JobResult, PollOutcome};
 use bytes::Bytes;
 use futures::TryStreamExt;
@@ -583,7 +583,15 @@ async fn owner_stub(Path(_id): Path<String>, State(state): State<StubState>) -> 
             })),
         )
             .into_response(),
-        StubResponse::NotFound => StatusCode::NOT_FOUND.into_response(),
+        StubResponse::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "code": CODE_JOB_NOT_FOUND,
+                "message": "job not found",
+                "retryable": false,
+            })),
+        )
+            .into_response(),
         StubResponse::Pending { job_id } => (
             StatusCode::SEE_OTHER,
             [(header::LOCATION, format!("/job/{job_id}"))],

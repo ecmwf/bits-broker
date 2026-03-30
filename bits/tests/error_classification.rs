@@ -185,6 +185,71 @@ routes:
 }
 
 #[test]
+fn zero_sweep_interval_is_rejected() {
+    let config = r#"
+bits:
+  sweep_interval_secs: 0.0
+routes:
+  - default: []
+"#;
+    let err = must_fail(config);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("must be greater than zero"),
+        "expected zero rejection for sweep_interval_secs, got: {msg}"
+    );
+}
+
+#[test]
+fn negative_duration_is_rejected() {
+    let config = r#"
+bits:
+  internal_poll_timeout_secs: -1.0
+routes:
+  - default: []
+"#;
+    let err = must_fail(config);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("internal_poll_timeout_secs"),
+        "expected rejection for negative duration, got: {msg}"
+    );
+}
+
+#[test]
+fn zero_poll_timeout_is_rejected() {
+    let config = r#"
+server:
+  poll_timeout_secs: 0.0
+routes:
+  - default: []
+"#;
+    let err = must_fail(config);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("must be greater than zero"),
+        "expected zero rejection for poll_timeout_secs, got: {msg}"
+    );
+}
+
+#[test]
+fn persist_after_without_persistence_succeeds() {
+    let config = r#"
+bits:
+  persist_after_secs: 5.0
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 10
+          concurrency: 1
+"#;
+    let result = Bits::from_config(config);
+    if let Err(e) = &result {
+        panic!("persist_after_secs without persistence should succeed (warn + ignore), got: {e}");
+    }
+}
+
+#[test]
 fn config_errors_are_not_retryable() {
     let cases = [must_fail("{{{{"), must_fail("just a string")];
     for err in &cases {

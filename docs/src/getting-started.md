@@ -29,7 +29,7 @@ cargo test
 The fastest way to see BITS in action:
 
 ```bash
-cargo run --example hello_bits
+cargo run -p bits --example hello_bits
 ```
 
 This demonstrates custom actions and conditional routing. The config is embedded

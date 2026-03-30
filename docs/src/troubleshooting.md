@@ -57,15 +57,28 @@ the job returns a rejection error to the client (not a stalled Pending).
 
 A `NotFound` response means the broker cannot locate the job for the given ID.
 
+`NotFound` primarily indicates a malformed ID or a job that has already been
+consumed.
+
 ### Possible causes
 
-**Job ID is malformed or from a different broker**
+**Job ID is malformed**
 
-Job IDs encode the owning broker. Polling a job ID from broker A against
-broker B results in `NotFound` if broker A is not reachable.
+If the job ID cannot be parsed (truncated, from a different cluster, or never
+issued by this deployment), the broker returns `NotFound`.
 
-- Ensure you poll the same broker that received the submit request
-- In a multi-broker setup with persistence, polls proxy automatically
+- Verify the job ID comes from a successful submit response
+- Ensure you are querying the correct environment
+
+**Job ID is from a different broker**
+
+Job IDs encode the owning broker. When you poll the wrong broker:
+
+- If the owner is alive but proxying fails, the poll returns `Pending`.
+- If the owner is gone and there is no durable record, the poll returns
+  `410 Gone` (`JobLost`).
+
+`NotFound` is not returned for these wrong-broker cases.
 
 **Job was already consumed by another poll**
 

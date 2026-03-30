@@ -430,24 +430,29 @@ routes:
 
     let handle = server.bits.submit(Job::new(serde_json::json!({})));
     server.bits.cancel(&handle.id);
-    tokio::time::sleep(Duration::from_millis(600)).await;
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
 
-    let resp = client
-        .get(format!("http://127.0.0.1:{port}/job/{}", handle.id))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(
-        resp.status(),
-        reqwest::StatusCode::GONE,
-        "cancelled job should return 410 GONE"
-    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let resp = loop {
+        let r = client
+            .get(format!("http://127.0.0.1:{port}/job/{}", handle.id))
+            .send()
+            .await
+            .unwrap();
+        if r.status() == reqwest::StatusCode::GONE {
+            break r;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for GONE, last status: {}",
+            r.status()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert_eq!(
         resp.headers()
             .get("content-type")

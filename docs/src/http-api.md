@@ -42,7 +42,7 @@ The JSON body becomes the job's `request` field. Nothing is added or wrapped.
 
 ## Structured error responses
 
-All non-success job/poll outcomes return a JSON body with three fields:
+All 4xx/5xx job/poll responses return a JSON body with three fields:
 
 ```json
 {

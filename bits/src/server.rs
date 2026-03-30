@@ -126,7 +126,13 @@ struct ErrorBody {
 }
 
 fn sanitize_failure_reason(reason: &str) -> String {
-    if reason.contains('/') || reason.contains("panic") || reason.len() > 200 {
+    let lower = reason.to_lowercase();
+    if reason.contains('/')
+        || reason.contains('\\')
+        || lower.contains("panic")
+        || lower.contains("stack backtrace")
+        || reason.len() > 200
+    {
         "internal server error".to_string()
     } else {
         reason.to_string()

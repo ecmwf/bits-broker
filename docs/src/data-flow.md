@@ -220,7 +220,7 @@ Not all jobs are persisted. Fast jobs stay entirely in memory:
 
 ```mermaid
 flowchart TD
-    A[Job submitted] --> B{Timer: persist_after_ms}
+    A[Job submitted] --> B{Timer: persist_after_secs}
     B -->|Job finishes first| C[No persistence - fast path]
     B -->|Timer fires first| D[Write record to store]
     D --> E[Job finishes]

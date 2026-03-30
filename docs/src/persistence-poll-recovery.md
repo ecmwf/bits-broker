@@ -22,7 +22,7 @@ poll(id)
   │       ↓ Missing/expired  → Step 4b (claim-and-recover)
   │       ↓ Store unreachable → Pending (no claim attempted)
   │
-  ├─ 4a. Proxy to owner's internal_poll_base_url/{id}
+  ├─ 4a. Proxy to owner's internal_poll_endpoint/{id}
   │       ↓ success → return translated response (see table below)
   │       ↓ network/timeout failure → Pending (no claim while lease is active)
   │

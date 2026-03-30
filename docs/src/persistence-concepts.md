@@ -2,19 +2,19 @@
 
 ## Owner-aware job IDs
 
-Every job ID has the form `{broker_id}~{uuid}`.
+Every job ID has the form `{broker_id_prefix}~{uuid}`.
 
-The `broker_id` prefix encodes which broker originally accepted the job. This means any broker
+The `broker_id_prefix` encodes which broker originally accepted the job. This means any broker
 that receives a poll for that job can determine the likely owner from the ID alone without
 scanning all broker instances or querying a central coordinator.
 
 ## Threshold persistence
 
-When `bits.persist_after_ms` is configured, BITS applies a threshold before writing to the
+When `bits.persist_after_secs` is configured, BITS applies a threshold before writing to the
 persistence store:
 
 1. The job starts in-memory immediately when submitted.
-2. A timer is set for `persist_after_ms`.
+2. A timer is set for `persist_after_secs`.
 3. If the job is still running when the timer fires, BITS writes one durable record containing:
    `job_id`, `broker_id` (owner), `original_request`, `user`, `metadata`, and `created_at`.
 4. When the job reaches a terminal state (success, failure, or cancellation), the durable record

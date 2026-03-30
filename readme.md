@@ -54,13 +54,15 @@ targets:
     type: http
     url: "http://my-service/api"
     dispatcher:
-      queue: cost_weighted   # order cheap jobs first
-      concurrency: 8         # max simultaneous requests
+      queue: cost_weighted
+      executor:
+        type: async_pool
+        concurrency: 8
 
 routes:
-  default:
-    - check::is_operational
-    - target::backend
+  - default:
+      - check::is_operational
+      - target::backend
 ```
 
 Load it and process jobs:

@@ -329,11 +329,11 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         format!("http://{}:{}/job", host, server_config.port)
     });
 
-    // The persistence write must complete before the HTTP poll returns,
-    // otherwise the client sees a redirect before the job is durable.
-    // Guard margin (1 s) accounts for I/O jitter on the persistence write.
+    // Only validate persist timing when a persistence backend is configured.
+    // Without a backend, persist_after is coerced to None later anyway.
     const PERSIST_GUARD: Duration = Duration::from_secs(1);
-    if let Some(persist_after) = persist_after
+    if bits_cfg.persistence.is_some()
+        && let Some(persist_after) = persist_after
         && persist_after + PERSIST_GUARD >= poll_timeout
     {
         return Err(ConfigError::validation(

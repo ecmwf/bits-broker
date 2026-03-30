@@ -437,14 +437,13 @@ async fn expired_lease_without_record_is_job_lost() {
 
 #[tokio::test]
 async fn config_rejects_invalid_threshold_ordering() {
-    // Config safety check:
-    // `persist_after + persist_guard` must be strictly less than `poll_timeout`
-    // so durable persistence has time to happen before poll timeout behavior.
+    // persist_after + 1 s guard must be less than server.poll_timeout_ms.
+    // Set a short poll timeout so persist_after violates the constraint.
     let cfg = r#"
-bits:
+server:
   poll_timeout_ms: 1000
-  persist_after_ms: 900
-  persist_guard_ms: 200
+bits:
+  persist_after_ms: 500
 routes:
   - default: []
 "#;
@@ -452,7 +451,10 @@ routes:
         .err()
         .expect("expected invalid config to fail")
         .to_string();
-    assert!(err.contains("persist_after_ms + bits.persist_guard_ms"));
+    assert!(
+        err.contains("persist_after_ms") && err.contains("server.poll_timeout_ms"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]

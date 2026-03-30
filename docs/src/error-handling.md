@@ -85,7 +85,7 @@ The operator or developer needs to change something first. These are
 can decide automatically:
 
 ```rust
-match bits.poll(&job_id, timeout).await {
+match bits.poll(&job_id, Some(Duration::from_secs(30))).await {
     PollOutcome::Ready(result) => handle(result),
     PollOutcome::Pending { .. } => { /* poll again */ }
     PollOutcome::NotFound => { /* job gone, don't retry */ }

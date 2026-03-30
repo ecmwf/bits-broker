@@ -34,9 +34,12 @@ This means the persistence store sees one write per long-running job (on persist
 
 ## Store abstraction
 
-The persistence layer is implemented behind a trait interface, so the same behavior works with
-different backends. An in-memory store (for testing) and a TiKV store (for production) both
-implement this interface.
+The persistence layer is implemented behind a trait interface (`PersistenceStore`),
+so the same behavior works with different backends. Three implementations exist:
+
+- **MemoryStore** for testing (no durability)
+- **NatsStore** using NATS JetStream KV (build with `--features nats`)
+- **TiKvStore** using TiKV (build with `--features tikv`)
 
 Two logical namespaces keep records separate:
 

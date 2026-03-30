@@ -3,9 +3,14 @@
 BITS (Broker for Intelligent Task Scheduling) is a policy-aware job broker that classifies,
 transforms, and dispatches requests across distributed infrastructure.
 
-It is designed for environments where jobs vary widely in cost and duration, from millisecond
-checks to long-running compute tasks, and where multiple broker instances must coordinate
-without per-job coordination overhead.
+BITS is a Rust library. You embed it in your application, register your own
+actions, and build whatever API layer fits your needs (HTTP, gRPC, CLI). A
+built-in HTTP server is included for quick starts and as a reference
+implementation.
+
+It is designed for environments where jobs vary widely in cost and duration,
+from millisecond checks to long-running compute tasks, and where multiple
+broker instances must coordinate without per-job coordination overhead.
 
 ## What BITS does
 

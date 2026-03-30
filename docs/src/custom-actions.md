@@ -186,19 +186,31 @@ transforms:
 
 ## Target action
 
-A target dispatches the job and returns one of four outcome types:
+A target dispatches the job and returns one of these outcome types:
 
-| Type | Meaning |
-|------|---------|
-| `Success(body, content_type=...)` | Job completed. `body` is `bytes` or `str` (auto-encoded UTF-8). |
-| `Success.json(value)` | Serialise a Python dict / list as `application/json`. |
-| `Redirect(location, message="")` | Tell the client to follow a redirect URL. |
+**In Rust:**
+
+| Return | Meaning |
+|--------|---------|
+| `TargetResult::Complete(JobResult::Success { stream, content_type, size })` | Job completed with a streaming body. |
+| `TargetResult::Complete(JobResult::Redirect { location, message })` | Client should follow a redirect URL. |
+| `TargetResult::Complete(JobResult::Error { message })` | Job-level error (invalid request, validation failure). Terminal, not retried. |
+| `TargetResult::Reject { reason, silent }` | This route cannot handle the job. The switch tries the next branch. |
+| `Err(ActionError::NetworkError(...))` | Transient upstream failure. |
+| `Err(ActionError::ResourceError(...))` | Non-transient resource issue. |
+
+**In Python:**
+
+| Return | Meaning |
+|--------|---------|
+| `Success(body, content_type="...")` | Job completed. `body` is `bytes` or `str` (auto-encoded UTF-8). |
+| `Success.json(value)` | Convenience: serializes a Python dict/list as `application/json`. Equivalent to `Success(json.dumps(value).encode(), content_type="application/json")`. |
+| `Redirect(location, message="")` | Client should follow a redirect URL. |
 | `Error(message)` | Job-level error (invalid request, auth failure, etc.). |
-| `Reject(reason)` | This route cannot handle the job - try the next branch. |
+| `Reject(reason)` | This route cannot handle the job. The switch tries the next branch. |
 
-When using `target::remote`, an external worker can return the same redirect outcome by posting
-`{"status":"redirect", "location":"...", "message":"..."}` to
-`POST /complete/{job_id}`. See [External Workers](external-workers.md).
+When using `target::remote`, an external worker returns outcomes by posting
+to the `/{pool}/complete/...` endpoints. See [External Workers](external-workers.md).
 
 {{#tabs global="lang" }}
 {{#tab name="Rust" }}
@@ -329,9 +341,34 @@ serde_json  = "1"
 inventory   = "0.3"
 ```
 
-Make sure the crate is actually linked into your binary. `inventory` relies on static
-initialisation, which only fires if the crate is linked. If the action crate is not a direct
-dependency of the binary, add an explicit `use` to force linkage.
+Make sure the crate is actually linked into your binary. `inventory` relies on
+static initialisation, which only fires if the crate is linked. If the action
+crate is not a direct dependency of the binary, the linker may drop it
+entirely and your actions won't be registered.
+
+To force linkage, add an explicit `use` in your binary's `main.rs`:
+
+```rust
+// Force the linker to include the my_actions crate so that
+// its register_action! calls fire during static initialisation.
+use my_actions as _;
+```
+
+This works in standard Cargo debug and release builds. If you encounter a
+platform where aggressive dead-code elimination still drops the registrations
+(actions missing at runtime), expose a dummy init function from your crate
+and call it from main:
+
+```rust
+// In my_actions/src/lib.rs:
+pub fn init() {} // no-op, just ensures linkage
+
+// In your binary's main.rs:
+my_actions::init();
+```
+
+Without forced linkage, `Bits::from_config` won't find your actions and will
+return `ROUTING_INVALID_ACTION` errors.
 
 ### Error handling
 

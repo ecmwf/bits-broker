@@ -210,9 +210,15 @@ bits:
 | `poll_timeout_ms` | Maximum time a poll request waits before returning a `Pending` response to the client. |
 | `persist_guard_ms` | Grace period added to the lease TTL before another broker may reclaim a persisted job. |
 
-Persistence requires a configured storage backend. TiKV is supported when the `tikv` Cargo
-feature is enabled. If TiKV configuration is present but the crate is built without the `tikv`
-feature, startup fails immediately with a configuration error.
+Persistence requires a storage backend configured under `bits.persistence`.
+Two backends are supported:
+
+- **NATS JetStream KV** (`type: nats`): build with `--features nats`
+- **TiKV** (`type: tikv`): build with `--features tikv`
+
+If a persistence backend is configured but the crate is built without the
+matching feature, startup fails immediately with a `CONFIG_FEATURE_DISABLED`
+error. See [Deployment](deployment.md) for backend setup details.
 
 ## Programmatic Routes
 

@@ -251,6 +251,8 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
     let broker_id = bits_cfg
         .broker_id_prefix
         .unwrap_or_else(|| format!("broker-{}", uuid::Uuid::new_v4()));
+    let has_explicit_endpoint = bits_cfg.internal_poll_endpoint.is_some();
+    let has_explicit_poll_timeout = bits_cfg.internal_poll_timeout_secs.is_some();
     let internal_poll_timeout =
         Duration::from_secs_f64(bits_cfg.internal_poll_timeout_secs.unwrap_or(2.5));
     let sweep_interval = bits_cfg.sweep_interval_secs.map(Duration::from_secs_f64);
@@ -412,10 +414,18 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                 (Some(Arc::new(store) as Arc<dyn PersistenceStore>), ttl)
             }
         }
-        None => (
-            None,
-            Duration::from_secs_f64(default_broker_lease_ttl_secs()),
-        ),
+        None => {
+            if has_explicit_endpoint {
+                tracing::warn!("bits.internal_poll_endpoint is set but has no effect without bits.persistence");
+            }
+            if has_explicit_poll_timeout {
+                tracing::warn!("bits.internal_poll_timeout_secs is set but has no effect without bits.persistence");
+            }
+            (
+                None,
+                Duration::from_secs_f64(default_broker_lease_ttl_secs()),
+            )
+        }
     };
 
     let checks: HashMap<String, serde_json::Value> = raw

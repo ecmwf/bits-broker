@@ -118,7 +118,11 @@ impl<T: Send + 'static> Dispatcher<T> {
         }
         const DEFAULT_POOL_SIZE: usize = 256;
         let executor: Arc<dyn Executor<T>> = match executor {
-            None | Some(ExecutorKind::AsyncPool { concurrency: None }) => {
+            None => {
+                tracing::debug!("no executor specified, defaulting to async_pool({})", DEFAULT_POOL_SIZE);
+                Arc::new(AsyncPoolExecutor::new(DEFAULT_POOL_SIZE))
+            }
+            Some(ExecutorKind::AsyncPool { concurrency: None }) => {
                 Arc::new(AsyncPoolExecutor::new(DEFAULT_POOL_SIZE))
             }
             Some(ExecutorKind::AsyncPool {
@@ -156,6 +160,9 @@ impl<T: Send + 'static> Dispatcher<T> {
                 })?
             }
         };
+        if queue.is_none() {
+            tracing::debug!("no queue specified, defaulting to fifo");
+        }
         let queue: Arc<dyn Queue> = match queue.unwrap_or(&QueueKind::Fifo) {
             QueueKind::Fifo => Arc::new(FifoQueue::new()),
             QueueKind::CostWeighted => Arc::new(CostWeightedQueue::new()),

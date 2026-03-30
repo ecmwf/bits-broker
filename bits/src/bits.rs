@@ -101,7 +101,20 @@ impl Bits {
     }
 
     /// Builds a broker from the YAML configuration format used by the binaries.
+    ///
+    /// The `server:` section is parsed and used for internal validation but
+    /// the resulting [`ServerConfig`](crate::server::ServerConfig) is not
+    /// returned. Use [`parse_bootstrap`] + [`Bootstrap::into_parts`] when you
+    /// need both.
     pub fn from_config(config: &str) -> Result<Self, BitsError> {
+        let raw: serde_json::Value =
+            serde_yaml::from_str(config).map_err(crate::ConfigError::from)?;
+        if raw.get("server").is_some() {
+            tracing::warn!(
+                "server: section is parsed but not returned by Bits::from_config(); \
+                 use parse_bootstrap().into_parts() to access ServerConfig"
+            );
+        }
         parse_bootstrap(config)?.into_bits()
     }
 

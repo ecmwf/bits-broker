@@ -200,15 +200,15 @@ The optional `bits:` section configures broker identity and persistence policy:
 ```yaml
 bits:
   persist_after_ms: 10000    # persist jobs still in-flight after this many milliseconds
-  poll_timeout_ms: 30000     # how long a poll can wait before returning Pending
-  persist_guard_ms: 1000     # extra margin before a persisted job is eligible for reclaim
+  poll_timeout_ms: 30000     # validation only: should match your API layer's poll timeout
+  persist_guard_ms: 1000     # extra margin for the persist_after + guard < poll_timeout check
 ```
 
 | Field | Purpose |
 |-------|---------|
 | `persist_after_ms` | Threshold before a job is written to durable storage. Jobs completing before this threshold are never persisted. |
-| `poll_timeout_ms` | Maximum time a poll request waits before returning a `Pending` response to the client. |
-| `persist_guard_ms` | Grace period added to the lease TTL before another broker may reclaim a persisted job. |
+| `poll_timeout_ms` | Used for startup validation only (`persist_after_ms + persist_guard_ms < poll_timeout_ms`). Set this to match whatever your API layer uses for polling. The built-in HTTP server's actual poll timeout is `server.poll_timeout_ms`. Library users pass a timeout per `Bits::poll()` call. |
+| `persist_guard_ms` | Extra margin in the validation inequality. Ensures persistence has time to complete before the client poll would time out. |
 
 Persistence requires a storage backend configured under `bits.persistence`.
 Two backends are supported:

@@ -376,16 +376,24 @@ internal to your cluster:
 Set `persist_after_ms` shorter than your expected job duration but with enough
 margin for the persistence write to complete before client polls time out.
 
+The startup validation checks:
+
 ```
-poll_timeout_ms > persist_after_ms + persist_guard_ms + network_margin
+server.poll_timeout_ms > bits.persist_after_ms + bits.persist_guard_ms
 ```
+
+`bits.poll_timeout_ms` is only used for this validation. Set it to match
+`server.poll_timeout_ms` (or whatever timeout your custom API layer uses).
 
 Example for 30-second client poll timeout:
 
 ```yaml
+server:
+  poll_timeout_ms: 30000     # actual client long-poll timeout
+
 bits:
-  persist_after_ms: 25000    # Persist after 25 seconds
-  poll_timeout_ms: 30000     # Client waits 30 seconds
+  persist_after_ms: 25000    # persist after 25 seconds
+  poll_timeout_ms: 30000     # validation only, match server.poll_timeout_ms
   persist_guard_ms: 1000     # 1 second guard buffer
 ```
 

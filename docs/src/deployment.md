@@ -504,7 +504,7 @@ Before deploying to production:
 
 - [ ] `broker_id_prefix` is set to a stable, human-readable prefix
 - [ ] `internal_poll_endpoint` uses a broker-to-broker reachable address
-- [ ] `persist_after_secs < poll_timeout_secs`
+- [ ] When persistence is enabled: `persist_after_secs + 1s < server.poll_timeout_secs`
 - [ ] Load balancer uses session affinity (sticky routing)
 - [ ] Worker server port (9001) is not exposed externally
 - [ ] Persistence backend is accessible from all brokers

@@ -306,19 +306,24 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         positive_duration_secs("server.poll_timeout_secs", server_config.poll_timeout_secs)?;
 
     let internal_poll_endpoint = bits_cfg.internal_poll_endpoint.unwrap_or_else(|| {
-        let is_wildcard = server_config.host == "0.0.0.0" || server_config.host == "::";
-        let host = if is_wildcard {
+        let is_wildcard_v4 = server_config.host == "0.0.0.0";
+        let is_wildcard_v6 = server_config.host == "::";
+        let host = if is_wildcard_v4 || is_wildcard_v6 {
             tracing::warn!(
                 "server.host is a wildcard address ({}); deriving internal_poll_endpoint \
-                 as 127.0.0.1 which is only reachable from localhost. Set \
+                 as a loopback address which is only reachable from localhost. Set \
                  bits.internal_poll_endpoint explicitly for multi-broker deployments.",
                 server_config.host,
             );
-            "127.0.0.1"
+            if is_wildcard_v6 { "::1" } else { "127.0.0.1" }
         } else {
             &server_config.host
         };
-        format!("http://{}:{}/job", host, server_config.port)
+        if host.contains(':') {
+            format!("http://[{}]:{}/job", host, server_config.port)
+        } else {
+            format!("http://{}:{}/job", host, server_config.port)
+        }
     });
 
     // Only validate persist timing when a persistence backend is configured.

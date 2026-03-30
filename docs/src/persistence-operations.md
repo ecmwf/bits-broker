@@ -9,7 +9,7 @@ All options live under the `bits:` key in your YAML config file.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `broker_id_prefix` | string | `"broker-{uuid}"` | Stable prefix embedded in every job ID. The full per-process identity is `{broker_id_prefix}-{uuid}`. |
-| `internal_poll_endpoint` | string | auto-derived from `server.host`/`port` | URL at which **peer brokers** can reach this instance's poll endpoint. When not set, defaults to `http://127.0.0.1:{server.port}/job` using the server configuration. |
+| `internal_poll_endpoint` | string | auto-derived from `server.host`/`port` | URL at which **peer brokers** can reach this instance's poll endpoint. When not set, BITS derives this from `server.host` and `server.port`. If `server.host` is a wildcard bind (`0.0.0.0` or `::`), it falls back to a loopback address and emits a warning; set this explicitly for multi-broker deployments. |
 | `internal_poll_timeout_secs` | float (secs) | `2.5` | Timeout for outbound proxy poll requests to peer brokers. |
 | `sweep_interval_secs` | float (secs) | `5.0` | How often the sweeper thread evicts completed, unpolled jobs from memory. |
 | `persist_after_secs` | float (secs) | *(none)* | Threshold before a job is written to durable storage. Omitting this key disables persistence. |
@@ -28,10 +28,12 @@ All options live under the `bits:` key in your YAML config file.
 
 ## Config validation
 
-At startup, BITS validates that `persist_after_secs` is less than `server.poll_timeout_secs`.
-This check ensures a job has time to be persisted before any client's poll window could expire.
-Adjust `persist_after_secs` downward (write sooner) or `server.poll_timeout_secs` upward (wider window) if
-you hit this error.
+When persistence is enabled, BITS validates at startup that
+`persist_after_secs + 1s < server.poll_timeout_secs`. The 1-second guard
+accounts for I/O jitter on the persistence write. This check ensures a job
+has time to be persisted before any client's poll window could expire.
+Adjust `persist_after_secs` downward (write sooner) or
+`server.poll_timeout_secs` upward (wider window) if you hit this error.
 
 ## Removed configuration options
 

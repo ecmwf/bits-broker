@@ -222,7 +222,14 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         );
     }
 
-    const KNOWN_SECTIONS: &[&str] = &["bits", "server", "routes", "checks", "transforms", "targets"];
+    const KNOWN_SECTIONS: &[&str] = &[
+        "bits",
+        "server",
+        "routes",
+        "checks",
+        "transforms",
+        "targets",
+    ];
     if let Some(map) = raw.as_object() {
         for key in map.keys() {
             if !KNOWN_SECTIONS.contains(&key.as_str()) {
@@ -425,10 +432,14 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         }
         None => {
             if has_explicit_endpoint {
-                tracing::warn!("bits.internal_poll_endpoint is set but has no effect without bits.persistence");
+                tracing::warn!(
+                    "bits.internal_poll_endpoint is set but has no effect without bits.persistence"
+                );
             }
             if has_explicit_poll_timeout {
-                tracing::warn!("bits.internal_poll_timeout_secs is set but has no effect without bits.persistence");
+                tracing::warn!(
+                    "bits.internal_poll_timeout_secs is set but has no effect without bits.persistence"
+                );
             }
             (
                 None,

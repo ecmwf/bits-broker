@@ -93,9 +93,13 @@ Framework-level rejections (malformed JSON body, wrong Content-Type) are
 handled by Axum before the handler runs and currently return plain text
 errors, not structured JSON.
 
-Proxied responses from a non-owner broker currently preserve the HTTP status
-code but may not carry the structured error body. The `code` field is
-guaranteed only when the client reaches the job's owner directly.
+Proxied responses from a non-owner broker always use the structured JSON
+error envelope, but the `code` and `message` fields may differ from the
+owner's original response. The proxy maps HTTP status to `PollOutcome` and
+back, which is lossy: for example, all `410` responses become
+`ACTION_CANCELLED` regardless of the original code, and `500` from the owner
+is treated as transient (returned as a pending redirect, not surfaced as
+`JOB_FAILED`).
 
 ## Graceful shutdown
 

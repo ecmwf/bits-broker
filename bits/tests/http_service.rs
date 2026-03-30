@@ -3,138 +3,60 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
-use axum::body::Body;
-use axum::extract::{Json, Path, State};
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use async_trait::async_trait;
+use bits::actions::{Action, ActionError, TargetAction, TargetResult};
+use bits::db::{BrokerLeaseStore, memory::MemoryStore};
+use bits::routing::{Route, switch::Switch};
 use bits::server::{
     CODE_ACTION_CANCELLED, CODE_ACTION_CLIENT_GONE, CODE_JOB_ERROR, CODE_JOB_FAILED, CODE_JOB_LOST,
     CODE_JOB_NOT_FOUND,
 };
-use bits::{Bits, Job, JobResult, PollOutcome};
-use serde_json::Value;
+use bits::{Bits, Job, JobResult};
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-
-// ================================
-//   Minimal server (mirrors examples/http_server.rs)
-// ================================
-
-#[derive(Clone)]
-struct AppState {
-    bits: Arc<Bits>,
-    poll_timeout: Duration,
-}
-
-async fn submit_job(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
-    let handle = state.bits.submit(Job::new(body));
-    poll_by_id(&handle.id, &state).await
-}
-
-async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Response {
-    poll_by_id(&id, &state).await
-}
-
-fn json_error(
-    status: StatusCode,
-    code: &'static str,
-    message: impl Into<String>,
-    retryable: bool,
-) -> Response {
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json".to_string())],
-        serde_json::json!({ "code": code, "message": message.into(), "retryable": retryable })
-            .to_string(),
-    )
-        .into_response()
-}
-
-async fn poll_by_id(id: &str, state: &AppState) -> Response {
-    match state.bits.poll(id, Some(state.poll_timeout)).await {
-        PollOutcome::Ready(result) => match result {
-            JobResult::Success {
-                content_type,
-                stream,
-                ..
-            } => (
-                [(header::CONTENT_TYPE, content_type)],
-                Body::from_stream(stream),
-            )
-                .into_response(),
-            JobResult::Redirect { location, .. } => {
-                (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
-            }
-            JobResult::Error { message } => {
-                json_error(StatusCode::BAD_REQUEST, CODE_JOB_ERROR, message, false)
-            }
-            JobResult::Failed { reason } => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                CODE_JOB_FAILED,
-                reason,
-                false,
-            ),
-            JobResult::Cancelled => json_error(
-                StatusCode::GONE,
-                CODE_ACTION_CANCELLED,
-                "job was cancelled",
-                false,
-            ),
-            JobResult::ClientGone => json_error(
-                StatusCode::GONE,
-                CODE_ACTION_CLIENT_GONE,
-                "client disconnected",
-                false,
-            ),
-        },
-        PollOutcome::Pending { id } => (
-            StatusCode::SEE_OTHER,
-            [
-                (header::LOCATION, format!("/job/{id}")),
-                (header::RETRY_AFTER, "0".to_string()),
-            ],
-        )
-            .into_response(),
-        PollOutcome::NotFound => json_error(
-            StatusCode::NOT_FOUND,
-            CODE_JOB_NOT_FOUND,
-            "job does not exist or was already consumed",
-            false,
-        ),
-        PollOutcome::JobLost => json_error(
-            StatusCode::GONE,
-            CODE_JOB_LOST,
-            "job existed but is no longer recoverable",
-            false,
-        ),
-    }
-}
 
 struct TestServer {
     port: u16,
     bits: Arc<Bits>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct TargetClientGoneAfterDelay {
+    duration_ms: u64,
+}
+
+#[async_trait]
+impl TargetAction for TargetClientGoneAfterDelay {
+    async fn dispatch(&self, job: &Job) -> Result<TargetResult, ActionError> {
+        tokio::time::sleep(Duration::from_millis(self.duration_ms)).await;
+        if !job.client_present() {
+            return Err(ActionError::ClientGone);
+        }
+        Ok(TargetResult::Complete(JobResult::Redirect {
+            location: String::new(),
+            message: "client still present".to_string(),
+        }))
+    }
+}
+
+bits::register_action!(
+    target,
+    "client_gone_after_delay",
+    TargetClientGoneAfterDelay
+);
+
 async fn start_server(config: &str, poll_timeout: Duration) -> TestServer {
     let bits = Arc::new(Bits::from_config(config).unwrap());
+    start_server_with_bits(bits, poll_timeout).await
+}
+
+async fn start_server_with_bits(bits: Arc<Bits>, poll_timeout: Duration) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let state = AppState {
-        bits: bits.clone(),
-        poll_timeout,
-    };
-    let app = Router::new()
-        .route("/job", post(submit_job))
-        .route("/job/{id}", get(poll_job))
-        .with_state(state);
+    let app = bits::server::router(bits.clone(), poll_timeout);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     TestServer { port, bits }
 }
-
-// ================================
-//   Tests
-// ================================
 
 #[tokio::test]
 async fn post_job_returns_result() {
@@ -164,7 +86,6 @@ routes:
         .await
         .unwrap();
 
-    // TargetDummyDelay returns JobResult::Redirect → HTTP 303 SEE_OTHER
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
 }
 
@@ -172,9 +93,6 @@ routes:
 async fn poll_redirect_resolves_to_final_result() {
     let _ = common::TargetDummyDelay::new(0);
 
-    // poll_timeout=50ms → first request times out and returns a poll redirect.
-    // duration_ms=100 → job finishes 50ms into the second poll window,
-    // so the second GET returns the final result.
     let config = r#"
 routes:
   - default:
@@ -192,7 +110,6 @@ routes:
         .build()
         .unwrap();
 
-    // First request — times out, expect poll redirect.
     let resp = client
         .post(format!("http://127.0.0.1:{port}/job"))
         .json(&serde_json::json!({}))
@@ -213,7 +130,6 @@ routes:
         "expected poll redirect, got Location: {poll_url}"
     );
 
-    // Follow the redirect — job finishes during this poll, expect the final result.
     let resp = client
         .get(format!("http://127.0.0.1:{port}{poll_url}"))
         .send()
@@ -504,4 +420,215 @@ routes:
     assert_eq!(body["code"], CODE_JOB_NOT_FOUND);
     assert_eq!(body["retryable"], false);
     assert!(body["message"].as_str().unwrap().contains("does not exist"));
+}
+
+#[tokio::test]
+async fn check_reject_returns_json_error_body() {
+    let _ = common::CheckAlwaysReject;
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - check::always_reject:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+    let server = start_server(config, Duration::from_secs(5)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/job"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/json"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], CODE_JOB_ERROR);
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn panicking_target_returns_json_error_body() {
+    let _ = common::TargetPanicking;
+
+    let config = r#"
+routes:
+  - panicking:
+      - target::panicking: ~
+"#;
+    let server = start_server(config, Duration::from_secs(5)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/job"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/json"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], CODE_JOB_FAILED);
+    assert_eq!(body["message"], "internal server error");
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn job_lost_returns_json_error_body() {
+    let store = Arc::new(MemoryStore::new());
+    let owner_id = "owner-missing-http";
+
+    let router = Switch::new(vec![Route::new(
+        "default".to_string(),
+        vec![Action::Target(
+            Arc::new(common::TargetDummyDelay::new(0)),
+            None,
+            None,
+        )],
+    )]);
+    let bits = Arc::new(Bits::from_router_for_tests(
+        router,
+        "claimant-http".to_string(),
+        "http://127.0.0.1:9/job".to_string(),
+        Duration::from_millis(30),
+        None,
+        Some(store.clone()),
+        Duration::from_secs(5),
+    ));
+
+    let server = start_server_with_bits(bits, Duration::from_millis(50)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    store
+        .upsert_broker_lease(
+            owner_id,
+            "http://127.0.0.1:1/job",
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/job/{job_id}"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::GONE);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/json"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], CODE_JOB_LOST);
+    assert_eq!(body["retryable"], false);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("no longer recoverable")
+    );
+}
+
+#[tokio::test]
+async fn client_gone_returns_json_error_body() {
+    let _ = TargetClientGoneAfterDelay { duration_ms: 0 };
+
+    let config = r#"
+routes:
+  - default:
+      - target::client_gone_after_delay:
+          duration_ms: 5200
+"#;
+
+    let server = start_server(config, Duration::from_millis(50)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let submit = client
+        .post(format!("http://127.0.0.1:{port}/job"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(submit.status(), reqwest::StatusCode::SEE_OTHER);
+    let poll_url = submit
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    tokio::time::sleep(Duration::from_millis(5600)).await;
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}{poll_url}"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::GONE);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/json"
+    );
+    let resp: serde_json::Value = resp.json().await.unwrap();
+
+    assert_eq!(resp["code"], CODE_ACTION_CLIENT_GONE);
+    assert_eq!(resp["retryable"], false);
+    assert_eq!(resp["message"], "client disconnected");
 }

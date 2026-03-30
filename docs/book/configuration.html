@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-20319a8f.js";
+            window.path_to_searchindex_js = "searchindex-8945748a.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-03391b1f.js"></script>
+        <script src="toc-4f4f24e7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -176,15 +176,19 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="configuration"><a class="header" href="#configuration">Configuration</a></h1>
-<p>BITS configuration is a single YAML file with four top-level sections: three typed registries
-(<code>checks</code>, <code>transforms</code>, <code>targets</code>) and a <code>routes</code> section.</p>
+<p>BITS configuration is a single YAML file with typed registries
+(<code>checks</code>, <code>transforms</code>, <code>targets</code>) and an optional <code>routes</code> section.</p>
+<p>Routes can be defined statically in the YAML or added programmatically at runtime via
+<code>Bits::add_route()</code>. This is useful when the host application manages its own collection
+or tenant model and maps each to a separate BITS route. See
+<a href="#programmatic-routes">Programmatic Routes</a> below.</p>
 <h2 id="registries"><a class="header" href="#registries">Registries</a></h2>
 <p>Registries hold <strong>named, reusable action definitions</strong>. Each entry has a <code>type:</code> key that
 identifies the action, plus any action-specific fields.</p>
 <pre><code class="language-yaml">checks:
   is_privileged:
-    type: has_role
-    role: privileged
+    type: match
+    class: od
 
 transforms:
   expand:
@@ -200,8 +204,10 @@ targets:
 <code>target::</code> prefixes. This makes the type of each step visible in the route and ensures shared
 resources (such as a target with a dispatcher) are the same instance in memory.</p>
 <h2 id="routes"><a class="header" href="#routes">Routes</a></h2>
-<p>Routes define ordered pipelines of action steps. Steps reference named registry entries or define
-actions inline.</p>
+<p>The <code>routes</code> section is <strong>optional</strong>. When present, it defines ordered pipelines of action steps
+that are loaded at config parse time. Steps reference named registry entries or define actions
+inline. When omitted, routes must be added programmatically via <code>add_route()</code> — see
+<a href="#programmatic-routes">Programmatic Routes</a>.</p>
 <pre><code class="language-yaml">routes:
   default:
     - transform::expand          # reference a named registry entry
@@ -210,19 +216,39 @@ actions inline.</p>
           - check::is_privileged
           - target::backend
         public:
-          - check::has_role:     # inline action — no registry entry needed
-              role: registered
-            - target::backend
+          - check::match:        # inline action — no registry entry needed
+              class: ea
+          - target::backend
 </code></pre>
 <p>A <code>switch</code> tries its named routes in order and returns the result of the first route whose checks
 all pass. Routes may be nested.</p>
 <h3 id="inline-actions"><a class="header" href="#inline-actions">Inline actions</a></h3>
 <p>Actions can be defined directly in a route without a registry entry:</p>
-<pre><code class="language-yaml">- check::has_role:
-    role: registered
+<pre><code class="language-yaml">- check::match:
+    class: od
 </code></pre>
 <p>Inline actions are not reusable — each occurrence is an independent instance. Use the registry
 when you want to share an action (and its dispatcher) across multiple routes.</p>
+<h3 id="role-based-access-control"><a class="header" href="#role-based-access-control">Role-based access control</a></h3>
+<p><code>has_role</code> checks that the authenticated user belongs to a listed realm and holds at least one of
+the allowed roles for that realm. The <code>roles</code> field is a map of realm name to allowed role lists:</p>
+<pre><code class="language-yaml">- check::has_role:
+    roles:
+      ecmwf:
+        - admin
+        - data_access
+      cds:
+        - viewer
+</code></pre>
+<p>A user passes if their realm appears in the map <strong>and</strong> they hold any of the roles listed under
+that realm. Users whose realm is not listed, or who lack a matching role, are rejected.</p>
+<p>Rejections use a generic <code>"insufficient permissions"</code> message to avoid leaking realm/role details.
+Two distinct <code>WARN</code>-level log messages help operators diagnose failures:</p>
+<ul>
+<li><code>"user realm not listed in allowed realms"</code> — the user’s realm doesn’t appear in the <code>roles</code> map.</li>
+<li><code>"realm matched but user lacks a required role"</code> — the realm matched but the user holds none of the
+allowed roles.</li>
+</ul>
 <h2 id="dispatcher"><a class="header" href="#dispatcher">Dispatcher</a></h2>
 <p>Any action step — check, transform, or target — can include a <code>dispatcher:</code> section to control
 queuing and concurrency.</p>
@@ -252,7 +278,7 @@ queuing and concurrency.</p>
 </thead>
 <tbody>
 <tr><td><code>queue</code></td><td><code>fifo</code>, <code>cost_weighted</code>, <code>age_priority</code></td><td>none (FIFO when <code>concurrency</code> is set)</td></tr>
-<tr><td><code>executor</code></td><td><code>semaphore</code>, <code>thread_pool</code>, <code>remote_pool</code></td><td><code>semaphore</code></td></tr>
+<tr><td><code>executor</code></td><td><code>async_pool</code>, <code>thread_pool</code>, <code>remote_pool</code></td><td><code>async_pool</code></td></tr>
 <tr><td><code>concurrency</code></td><td>positive integer</td><td>unlimited</td></tr>
 </tbody>
 </table>
@@ -266,6 +292,43 @@ type. Any other combination is rejected at config parse time.</li>
 <li>For the remote worker HTTP API and worker lifecycle, see
 <a href="external-workers.html">External Workers</a>.</li>
 </ul>
+<h2 id="silent-rejections"><a class="header" href="#silent-rejections">Silent rejections</a></h2>
+<p>When all routes in a switch reject a job, the error returned to the user includes rejection
+reasons from actions that are <strong>not silent</strong>. Route-selection checks (like <code>match</code>) are silent by
+default — their rejections are internal routing decisions. Validation checks (like
+<code>schedule_released</code>) are not silent — their rejections should reach the user.</p>
+<p>Each action sets its own default. You can override per-step with the <code>silent</code> key:</p>
+<p>For <strong>named registry entries</strong>:</p>
+<pre><code class="language-yaml">checks:
+  schedule:
+    type: schedule_released
+    path: /etc/schedule.xml
+    silent: true               # override: suppress this check's rejections
+</code></pre>
+<p>For <strong>inline steps</strong>:</p>
+<pre><code class="language-yaml">routes:
+  - default:
+      - check::match:
+            class: od
+        silent: false          # override: surface this match check's rejections
+      - target::backend
+</code></pre>
+<p>Built-in defaults:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Action</th><th><code>silent</code></th></tr>
+</thead>
+<tbody>
+<tr><td><code>match</code></td><td><code>true</code></td></tr>
+<tr><td><code>has_role</code></td><td><code>false</code></td></tr>
+<tr><td><code>has_license</code></td><td><code>true</code></td></tr>
+<tr><td><code>has_key</code></td><td><code>true</code></td></tr>
+<tr><td><code>date_checker</code></td><td><code>false</code></td></tr>
+<tr><td><code>schedule_released</code></td><td><code>false</code></td></tr>
+</tbody>
+</table>
+</div>
 <h2 id="top-level-bits-settings"><a class="header" href="#top-level-bits-settings">Top-level bits settings</a></h2>
 <p>The optional <code>bits:</code> section configures broker identity and persistence policy:</p>
 <pre><code class="language-yaml">bits:
@@ -288,6 +351,40 @@ type. Any other combination is rejected at config parse time.</li>
 <p>Persistence requires a configured storage backend. TiKV is supported when the <code>tikv</code> Cargo
 feature is enabled. If TiKV configuration is present but the crate is built without the <code>tikv</code>
 feature, startup fails immediately with a configuration error.</p>
+<h2 id="programmatic-routes"><a class="header" href="#programmatic-routes">Programmatic Routes</a></h2>
+<p>When the host application manages its own routing model (e.g. per-collection or per-tenant
+routing), routes can be added after config load via <code>Bits::add_route()</code>.</p>
+<p>The YAML file still defines registries (<code>checks</code>, <code>targets</code>, <code>transforms</code>), <code>bits:</code> settings, and
+optionally a <code>worker_server:</code> block — but the <code>routes</code> section can be omitted entirely.</p>
+<h3 id="add_route"><a class="header" href="#add_route">add_route</a></h3>
+<p><code>Bits::add_route()</code> parses a route YAML fragment against the already-loaded registries and
+returns a <code>RouteHandle</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let bits = Bits::from_config(config)?;
+
+// Parse a route from a YAML value — actions that reference named
+// registry entries (e.g. target::backend) share the same Arc instances.
+let handle: RouteHandle = bits.add_route("my_collection", &amp;route_yaml_value)?;
+
+// Submit a job via the named route handle
+let job_handle = handle.submit(Job::new(json!({"class": "od"})));
+<span class="boring">}</span></code></pre>
+<h3 id="routehandle"><a class="header" href="#routehandle">RouteHandle</a></h3>
+<p><code>add_route()</code> returns a <code>RouteHandle</code> — an opaque handle the host application uses to submit
+jobs to a specific route. The host keeps the mapping from its own collection/tenant names to
+route handles.</p>
+<h3 id="shared-resources"><a class="header" href="#shared-resources">Shared resources</a></h3>
+<p>Routes added via <code>add_route()</code> share the same action registries and target <code>Arc</code>s as routes
+defined in the YAML. This means a named target like <code>target::backend</code> with a dispatcher is the
+same instance across all routes — jobs from any route contend on the same concurrency pool and
+queue.</p>
+<h3 id="worker-server"><a class="header" href="#worker-server">Worker server</a></h3>
+<p>When using <code>target::remote</code> with programmatic routes, remote pool targets may be registered
+during <code>add_route()</code> — after the initial config parse. The worker server is started
+automatically inside <code>add_route()</code> whenever remote pools have been registered. The call is
+idempotent — once the listener is bound, subsequent <code>add_route()</code> calls skip re-binding.</p>
+<p>No explicit worker server management is needed from the host application.</p>
 
                     </main>
 
@@ -324,22 +421,6 @@ feature, startup fails immediately with a configuration error.</p>
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

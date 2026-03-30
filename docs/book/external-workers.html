@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-20319a8f.js";
+            window.path_to_searchindex_js = "searchindex-8945748a.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-03391b1f.js"></script>
+        <script src="toc-4f4f24e7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -218,7 +218,8 @@ routes:
 remote pool config (<code>bind: 0.0.0.0:9001</code>, <code>heartbeat_timeout_secs: 60</code>).</li>
 </ul>
 <h2 id="2-worker-api-contract"><a class="header" href="#2-worker-api-contract">2) Worker API contract</a></h2>
-<p>When <code>remote_pool</code> is configured, BITS starts an HTTP server with three endpoints.</p>
+<p>When <code>remote_pool</code> is configured, BITS starts an HTTP server with dedicated work, heartbeat,
+and terminal outcome endpoints.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -227,7 +228,10 @@ remote pool config (<code>bind: 0.0.0.0:9001</code>, <code>heartbeat_timeout_sec
 <tbody>
 <tr><td><code>/work?timeout_ms=N</code></td><td><code>GET</code></td><td>Long-poll for one available job</td><td><code>200</code>, <code>204</code></td></tr>
 <tr><td><code>/heartbeat/{job_id}</code></td><td><code>POST</code></td><td>Keep an in-progress job alive</td><td><code>200</code>, <code>404</code></td></tr>
-<tr><td><code>/complete/{job_id}</code></td><td><code>POST</code></td><td>Submit final job outcome</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/complete/data/{job_id}</code></td><td><code>POST</code></td><td>Stream successful response body</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/complete/reject/{job_id}</code></td><td><code>POST</code></td><td>Submit business rejection JSON</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/complete/error/{job_id}</code></td><td><code>POST</code></td><td>Submit worker failure JSON</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/complete/redirect/{job_id}</code></td><td><code>POST</code></td><td>Submit redirect JSON</td><td><code>200</code>, <code>404</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -259,45 +263,33 @@ remote pool config (<code>bind: 0.0.0.0:9001</code>, <code>heartbeat_timeout_sec
 </ul>
 <p>If no heartbeat arrives within <code>heartbeat_timeout_secs</code>, BITS evicts the in-progress job and
 the broker side returns a failed result.</p>
-<h3 id="post-completejob_id"><a class="header" href="#post-completejob_id"><code>POST /complete/{job_id}</code></a></h3>
-<p>Submit exactly one terminal outcome for a claimed job.</p>
-<p><code>status: complete</code>:</p>
-<pre><code class="language-json">{
-  "status": "complete",
-  "content_type": "application/json",
-  "body": "{\"result\":42}"
-}
+<h3 id="post-completedatajob_id"><a class="header" href="#post-completedatajob_id"><code>POST /complete/data/{job_id}</code></a></h3>
+<p>Submit exactly one successful terminal outcome for a claimed job.</p>
+<ul>
+<li>The HTTP request body is the result stream.</li>
+<li><code>Content-Type</code> is forwarded to the final client response.</li>
+<li><code>Content-Length</code> is forwarded when provided, otherwise the client receives a chunked stream.</li>
+</ul>
+<p>Example:</p>
+<pre><code class="language-http">POST /complete/data/broker-a123~9d2f... HTTP/1.1
+Content-Type: application/x-grib
 
-Binary payloads can be sent with base64 encoding:
-
-```json
-{
-  "status": "complete",
-  "content_type": "application/x-grib",
-  "body": "R1JJQg==",
-  "body_encoding": "base64"
-}
+...streamed bytes...
 </code></pre>
-<pre><code>
-`status: reject`:
-
-```json
-{
-  "status": "reject",
+<h3 id="post-completerejectjob_id"><a class="header" href="#post-completerejectjob_id"><code>POST /complete/reject/{job_id}</code></a></h3>
+<pre><code class="language-json">{
   "reason": "unsupported request"
 }
 </code></pre>
-<p><code>status: redirect</code>:</p>
+<h3 id="post-completeredirectjob_id"><a class="header" href="#post-completeredirectjob_id"><code>POST /complete/redirect/{job_id}</code></a></h3>
 <pre><code class="language-json">{
-  "status": "redirect",
   "location": "https://my-bucket.s3.amazonaws.com/path/object.grib?X-Amz-Signature=...",
   "message": "Download is ready"
 }
 </code></pre>
-<p><code>message</code> is optional for <code>redirect</code>.</p>
-<p><code>status: error</code>:</p>
+<p><code>message</code> is optional for redirect.</p>
+<h3 id="post-completeerrorjob_id"><a class="header" href="#post-completeerrorjob_id"><code>POST /complete/error/{job_id}</code></a></h3>
 <pre><code class="language-json">{
-  "status": "error",
   "message": "worker internal failure"
 }
 </code></pre>
@@ -313,7 +305,7 @@ Binary payloads can be sent with base64 encoding:
 <li>BITS queues the job in the remote pool.</li>
 <li>A worker long-polls <code>/work</code> and receives job payload.</li>
 <li>Worker processes job and sends periodic <code>/heartbeat/{job_id}</code>.</li>
-<li>Worker posts final outcome to <code>/complete/{job_id}</code>.</li>
+<li>Worker posts final outcome to one of the <code>/complete/.../{job_id}</code> endpoints.</li>
 <li>BITS unblocks the waiting route and returns result to the client.</li>
 </ol>
 <h2 id="4-outcome-mapping-inside-bits"><a class="header" href="#4-outcome-mapping-inside-bits">4) Outcome mapping inside BITS</a></h2>
@@ -323,7 +315,7 @@ Binary payloads can be sent with base64 encoding:
 <tr><th>Worker outcome</th><th>Internal action result</th><th>Client-visible effect</th></tr>
 </thead>
 <tbody>
-<tr><td><code>complete</code></td><td><code>TargetResult::Complete(JobResult::Success)</code></td><td>Success response with worker <code>content_type</code> and <code>body</code></td></tr>
+<tr><td><code>complete/data</code></td><td><code>TargetResult::Complete(JobResult::Success)</code></td><td>Success response streamed end-to-end with worker <code>Content-Type</code></td></tr>
 <tr><td><code>redirect</code></td><td><code>TargetResult::Complete(JobResult::Redirect)</code></td><td>Redirect response (for HTTP frontends typically <code>303 See Other</code> with <code>Location</code>)</td></tr>
 <tr><td><code>reject</code></td><td><code>TargetResult::Reject</code></td><td>Current route is rejected; switch tries next route. If none match, client gets an error</td></tr>
 <tr><td><code>error</code></td><td><code>ActionError::ResourceError</code></td><td>Job becomes <code>Failed</code></td></tr>
@@ -335,7 +327,7 @@ Binary payloads can be sent with base64 encoding:
 <ul>
 <li>Long-poll <code>/work</code> continuously (with jittered retry on transport errors).</li>
 <li>Start heartbeating immediately after receiving a job.</li>
-<li>Stop heartbeating once <code>/complete/{job_id}</code> returns <code>200</code> or <code>404</code>.</li>
+<li>Stop heartbeating once a <code>/complete/.../{job_id}</code> endpoint returns <code>200</code> or <code>404</code>.</li>
 <li>Treat <code>404</code> from heartbeat or complete as terminal for that job.</li>
 <li>Distinguish business rejection (<code>status: reject</code>) from execution failure (<code>status: error</code>).</li>
 <li>Use <code>status: redirect</code> when data should be fetched from object storage rather than streamed
@@ -358,14 +350,14 @@ async def heartbeat_loop(session: aiohttp.ClientSession, job_id: str, stop: asyn
                 stop.set()
                 return
 
-async def process_job(work: dict) -&gt; tuple[str, dict]:
+async def process_job(work: dict):
     req = work["request"]
     if "dataset" not in req:
         return "reject", {"reason": "dataset is required"}
-    result = {"ok": True, "dataset": req["dataset"]}
-    return "complete", {
+    result = __import__("json").dumps({"ok": True, "dataset": req["dataset"]}).encode()
+    return "data", {
         "content_type": "application/json",
-        "body": __import__("json").dumps(result),
+        "body": result,
     }
 
 async def worker():
@@ -388,15 +380,24 @@ async def worker():
             hb_task = asyncio.create_task(heartbeat_loop(session, job_id, stop))
             try:
                 status, payload = await process_job(work)
-                body = {"status": status, **payload}
-                async with session.post(f"{BASE}/complete/{job_id}", json=body) as done:
-                    # 200 = accepted, 404 = no longer active; both terminal for worker
-                    if done.status not in (200, 404):
-                        done.raise_for_status()
+                if status == "data":
+                    async with session.post(
+                        f"{BASE}/complete/data/{job_id}",
+                        data=payload["body"],
+                        headers={"Content-Type": payload["content_type"]},
+                    ) as done:
+                        if done.status not in (200, 404):
+                            done.raise_for_status()
+                elif status == "reject":
+                    async with session.post(
+                        f"{BASE}/complete/reject/{job_id}", json=payload
+                    ) as done:
+                        if done.status not in (200, 404):
+                            done.raise_for_status()
             except Exception as exc:
                 async with session.post(
-                    f"{BASE}/complete/{job_id}",
-                    json={"status": "error", "message": str(exc)},
+                    f"{BASE}/complete/error/{job_id}",
+                    json={"message": str(exc)},
                 ):
                     pass
             finally:
@@ -433,9 +434,8 @@ async def process_job(work: dict) -&gt; tuple[str, dict]:
         "message": "Result stored in S3",
     }
 </code></pre>
-<p>The worker then posts this payload to <code>/complete/{job_id}</code>:</p>
+<p>The worker then posts this payload to <code>/complete/redirect/{job_id}</code>:</p>
 <pre><code class="language-json">{
-  "status": "redirect",
   "location": "https://my-results-bucket.s3.amazonaws.com/results/abc.json?...",
   "message": "Result stored in S3"
 }
@@ -458,7 +458,7 @@ receive first.</li>
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="persistence.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="http-api.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -472,7 +472,7 @@ receive first.</li>
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="persistence.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="http-api.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -485,22 +485,6 @@ receive first.</li>
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

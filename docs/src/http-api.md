@@ -42,7 +42,8 @@ The JSON body becomes the job's `request` field. Nothing is added or wrapped.
 
 ## Structured error responses
 
-All 4xx/5xx job/poll responses return a JSON body with three fields:
+Application-level 4xx/5xx responses from the direct owner broker return a JSON
+body with three fields:
 
 ```json
 {
@@ -56,7 +57,7 @@ All 4xx/5xx job/poll responses return a JSON body with three fields:
 |-------|------|-------------|
 | `code` | string | Stable machine-readable error code. Safe to use in monitoring, alerting, and client-side branching. |
 | `message` | string | Human-readable description. May change between releases. |
-| `retryable` | boolean | Whether the client should retry the request. Currently `false` for all poll outcomes. |
+| `retryable` | boolean | Whether the client should retry the same HTTP request (GET poll or POST submit). Currently `false` for all outcomes. |
 
 ### Error codes by status
 
@@ -91,6 +92,10 @@ not JSON. Redirect responses (`303 See Other`) return headers only.
 Framework-level rejections (malformed JSON body, wrong Content-Type) are
 handled by Axum before the handler runs and currently return plain text
 errors, not structured JSON.
+
+Proxied responses from a non-owner broker currently preserve the HTTP status
+code but may not carry the structured error body. The `code` field is
+guaranteed only when the client reaches the job's owner directly.
 
 ## Graceful shutdown
 

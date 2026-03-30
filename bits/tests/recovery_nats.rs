@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use bits::db::PersistenceStore;
 use bits::db::nats::NatsStore;
+use bits::server::CODE_JOB_ERROR;
 use common::recovery::{
     TargetBehavior, ensure_nats_server, insert_job_record, observed_owner, poll_until_terminal,
     read_success_body, single_target_switch, start_broker_server, start_error_owner_stub,
@@ -310,7 +311,11 @@ async fn active_lease_proxies_error_result() {
     .await;
 
     match wait_for_ready(&claimant.bits, &job_id, Duration::from_secs(1)).await {
-        bits::JobResult::Error { message } => assert_eq!(message, "bad request"),
+        bits::JobResult::Error { message } => assert_eq!(
+            message,
+            json!({"code": CODE_JOB_ERROR, "message": "bad request", "retryable": false})
+                .to_string()
+        ),
         other => panic!("expected error result, got {other:?}"),
     }
 }

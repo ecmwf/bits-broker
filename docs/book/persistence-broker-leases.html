@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-20319a8f.js";
+            window.path_to_searchindex_js = "searchindex-8945748a.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-03391b1f.js"></script>
+        <script src="toc-4f4f24e7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -204,25 +204,47 @@ as live and will proxy polls to it (which will fail with a network error, return
 to clients). Once the lease expires, peers will attempt to <a href="persistence-poll-recovery.html">claim and recover</a>
 any outstanding jobs.</p>
 <h2 id="expiry-evaluation"><a class="header" href="#expiry-evaluation">Expiry evaluation</a></h2>
-<p>BITS does not rely on any server-side TTL mechanism. The reading broker compares
-<code>lease.lease_until &gt; current_wall_time</code> to decide if the lease is active. Expired records are
-never deleted from TiKV automatically — they remain until the broker comes back online and
-overwrites them. This is safe because the timestamp comparison is the only check that matters.</p>
-<h2 id="tikv-storage"><a class="header" href="#tikv-storage">TiKV storage</a></h2>
-<p>Broker leases are stored at the key <code>brokers/{broker_id}</code> as a JSON-encoded record. Job records
-are stored at <code>jobs/{job_id}</code>. These key spaces are disjoint.</p>
+<p>The reading broker compares <code>lease.lease_until &gt; current_wall_time</code> to decide if the lease is
+active. Backend-specific cleanup varies:</p>
+<ul>
+<li><strong>NATS</strong>: The leases bucket uses <code>max_age</code> (2× TTL), so expired entries are automatically
+removed by JetStream. The application-level <code>lease_until</code> check is the primary liveness signal.</li>
+<li><strong>TiKV</strong>: Expired records remain until the broker comes back online and overwrites them.
+This is safe because the timestamp comparison is the only check that matters.</li>
+</ul>
+<h2 id="storage-layout"><a class="header" href="#storage-layout">Storage layout</a></h2>
+<p>Broker leases and job records are stored as JSON-encoded values in separate key spaces. The
+key encoding is backend-specific (base64url for NATS, raw string for TiKV) but the key spaces
+are always disjoint.</p>
 <h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<p>The persistence backend is selected via <code>bits.persistence.type</code>:</p>
+<h3 id="nats-jetstream-kv"><a class="header" href="#nats-jetstream-kv">NATS JetStream KV</a></h3>
 <pre><code class="language-yaml">bits:
-  tikv:
-    endpoints: ["pd:2379"]
-    broker_lease_ttl_secs: 30    # default: 30 seconds
+  persistence:
+    type: nats
+    url: "nats://localhost:4222"
+    jobs_bucket: "bits-jobs"         # default
+    leases_bucket: "bits-leases"     # default
+    broker_lease_ttl_secs: 30        # default: 30 seconds
+    num_replicas: 1                  # use 3 for production
 </code></pre>
+<p>Build with <code>--features nats</code>. Requires <code>nats-server</code> with JetStream enabled.</p>
+<h3 id="tikv"><a class="header" href="#tikv">TiKV</a></h3>
+<pre><code class="language-yaml">bits:
+  persistence:
+    type: tikv
+    endpoints: ["pd:2379"]
+    broker_lease_ttl_secs: 30        # default: 30 seconds
+</code></pre>
+<p>Build with <code>--features tikv</code>. Requires a TiKV cluster with PD.</p>
+<h3 id="no-persistence-in-memory-only"><a class="header" href="#no-persistence-in-memory-only">No persistence (in-memory only)</a></h3>
+<p>Omit the <code>persistence</code> section entirely. Jobs are lost on broker restart.</p>
 <p><code>broker_lease_ttl_secs</code> is the only tuning knob for lease lifetime. Setting it lower reduces
 the window during which a crashed broker’s jobs are unrecoverable, at the cost of more frequent
-upserts to TiKV.</p>
+heartbeat writes.</p>
 <blockquote>
 <p><strong>Note:</strong> Broker leases are only active when a persistence store is configured. Without
-<code>bits.tikv</code>, the heartbeat task does not start and no lease records are written.</p>
+<code>bits.persistence</code>, the heartbeat task does not start and no lease records are written.</p>
 </blockquote>
 
                     </main>
@@ -260,22 +282,6 @@ upserts to TiKV.</p>
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

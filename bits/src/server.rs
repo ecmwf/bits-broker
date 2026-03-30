@@ -125,20 +125,6 @@ struct ErrorBody {
     retryable: bool,
 }
 
-fn sanitize_failure_reason(reason: &str) -> String {
-    let lower = reason.to_lowercase();
-    if reason.contains('/')
-        || reason.contains('\\')
-        || lower.contains("panic")
-        || lower.contains("stack backtrace")
-        || reason.len() > 200
-    {
-        "internal server error".to_string()
-    } else {
-        reason.to_string()
-    }
-}
-
 fn json_error(
     status: StatusCode,
     code: &'static str,
@@ -166,6 +152,18 @@ struct AppState {
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
+/// Build the axum [`Router`] for the bits HTTP API.
+///
+/// Returns a fully wired router that can be passed directly to [`axum::serve`],
+/// or composed into a larger application.
+pub fn router(bits: Arc<Bits>, poll_timeout: Duration) -> Router {
+    let state = AppState { bits, poll_timeout };
+    Router::new()
+        .route("/job", post(submit_job))
+        .route("/job/{id}", get(poll_job))
+        .with_state(state)
+}
+
 /// Start the HTTP server. Runs until the process is terminated.
 pub async fn serve(
     bits: Arc<Bits>,
@@ -186,15 +184,7 @@ pub async fn serve_with_shutdown(
     let broker_id = bits.broker_id().to_string();
     let routes = bits.route_names().join(", ");
 
-    let state = AppState {
-        bits,
-        poll_timeout: config.poll_timeout(),
-    };
-
-    let app = Router::new()
-        .route("/job", post(submit_job))
-        .route("/job/{id}", get(poll_job))
-        .with_state(state);
+    let app = router(bits, config.poll_timeout());
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&bind_addr).await?;
@@ -267,10 +257,10 @@ fn result_to_response(result: JobResult) -> Response {
         JobResult::Error { message } => {
             json_error(StatusCode::BAD_REQUEST, CODE_JOB_ERROR, message, false)
         }
-        JobResult::Failed { reason } => json_error(
+        JobResult::Failed { .. } => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             CODE_JOB_FAILED,
-            sanitize_failure_reason(&reason),
+            "internal server error",
             false,
         ),
         JobResult::Cancelled => json_error(

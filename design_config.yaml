@@ -20,7 +20,7 @@
 
 bits:
   # For long-running jobs: persist once after this threshold.
-  persist_after_ms: 10000
+  persist_after_secs: 10.0
   worker_server:
     host: "0.0.0.0"
     port: 9001

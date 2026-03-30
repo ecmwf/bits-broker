@@ -349,7 +349,7 @@ fn non_mapping_yaml_is_rejected() {
 fn missing_routes_section_is_rejected() {
     let config = r#"
 bits:
-  job_cleanup_interval_ms: 100
+  sweep_interval_secs: 0.1
 "#;
     let bits = Bits::from_config(config);
     assert!(

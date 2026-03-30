@@ -107,14 +107,14 @@ impl Bits {
 
     pub(crate) fn from_runtime_config(parsed: RuntimeConfig) -> Result<Self, BitsError> {
         let sweep_interval = parsed.sweep_interval.unwrap_or(DEFAULT_SWEEP_INTERVAL);
-        let instance_id = format!("{}-{}", parsed.broker_id, uuid::Uuid::new_v4());
+        let instance_id = format!("{}-{}", parsed.broker_id_prefix, uuid::Uuid::new_v4());
         let shutdown = Arc::new(ShutdownSignal::new());
         let mut bits = Bits {
             router: Arc::new(parsed.router),
             route_factory: parsed.route_factory,
             jobs: Arc::new(DashMap::new()),
             broker_id: instance_id,
-            internal_poll_base_url: parsed.internal_poll_base_url,
+            internal_poll_base_url: parsed.internal_poll_endpoint,
             internal_poll_timeout: parsed.internal_poll_timeout,
             persist_after: parsed.persist_after,
             job_store: parsed.job_store,

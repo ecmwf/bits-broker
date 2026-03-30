@@ -441,9 +441,9 @@ async fn config_rejects_invalid_threshold_ordering() {
     // Set a short poll timeout so persist_after violates the constraint.
     let cfg = r#"
 server:
-  poll_timeout_ms: 1000
+  poll_timeout_secs: 1.0
 bits:
-  persist_after_ms: 500
+  persist_after_secs: 0.5
 routes:
   - default: []
 "#;
@@ -452,7 +452,7 @@ routes:
         .expect("expected invalid config to fail")
         .to_string();
     assert!(
-        err.contains("persist_after_ms") && err.contains("server.poll_timeout_ms"),
+        err.contains("persist_after_secs") && err.contains("server.poll_timeout_secs"),
         "unexpected error: {err}"
     );
 }

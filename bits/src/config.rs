@@ -69,15 +69,15 @@ fn default_worker_server_port() -> u16 {
 #[serde(deny_unknown_fields)]
 struct BitsConfig {
     #[serde(default)]
-    broker_id: Option<String>,
+    broker_id_prefix: Option<String>,
     #[serde(default)]
-    internal_poll_base_url: Option<String>,
+    internal_poll_endpoint: Option<String>,
     #[serde(default)]
-    internal_poll_timeout_ms: Option<u64>,
+    internal_poll_timeout_secs: Option<f64>,
     #[serde(default)]
-    job_cleanup_interval_ms: Option<u64>,
+    sweep_interval_secs: Option<f64>,
     #[serde(default)]
-    persist_after_ms: Option<u64>,
+    persist_after_secs: Option<f64>,
     #[serde(default)]
     persistence: Option<PersistenceConfig>,
     #[serde(default)]
@@ -185,8 +185,8 @@ pub(crate) struct RuntimeConfig {
     pub router: Switch,
     pub route_factory: RouteFactory,
     pub sweep_interval: Option<Duration>,
-    pub broker_id: String,
-    pub internal_poll_base_url: String,
+    pub broker_id_prefix: String,
+    pub internal_poll_endpoint: String,
     pub internal_poll_timeout: Duration,
     pub job_store: Option<Arc<dyn PersistenceStore>>,
     pub broker_lease_ttl: Duration,
@@ -234,11 +234,11 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         })
         .transpose()?
         .unwrap_or(BitsConfig {
-            broker_id: None,
-            internal_poll_base_url: None,
-            internal_poll_timeout_ms: None,
-            job_cleanup_interval_ms: None,
-            persist_after_ms: None,
+            broker_id_prefix: None,
+            internal_poll_endpoint: None,
+            internal_poll_timeout_secs: None,
+            sweep_interval_secs: None,
+            persist_after_secs: None,
             persistence: None,
             worker_server: None,
         });
@@ -249,15 +249,15 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .map(|ws_cfg| Arc::new(WorkerServer::new(&ws_cfg.host, ws_cfg.port)));
 
     let broker_id = bits_cfg
-        .broker_id
+        .broker_id_prefix
         .unwrap_or_else(|| format!("broker-{}", uuid::Uuid::new_v4()));
     let internal_poll_base_url = bits_cfg
-        .internal_poll_base_url
+        .internal_poll_endpoint
         .unwrap_or_else(|| "http://127.0.0.1:8080/job".to_string());
     let internal_poll_timeout =
-        Duration::from_millis(bits_cfg.internal_poll_timeout_ms.unwrap_or(2500));
-    let sweep_interval = bits_cfg.job_cleanup_interval_ms.map(Duration::from_millis);
-    let persist_after = bits_cfg.persist_after_ms.map(Duration::from_millis);
+        Duration::from_secs_f64(bits_cfg.internal_poll_timeout_secs.unwrap_or(2.5));
+    let sweep_interval = bits_cfg.sweep_interval_secs.map(Duration::from_secs_f64);
+    let persist_after = bits_cfg.persist_after_secs.map(Duration::from_secs_f64);
 
     // Parse server config early so we can reference its poll timeout
     // for the persist_after constraint.
@@ -283,12 +283,12 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         && persist_after + PERSIST_GUARD >= poll_timeout
     {
         return Err(ConfigError::validation(
-            "bits.persist_after_ms",
+            "bits.persist_after_secs",
             format!(
-                "bits.persist_after_ms ({} ms) + 1 s guard must be less than \
-                 server.poll_timeout_ms ({} ms)",
-                persist_after.as_millis(),
-                poll_timeout.as_millis(),
+                "bits.persist_after_secs ({:.3} s) + 1 s guard must be less than \
+                 server.poll_timeout_secs ({:.3} s)",
+                persist_after.as_secs_f64(),
+                poll_timeout.as_secs_f64(),
             ),
         )
         .into());
@@ -475,8 +475,8 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             router,
             route_factory,
             sweep_interval,
-            broker_id,
-            internal_poll_base_url,
+            broker_id_prefix: broker_id,
+            internal_poll_endpoint: internal_poll_base_url,
             internal_poll_timeout,
             job_store,
             broker_lease_ttl,
@@ -562,7 +562,7 @@ fn parse_action(
                 return Err(RoutingError::InvalidAction {
                     route: route_name.to_string(),
                     action: name.clone(),
-                    reason: "'persist' step has been removed; use bits.persist_after_ms instead"
+                    reason: "'persist' step has been removed; use bits.persist_after_secs instead"
                         .to_string(),
                 }
                 .into());
@@ -774,7 +774,7 @@ fn parse_dispatcher_fields(
         if map.contains_key("persistent") || map.contains_key("lock_ttl_secs") {
             return Err(ConfigError::validation(
                 "dispatcher",
-                "persistent/lock_ttl_secs removed; use bits.persist_after_ms policy",
+                "persistent/lock_ttl_secs removed; use bits.persist_after_secs policy",
             )
             .into());
         }
@@ -798,7 +798,7 @@ fn action_from_entry(
     if map.contains_key("persistent") || map.contains_key("lock_ttl_secs") {
         return Err(ConfigError::validation(
             format!("{ns}.{entry_name}"),
-            "persistent/lock_ttl_secs removed; use bits.persist_after_ms",
+            "persistent/lock_ttl_secs removed; use bits.persist_after_secs",
         )
         .into());
     }

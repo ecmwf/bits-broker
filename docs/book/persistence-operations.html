@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-20319a8f.js";
+            window.path_to_searchindex_js = "searchindex-12718aac.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-03391b1f.js"></script>
+        <script src="toc-4f4f24e7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -195,15 +195,20 @@
 </tbody>
 </table>
 </div>
-<h3 id="tikv-options-bitstikv"><a class="header" href="#tikv-options-bitstikv">TiKV options (<code>bits.tikv</code>)</a></h3>
+<h3 id="persistence-options-bitspersistence"><a class="header" href="#persistence-options-bitspersistence">Persistence options (<code>bits.persistence</code>)</a></h3>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>endpoints</code></td><td>list of strings</td><td><em>(required)</em></td><td>TiKV PD endpoints, e.g. <code>["pd:2379"]</code>. Must be non-empty.</td></tr>
+<tr><td><code>type</code></td><td>string</td><td><em>(required)</em></td><td>Backend type: <code>nats</code> or <code>tikv</code>.</td></tr>
 <tr><td><code>broker_lease_ttl_secs</code></td><td>float</td><td><code>30.0</code></td><td>Lease TTL in seconds. Heartbeat renews at TTL ÷ 2.</td></tr>
+<tr><td><code>url</code></td><td>string</td><td><em>(nats only, required)</em></td><td>NATS server URL, e.g. <code>"nats://localhost:4222"</code>.</td></tr>
+<tr><td><code>jobs_bucket</code></td><td>string</td><td><code>"bits-jobs"</code></td><td><em>(nats only)</em> KV bucket name for job records.</td></tr>
+<tr><td><code>leases_bucket</code></td><td>string</td><td><code>"bits-leases"</code></td><td><em>(nats only)</em> KV bucket name for broker leases.</td></tr>
+<tr><td><code>num_replicas</code></td><td>integer</td><td><code>1</code></td><td><em>(nats only)</em> JetStream replication factor. Use 3 for production.</td></tr>
+<tr><td><code>endpoints</code></td><td>list of strings</td><td><em>(tikv only, required)</em></td><td>TiKV PD endpoints, e.g. <code>["pd:2379"]</code>.</td></tr>
 </tbody>
 </table>
 </div>
@@ -223,7 +228,9 @@ you hit this error.</p>
 </thead>
 <tbody>
 <tr><td><code>dispatcher.persistent</code></td><td>Use <code>bits.persist_after_ms</code></td></tr>
-<tr><td><code>dispatcher.lock_ttl_secs</code></td><td>Use <code>bits.tikv.broker_lease_ttl_secs</code></td></tr>
+<tr><td><code>dispatcher.lock_ttl_secs</code></td><td>Use <code>bits.persistence.broker_lease_ttl_secs</code></td></tr>
+<tr><td><code>bits.tikv</code></td><td>Use <code>bits.persistence</code> with <code>type: tikv</code></td></tr>
+<tr><td><code>bits.nats</code></td><td>Use <code>bits.persistence</code> with <code>type: nats</code></td></tr>
 <tr><td><code>persist</code> as a route step name</td><td>Persistence is now threshold-based; remove the step</td></tr>
 </tbody>
 </table>
@@ -237,8 +244,8 @@ example, if clients poll with a 30-second timeout and you require a 1-second gua
 I/O cost for persistence.</p>
 <h3 id="broker_lease_ttl_secs"><a class="header" href="#broker_lease_ttl_secs"><code>broker_lease_ttl_secs</code></a></h3>
 <p>This controls the window during which jobs are unrecoverable after a broker crashes. A lower
-TTL (e.g., 10 s) means faster recovery but more frequent TiKV writes. A higher TTL reduces
-write pressure at the cost of longer client wait times after a crash.</p>
+TTL (e.g., 10 s) means faster recovery but more frequent persistence writes. A higher TTL
+reduces write pressure at the cost of longer client wait times after a crash.</p>
 <h3 id="sticky-ingress"><a class="header" href="#sticky-ingress">Sticky ingress</a></h3>
 <p>Configure your load balancer to hash incoming requests on a stable client property (for example
 <code>Authorization</code>). This maximises the fraction of polls that hit the owning broker and return
@@ -252,12 +259,12 @@ from local in-memory state, avoiding proxy or recovery paths entirely.</p>
 <tbody>
 <tr><td>Store unreachable at lease lookup</td><td><code>Pending</code> returned to client. No claim attempted.</td></tr>
 <tr><td>Store unreachable at claim (repeated)</td><td>Exponential backoff (100 ms → 1 s), budget <code>min(timeout, 2 s)</code>. Returns <code>Pending</code> on exhaustion.</td></tr>
-<tr><td>Two brokers claim the same job simultaneously</td><td>TiKV optimistic transaction ensures only one wins. Loser returns <code>Pending</code>; next poll finds the new owner.</td></tr>
+<tr><td>Two brokers claim the same job simultaneously</td><td>Backend-specific CAS ensures only one wins (TiKV: optimistic transaction, NATS: revision-based update). Loser returns <code>Pending</code>; next poll finds the new owner.</td></tr>
 <tr><td><code>upsert_job</code> fails at persist threshold</td><td>Logged as a warning; job continues in memory. If the broker subsequently crashes, the job is unrecoverable.</td></tr>
-<tr><td><code>delete_job</code> fails at job completion</td><td>Error is silently ignored. The stale record remains in TiKV but is harmless — the reading broker will see an active lease for the owning broker.</td></tr>
-<tr><td>Broker crashes without lease cleanup</td><td>Lease expires after <code>broker_lease_ttl_secs</code> (default 30 s). Jobs become recoverable after that window. Old lease records are never purged from TiKV automatically.</td></tr>
-<tr><td><code>tikv</code> config present, feature not compiled</td><td><code>Bits::from_config</code> returns an error immediately at startup.</td></tr>
-<tr><td>Empty <code>tikv.endpoints</code></td><td><code>Bits::from_config</code> returns an error immediately at startup.</td></tr>
+<tr><td><code>delete_job</code> fails at job completion</td><td>Error is silently ignored. The stale record remains in the store but is harmless — the reading broker will see an active lease for the owning broker.</td></tr>
+<tr><td>Broker crashes without lease cleanup</td><td>Lease expires after <code>broker_lease_ttl_secs</code> (default 30 s). Jobs become recoverable after that window. NATS leases auto-expire via bucket <code>max_age</code>; TiKV lease records require application-level expiry checks.</td></tr>
+<tr><td><code>persistence.type</code> set, feature not compiled</td><td><code>Bits::from_config</code> returns an error immediately at startup.</td></tr>
+<tr><td>Missing required backend fields</td><td><code>Bits::from_config</code> returns an error immediately at startup (e.g., empty <code>endpoints</code> for TiKV, empty <code>url</code> for NATS).</td></tr>
 </tbody>
 </table>
 </div>
@@ -291,22 +298,6 @@ from local in-memory state, avoiding proxy or recovery paths entirely.</p>
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

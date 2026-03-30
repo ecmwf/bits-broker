@@ -6,17 +6,17 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::Router;
-use axum::body::Body;
 use axum::extract::{Json, Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use bits::actions::{Action, ActionError, TargetAction, TargetResult};
 use bits::db::{
     BrokerLeaseRecord, BrokerLeaseStore, ClaimResult, DbError, JobStore, PersistenceStore,
     PersistentJobRecord,
 };
 use bits::routing::{Route, switch::Switch};
+use bits::server::{CODE_ACTION_CANCELLED, CODE_JOB_ERROR, CODE_JOB_NOT_FOUND};
 use bits::{Bits, Job, JobResult, PollOutcome};
 use bytes::Bytes;
 use futures::TryStreamExt;
@@ -114,55 +114,6 @@ pub fn single_target_switch(behavior: TargetBehavior) -> Switch {
     )])
 }
 
-#[derive(Clone)]
-struct AppState {
-    bits: Arc<Bits>,
-    poll_timeout: Duration,
-}
-
-async fn submit_job(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
-    let handle = state.bits.submit(Job::new(body));
-    poll_by_id(&handle.id, &state).await
-}
-
-async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Response {
-    poll_by_id(&id, &state).await
-}
-
-async fn poll_by_id(id: &str, state: &AppState) -> Response {
-    match state.bits.poll(id, Some(state.poll_timeout)).await {
-        PollOutcome::Ready(result) => match result {
-            JobResult::Success {
-                content_type,
-                stream,
-                ..
-            } => (
-                [(header::CONTENT_TYPE, content_type)],
-                Body::from_stream(stream),
-            )
-                .into_response(),
-            JobResult::Redirect { location, .. } => {
-                (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
-            }
-            JobResult::Error { message } => (StatusCode::BAD_REQUEST, message).into_response(),
-            JobResult::Failed { reason } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response()
-            }
-            JobResult::Cancelled | JobResult::ClientGone => StatusCode::GONE.into_response(),
-        },
-        PollOutcome::Pending { id } => (
-            StatusCode::SEE_OTHER,
-            [
-                (header::LOCATION, format!("/job/{id}")),
-                (header::RETRY_AFTER, "0".to_string()),
-            ],
-        )
-            .into_response(),
-        PollOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
-        PollOutcome::JobLost => StatusCode::GONE.into_response(),
-    }
-}
-
 pub struct BrokerServer {
     pub bits: Arc<Bits>,
     pub port: u16,
@@ -199,14 +150,7 @@ pub async fn start_broker_server(
         store,
         broker_lease_ttl,
     ));
-    let state = AppState {
-        bits: Arc::clone(&bits),
-        poll_timeout,
-    };
-    let app = Router::new()
-        .route("/job", post(submit_job))
-        .route("/job/{id}", get(poll_job))
-        .with_state(state);
+    let app = bits::server::router(Arc::clone(&bits), poll_timeout);
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     BrokerServer {
         bits,
@@ -621,11 +565,33 @@ async fn owner_stub(Path(_id): Path<String>, State(state): State<StubState>) -> 
             [(header::LOCATION, location.clone())],
         )
             .into_response(),
-        StubResponse::Error { message } => {
-            (StatusCode::BAD_REQUEST, message.clone()).into_response()
-        }
-        StubResponse::Gone => StatusCode::GONE.into_response(),
-        StubResponse::NotFound => StatusCode::NOT_FOUND.into_response(),
+        StubResponse::Error { message } => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "code": CODE_JOB_ERROR,
+                "message": message,
+                "retryable": false,
+            })),
+        )
+            .into_response(),
+        StubResponse::Gone => (
+            StatusCode::GONE,
+            Json(json!({
+                "code": CODE_ACTION_CANCELLED,
+                "message": "job was cancelled",
+                "retryable": false,
+            })),
+        )
+            .into_response(),
+        StubResponse::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "code": CODE_JOB_NOT_FOUND,
+                "message": "job not found",
+                "retryable": false,
+            })),
+        )
+            .into_response(),
         StubResponse::Pending { job_id } => (
             StatusCode::SEE_OTHER,
             [(header::LOCATION, format!("/job/{job_id}"))],

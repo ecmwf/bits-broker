@@ -31,7 +31,7 @@ server:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/job` | Submit a job and long-poll for the result. |
+| `POST` | `/job` | Submit a job (JSON body) and long-poll for the result. |
 | `GET` | `/job/{id}` | Reconnect to an existing job and long-poll. |
 
 ## Submitting a job
@@ -130,6 +130,67 @@ drop), the reconnect window is extended automatically.
 | `404 Not Found` | Unknown job. | ID doesn't exist or was consumed. |
 | `410 Gone` | Job lost. | Cancelled, client disconnected, or owner broker disappeared without durable state. |
 | `500 Internal Server Error` | System failure. | Action panicked or routing failed. |
+
+## Structured error responses
+
+Application-level 4xx/5xx responses from the direct owner broker return a JSON
+body with three fields:
+
+```json
+{
+  "code": "JOB_NOT_FOUND",
+  "message": "job does not exist or was already consumed",
+  "retryable": false
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `code` | string | Stable machine-readable error code. Safe to use in monitoring, alerting, and client-side branching. |
+| `message` | string | Human-readable description. May change between releases. |
+| `retryable` | boolean | Whether the client should retry the same HTTP request (GET poll or POST submit). Currently `false` for all outcomes. |
+
+### Error codes by status
+
+| Status | Code | When |
+|--------|------|------|
+| `404` | `JOB_NOT_FOUND` | Job ID doesn't exist or result was already consumed. |
+| `410` | `JOB_LOST` | Job existed but owner broker disappeared without durable state. |
+| `410` | `ACTION_CANCELLED` | Job was explicitly cancelled. |
+| `410` | `ACTION_CLIENT_GONE` | Client disconnected and reconnect window expired. |
+| `400` | `JOB_ERROR` | Backend returned a job-level validation error. |
+| `500` | `JOB_FAILED` | Action panicked or returned a system-level failure. |
+
+### Two code namespaces
+
+The `code` field uses two naming conventions:
+
+- **`JOB_*` codes** are HTTP-layer codes for poll and result outcomes. They
+  exist only in HTTP responses and are defined in `bits::server`.
+- **`ACTION_*` codes** bridge the library error system (`ActionError::code()`)
+  and the HTTP layer. `ACTION_CANCELLED` and `ACTION_CLIENT_GONE` are the
+  same codes used by `BitsError::code()`.
+
+Library-level codes like `CONFIG_YAML_SYNTAX` or `PERSISTENCE_BACKEND` don't
+appear in HTTP responses because config and persistence errors happen at
+startup, not during job processing.
+
+### What is NOT structured
+
+Success responses (`200 OK`) return the raw streaming body from the backend,
+not JSON. Redirect responses (`303 See Other`) return headers only.
+
+Framework-level rejections (malformed JSON body, wrong Content-Type) are
+handled by Axum before the handler runs and currently return plain text
+errors, not structured JSON.
+
+Proxied responses from a non-owner broker always use the structured JSON
+error envelope, but the `code` and `message` fields may differ from the
+owner's original response. The proxy maps HTTP status to `PollOutcome` and
+back, which is lossy: for example, all `410` responses become
+`ACTION_CANCELLED` regardless of the original code, and `500` from the owner
+is treated as transient (returned as a pending redirect, not surfaced as
+`JOB_FAILED`).
 
 ## Data flow
 

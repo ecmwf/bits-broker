@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-20319a8f.js";
+            window.path_to_searchindex_js = "searchindex-12718aac.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-03391b1f.js"></script>
+        <script src="toc-4f4f24e7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -241,7 +241,13 @@ into your current Python environment:</p>
 maturin develop --manifest-path bits-py/Cargo.toml
 </code></pre>
 <p>Then run the HTTP server example:</p>
-<pre><code class="language-bash">python bits/examples/python_http_server.py
+<pre><code class="language-bash">python bits-py/examples/python_http_server.py
+</code></pre>
+<p>Or run the smaller Python examples under:</p>
+<pre><code class="language-bash">python bits-py/examples/hello_bits.py
+python bits-py/examples/custom_check.py
+python bits-py/examples/custom_target.py
+python bits-py/examples/custom_transform.py
 </code></pre>
 <h2 id="preview-these-docs"><a class="header" href="#preview-these-docs">Preview these docs</a></h2>
 <p>Once <code>mdbook</code> is installed:</p>
@@ -250,6 +256,7 @@ maturin develop --manifest-path bits-py/Cargo.toml
 <p>This serves the documentation locally with live reload at <code>http://localhost:3000</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="architecture"><a class="header" href="#architecture">Architecture</a></h1>
+<p><img src="images/bits_pipeline_tree.svg" alt="BITS pipeline routing architecture"></p>
 <h2 id="jobs"><a class="header" href="#jobs">Jobs</a></h2>
 <p>A <strong>job</strong> is the unit of work in BITS. When a client submits a request, BITS creates a job
 carrying:</p>
@@ -269,7 +276,7 @@ in sequence. There are three action types:</p>
 <p>A guard condition. It evaluates the job and either <strong>passes</strong> or <strong>rejects</strong>. A rejection stops
 the current route and causes the enclosing <code>switch</code> to try the next named route. Checks do not
 mutate the job.</p>
-<p>Examples: <code>check::has_role</code>, <code>check::has_license</code></p>
+<p>Examples: <code>check::match</code>, <code>check::has_license</code></p>
 <h3 id="transform"><a class="header" href="#transform">Transform</a></h3>
 <p>A mutation step. It modifies the job (for example, expanding request parameters or computing a
 cost), then continues through the pipeline.</p>
@@ -282,13 +289,28 @@ end with a target.</p>
 <p>A <code>switch</code> contains named routes and tries them <strong>in order</strong>, returning the result of the first
 route whose checks all pass. This is the branching primitive — use it to express conditional
 routing such as privileged versus public access paths. Switches can be nested inside routes.</p>
+<p>When all routes reject, the switch collects rejection reasons from non-silent actions and returns
+them to the user. Silent rejections (route-selection checks like <code>match</code>) are omitted; non-silent
+rejections (validation checks like <code>schedule_released</code>) are included so the user understands why
+a matched route still failed.</p>
 <h2 id="dispatcher"><a class="header" href="#dispatcher">Dispatcher</a></h2>
 <p>Any action step — check, transform, or target — can have an optional <strong>dispatcher</strong> that controls
 ordering and concurrency before the action runs.</p>
 <p>A dispatcher has two concerns:</p>
 <ul>
-<li><strong>Queue</strong> — controls which job runs next (<code>fifo</code> or <code>cost_weighted</code>).</li>
-<li><strong>Executor</strong> — controls how the work runs (<code>semaphore</code>, <code>thread_pool</code>, or <code>remote_pool</code>).</li>
+<li><strong>Queue</strong> — controls which job runs next (<code>fifo</code>, <code>cost_weighted</code>, or <code>age_priority</code>). The queue
+only stores <code>Job</code> metadata; it knows nothing about work futures or result types.</li>
+<li><strong>Executor</strong> — owns the scheduling loop that pulls jobs from the queue and runs the associated
+work (<code>async_pool</code>, <code>thread_pool</code>, or <code>remote_pool</code>).</li>
+</ul>
+<p>Each executor implements its own scheduling model:</p>
+<ul>
+<li><strong>Async pool</strong> — N Tokio tasks (one per concurrency slot) each loop on <code>queue.dequeue()</code> and run
+work inline.</li>
+<li><strong>Thread pool</strong> — dedicated OS threads each call <code>queue.dequeue()</code> directly, run work via
+<code>block_on</code>, and send results back.</li>
+<li><strong>Remote pool</strong> — the <code>/work</code> HTTP handler calls <code>queue.dequeue()</code> directly when a remote worker
+polls, so external workers pull work at their own pace with no intermediate feeder task.</li>
 </ul>
 <p>This makes scheduling behavior explicit at the step level rather than a global setting. See
 <a href="#configuration">Configuration</a> for dispatcher syntax and options.</p>
@@ -314,25 +336,28 @@ is the mechanism by which other brokers determine that this instance is alive. S
 <a href="#broker-leases">Broker Leases</a>.</p>
 <h3 id="started-per-dispatcher--at-config-parse-time"><a class="header" href="#started-per-dispatcher--at-config-parse-time">Started per dispatcher — at config parse time</a></h3>
 <p>Each action step with a <code>dispatcher:</code> block starts background workers when the configuration is
-loaded. The number of workers depends on the queue type and executor type configured.</p>
-<p><strong>Dispatcher dequeue worker (1 Tokio task per dispatcher)</strong>
-Waits for jobs to become available in the queue and hands each one to the executor. Spawns an
-additional short-lived Tokio task per dequeued job to run the action without blocking the
-dequeue loop.</p>
+loaded. The executor owns the scheduling loop — the number and kind of workers depend on the
+executor type configured.</p>
+<p><strong>Async pool scheduler (N Tokio tasks, if <code>executor: async_pool</code>)</strong>
+One Tokio task per <code>concurrency</code> slot. Each task loops: dequeue a job from the queue, run
+the work future inline, send the result back, then dequeue the next. Concurrency is controlled
+by the number of tasks.</p>
 <p><strong>Cost-weighted queue worker (1 Tokio task, if <code>queue: cost_weighted</code>)</strong>
 Maintains the priority heap and services dequeue requests in cost order. Not started when
 <code>queue: fifo</code> is used — FIFO uses a plain channel with no background task.</p>
 <p><strong>Thread pool workers (N OS threads, if <code>executor: thread_pool</code>)</strong>
-One OS thread per <code>concurrency</code> unit. Each thread blocks on the work channel and runs the action
-on that OS thread, using <code>block_on</code> against the shared Tokio runtime. Used to isolate
+One OS thread per <code>concurrency</code> unit. Each thread calls <code>queue.dequeue()</code> directly (via
+<code>block_on</code>), resolves the pending work, and runs it on that OS thread. Used to isolate
 CPU-bound or blocking work from the async scheduler. Not started unless <code>executor: thread_pool</code>
 is explicitly configured.</p>
 <p><strong>Remote pool HTTP server + heartbeat reaper (2 Tokio tasks, if <code>executor: remote_pool</code>)</strong>
-One task runs an axum HTTP server on the configured bind address (default <code>0.0.0.0:9001</code>) that
-external workers poll for jobs and post results back to. A second task scans in-progress jobs
-every <code>heartbeat_timeout / 2</code> seconds and evicts any worker that has stopped sending heartbeats.
-Only started when <code>executor: remote_pool</code> is configured (or when <code>target::remote</code> is used, which
-implies it).</p>
+One task runs an axum HTTP server on the configured bind address (default <code>0.0.0.0:9001</code>).
+The <code>/work</code> endpoint calls <code>queue.dequeue()</code> directly when a remote worker long-polls — there
+is no intermediate feeder task. A second task scans in-progress jobs every
+<code>heartbeat_timeout / 2</code> seconds and evicts any worker that has stopped sending heartbeats.
+Started when <code>executor: remote_pool</code> is configured (or when <code>target::remote</code> is used, which
+implies it). When routes are added programmatically via <code>add_route()</code>, remote pools are
+registered during that call and the worker server listener is started automatically.</p>
 <p>For the wire protocol and worker implementation contract, see
 <a href="#external-workers">External Workers</a>.</p>
 <h3 id="started-per-submitted-job"><a class="header" href="#started-per-submitted-job">Started per submitted job</a></h3>
@@ -350,11 +375,11 @@ There is no separate timer task — the threshold logic lives inside this task v
 <tbody>
 <tr><td>Completed-job sweeper</td><td>OS thread</td><td>1 per <code>Bits</code> instance</td><td>Always, at startup</td></tr>
 <tr><td>Broker lease heartbeat</td><td>Tokio task</td><td>1 per <code>Bits</code> instance</td><td>At startup, if persistence configured</td></tr>
-<tr><td>Dispatcher dequeue worker</td><td>Tokio task</td><td>1 per dispatcher</td><td>At config parse, per dispatcher block</td></tr>
+<tr><td>Async pool scheduler</td><td>Tokio tasks</td><td>N per <code>async_pool</code> executor</td><td>At config parse, per dispatcher block</td></tr>
 <tr><td>Cost-weighted queue worker</td><td>Tokio task</td><td>1 per <code>cost_weighted</code> queue</td><td>At config parse, if <code>queue: cost_weighted</code></td></tr>
 <tr><td>Thread pool OS workers</td><td>OS threads</td><td>N per <code>thread_pool</code> executor</td><td>At config parse, if <code>executor: thread_pool</code></td></tr>
-<tr><td>Remote pool HTTP server</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, if <code>executor: remote_pool</code></td></tr>
-<tr><td>Remote pool heartbeat reaper</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, if <code>executor: remote_pool</code></td></tr>
+<tr><td>Remote pool HTTP server</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
+<tr><td>Remote pool heartbeat reaper</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
 <tr><td>Job dispatch + persist timer</td><td>Tokio task</td><td>1 per submitted job</td><td>Per <code>Bits::submit()</code></td></tr>
 </tbody>
 </table>
@@ -374,15 +399,19 @@ storage.</li>
 <p>For implementation-level detail and design rationale, see <code>design.md</code> in the repository root.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="configuration"><a class="header" href="#configuration">Configuration</a></h1>
-<p>BITS configuration is a single YAML file with four top-level sections: three typed registries
-(<code>checks</code>, <code>transforms</code>, <code>targets</code>) and a <code>routes</code> section.</p>
+<p>BITS configuration is a single YAML file with typed registries
+(<code>checks</code>, <code>transforms</code>, <code>targets</code>) and an optional <code>routes</code> section.</p>
+<p>Routes can be defined statically in the YAML or added programmatically at runtime via
+<code>Bits::add_route()</code>. This is useful when the host application manages its own collection
+or tenant model and maps each to a separate BITS route. See
+<a href="#programmatic-routes">Programmatic Routes</a> below.</p>
 <h2 id="registries"><a class="header" href="#registries">Registries</a></h2>
 <p>Registries hold <strong>named, reusable action definitions</strong>. Each entry has a <code>type:</code> key that
 identifies the action, plus any action-specific fields.</p>
 <pre><code class="language-yaml">checks:
   is_privileged:
-    type: has_role
-    role: privileged
+    type: match
+    class: od
 
 transforms:
   expand:
@@ -398,8 +427,10 @@ targets:
 <code>target::</code> prefixes. This makes the type of each step visible in the route and ensures shared
 resources (such as a target with a dispatcher) are the same instance in memory.</p>
 <h2 id="routes"><a class="header" href="#routes">Routes</a></h2>
-<p>Routes define ordered pipelines of action steps. Steps reference named registry entries or define
-actions inline.</p>
+<p>The <code>routes</code> section is <strong>optional</strong>. When present, it defines ordered pipelines of action steps
+that are loaded at config parse time. Steps reference named registry entries or define actions
+inline. When omitted, routes must be added programmatically via <code>add_route()</code> — see
+<a href="#programmatic-routes">Programmatic Routes</a>.</p>
 <pre><code class="language-yaml">routes:
   default:
     - transform::expand          # reference a named registry entry
@@ -408,19 +439,39 @@ actions inline.</p>
           - check::is_privileged
           - target::backend
         public:
-          - check::has_role:     # inline action — no registry entry needed
-              role: registered
-            - target::backend
+          - check::match:        # inline action — no registry entry needed
+              class: ea
+          - target::backend
 </code></pre>
 <p>A <code>switch</code> tries its named routes in order and returns the result of the first route whose checks
 all pass. Routes may be nested.</p>
 <h3 id="inline-actions"><a class="header" href="#inline-actions">Inline actions</a></h3>
 <p>Actions can be defined directly in a route without a registry entry:</p>
-<pre><code class="language-yaml">- check::has_role:
-    role: registered
+<pre><code class="language-yaml">- check::match:
+    class: od
 </code></pre>
 <p>Inline actions are not reusable — each occurrence is an independent instance. Use the registry
 when you want to share an action (and its dispatcher) across multiple routes.</p>
+<h3 id="role-based-access-control"><a class="header" href="#role-based-access-control">Role-based access control</a></h3>
+<p><code>has_role</code> checks that the authenticated user belongs to a listed realm and holds at least one of
+the allowed roles for that realm. The <code>roles</code> field is a map of realm name to allowed role lists:</p>
+<pre><code class="language-yaml">- check::has_role:
+    roles:
+      ecmwf:
+        - admin
+        - data_access
+      cds:
+        - viewer
+</code></pre>
+<p>A user passes if their realm appears in the map <strong>and</strong> they hold any of the roles listed under
+that realm. Users whose realm is not listed, or who lack a matching role, are rejected.</p>
+<p>Rejections use a generic <code>"insufficient permissions"</code> message to avoid leaking realm/role details.
+Two distinct <code>WARN</code>-level log messages help operators diagnose failures:</p>
+<ul>
+<li><code>"user realm not listed in allowed realms"</code> — the user’s realm doesn’t appear in the <code>roles</code> map.</li>
+<li><code>"realm matched but user lacks a required role"</code> — the realm matched but the user holds none of the
+allowed roles.</li>
+</ul>
 <h2 id="dispatcher-1"><a class="header" href="#dispatcher-1">Dispatcher</a></h2>
 <p>Any action step — check, transform, or target — can include a <code>dispatcher:</code> section to control
 queuing and concurrency.</p>
@@ -450,7 +501,7 @@ queuing and concurrency.</p>
 </thead>
 <tbody>
 <tr><td><code>queue</code></td><td><code>fifo</code>, <code>cost_weighted</code>, <code>age_priority</code></td><td>none (FIFO when <code>concurrency</code> is set)</td></tr>
-<tr><td><code>executor</code></td><td><code>semaphore</code>, <code>thread_pool</code>, <code>remote_pool</code></td><td><code>semaphore</code></td></tr>
+<tr><td><code>executor</code></td><td><code>async_pool</code>, <code>thread_pool</code>, <code>remote_pool</code></td><td><code>async_pool</code></td></tr>
 <tr><td><code>concurrency</code></td><td>positive integer</td><td>unlimited</td></tr>
 </tbody>
 </table>
@@ -464,6 +515,43 @@ type. Any other combination is rejected at config parse time.</li>
 <li>For the remote worker HTTP API and worker lifecycle, see
 <a href="#external-workers">External Workers</a>.</li>
 </ul>
+<h2 id="silent-rejections"><a class="header" href="#silent-rejections">Silent rejections</a></h2>
+<p>When all routes in a switch reject a job, the error returned to the user includes rejection
+reasons from actions that are <strong>not silent</strong>. Route-selection checks (like <code>match</code>) are silent by
+default — their rejections are internal routing decisions. Validation checks (like
+<code>schedule_released</code>) are not silent — their rejections should reach the user.</p>
+<p>Each action sets its own default. You can override per-step with the <code>silent</code> key:</p>
+<p>For <strong>named registry entries</strong>:</p>
+<pre><code class="language-yaml">checks:
+  schedule:
+    type: schedule_released
+    path: /etc/schedule.xml
+    silent: true               # override: suppress this check's rejections
+</code></pre>
+<p>For <strong>inline steps</strong>:</p>
+<pre><code class="language-yaml">routes:
+  - default:
+      - check::match:
+            class: od
+        silent: false          # override: surface this match check's rejections
+      - target::backend
+</code></pre>
+<p>Built-in defaults:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Action</th><th><code>silent</code></th></tr>
+</thead>
+<tbody>
+<tr><td><code>match</code></td><td><code>true</code></td></tr>
+<tr><td><code>has_role</code></td><td><code>false</code></td></tr>
+<tr><td><code>has_license</code></td><td><code>true</code></td></tr>
+<tr><td><code>has_key</code></td><td><code>true</code></td></tr>
+<tr><td><code>date_checker</code></td><td><code>false</code></td></tr>
+<tr><td><code>schedule_released</code></td><td><code>false</code></td></tr>
+</tbody>
+</table>
+</div>
 <h2 id="top-level-bits-settings"><a class="header" href="#top-level-bits-settings">Top-level bits settings</a></h2>
 <p>The optional <code>bits:</code> section configures broker identity and persistence policy:</p>
 <pre><code class="language-yaml">bits:
@@ -486,6 +574,40 @@ type. Any other combination is rejected at config parse time.</li>
 <p>Persistence requires a configured storage backend. TiKV is supported when the <code>tikv</code> Cargo
 feature is enabled. If TiKV configuration is present but the crate is built without the <code>tikv</code>
 feature, startup fails immediately with a configuration error.</p>
+<h2 id="programmatic-routes"><a class="header" href="#programmatic-routes">Programmatic Routes</a></h2>
+<p>When the host application manages its own routing model (e.g. per-collection or per-tenant
+routing), routes can be added after config load via <code>Bits::add_route()</code>.</p>
+<p>The YAML file still defines registries (<code>checks</code>, <code>targets</code>, <code>transforms</code>), <code>bits:</code> settings, and
+optionally a <code>worker_server:</code> block — but the <code>routes</code> section can be omitted entirely.</p>
+<h3 id="add_route"><a class="header" href="#add_route">add_route</a></h3>
+<p><code>Bits::add_route()</code> parses a route YAML fragment against the already-loaded registries and
+returns a <code>RouteHandle</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let bits = Bits::from_config(config)?;
+
+// Parse a route from a YAML value — actions that reference named
+// registry entries (e.g. target::backend) share the same Arc instances.
+let handle: RouteHandle = bits.add_route("my_collection", &amp;route_yaml_value)?;
+
+// Submit a job via the named route handle
+let job_handle = handle.submit(Job::new(json!({"class": "od"})));
+<span class="boring">}</span></code></pre>
+<h3 id="routehandle"><a class="header" href="#routehandle">RouteHandle</a></h3>
+<p><code>add_route()</code> returns a <code>RouteHandle</code> — an opaque handle the host application uses to submit
+jobs to a specific route. The host keeps the mapping from its own collection/tenant names to
+route handles.</p>
+<h3 id="shared-resources"><a class="header" href="#shared-resources">Shared resources</a></h3>
+<p>Routes added via <code>add_route()</code> share the same action registries and target <code>Arc</code>s as routes
+defined in the YAML. This means a named target like <code>target::backend</code> with a dispatcher is the
+same instance across all routes — jobs from any route contend on the same concurrency pool and
+queue.</p>
+<h3 id="worker-server"><a class="header" href="#worker-server">Worker server</a></h3>
+<p>When using <code>target::remote</code> with programmatic routes, remote pool targets may be registered
+during <code>add_route()</code> — after the initial config parse. The worker server is started
+automatically inside <code>add_route()</code> whenever remote pools have been registered. The call is
+idempotent — once the listener is bound, subsequent <code>add_route()</code> calls skip re-binding.</p>
+<p>No explicit worker server management is needed from the host application.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="writing-custom-actions"><a class="header" href="#writing-custom-actions">Writing Custom Actions</a></h1>
 <p>Actions are the extension point for adding new behaviour to BITS pipelines. You can add custom
@@ -506,7 +628,10 @@ types, the same YAML registration model, and the same job data model.</p>
 </table>
 </div>
 <p>A <code>Reject</code> from any action type stops the current route and causes the enclosing <code>switch</code> to
-try the next named branch.</p>
+try the next named branch. Each <code>Reject</code> carries a <code>silent</code> flag: when <code>silent</code> is <code>true</code> (the
+default for route-selection checks), the rejection reason is not shown to the user. When <code>silent</code>
+is <code>false</code> (the default for validation checks like <code>schedule_released</code>), the reason is included in
+the error if all routes fail. The <code>silent</code> config key on any action step can override this default.</p>
 <hr>
 <h2 id="the-job-object"><a class="header" href="#the-job-object">The Job object</a></h2>
 <p>All actions receive a job. The fields relevant to action authors:</p>
@@ -552,9 +677,11 @@ impl CheckAction for HasLicense {
             Some(l) if l == self.license =&gt; Ok(CheckResult::Pass),
             Some(l) =&gt; Ok(CheckResult::Reject {
                 reason: format!("license '{}' does not match required '{}'", l, self.license),
+                silent: true,
             }),
             None =&gt; Ok(CheckResult::Reject {
                 reason: "no license field found".to_string(),
+                silent: true,
             }),
         }
     }
@@ -717,6 +844,7 @@ impl TargetAction for MyHttpTarget {
         if response.status().is_client_error() {
             return Ok(TargetResult::Reject {
                 reason: format!("upstream rejected: {}", response.status()),
+                silent: true,
             });
         }
         if !response.status().is_success() {
@@ -793,7 +921,8 @@ bits::register_action!(transform, "my_transform", MyTransform);
 bits::register_action!(target,    "my_target",    MyTarget);
 <span class="boring">}</span></code></pre>
 <p>The macro deserialises the YAML config block into your struct via <code>serde_json</code>. Your struct must
-derive <code>Deserialize</code>. All YAML keys except <code>type</code> and <code>dispatcher</code> are passed as config fields.</p>
+derive <code>Deserialize</code>. All YAML keys except <code>type</code>, <code>dispatcher</code>, and <code>silent</code> are passed as
+config fields.</p>
 <h3 id="crate-setup"><a class="header" href="#crate-setup">Crate setup</a></h3>
 <p>Actions can live in any crate that depends on <code>bits</code>. A minimal <code>Cargo.toml</code>:</p>
 <pre><code class="language-toml">[dependencies]
@@ -807,8 +936,10 @@ inventory   = "0.3"
 initialisation, which only fires if the crate is linked. If the action crate is not a direct
 dependency of the binary, add an explicit <code>use</code> to force linkage.</p>
 <h3 id="error-handling"><a class="header" href="#error-handling">Error handling</a></h3>
-<p>Prefer returning <code>Reject { reason }</code> for expected policy rejections (wrong role, wrong class,
-etc.). Reserve <code>Err(ActionError)</code> for unexpected system failures.</p>
+<p>Prefer returning <code>Reject { reason, silent }</code> for expected policy rejections. Set <code>silent: true</code>
+for route-selection logic (wrong class, missing key) and <code>silent: false</code> for validation failures
+the user should see (data not released, date out of range). Reserve <code>Err(ActionError)</code> for
+unexpected system failures.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -844,16 +975,18 @@ class MyTarget(TargetAction):
 register_action("my_target", MyTarget)          # register first
 bits = await Bits.from_config(config_yaml)      # then load config
 </code></pre>
-<p>YAML config keys (excluding <code>type</code> and <code>dispatcher</code>) are forwarded to <code>__init__</code> as keyword
-arguments when the action is instantiated at config-load time:</p>
+<p>YAML config keys (excluding <code>type</code>, <code>dispatcher</code>, and <code>silent</code>) are forwarded to <code>__init__</code> as
+keyword arguments when the action is instantiated at config-load time:</p>
 <pre><code class="language-yaml">checks:
   gate:
     type: my_check
     role: admin        # → MyCheck(role="admin")
 </code></pre>
 <h3 id="error-handling-1"><a class="header" href="#error-handling-1">Error handling</a></h3>
-<p>Prefer returning <code>Reject(reason)</code> for expected policy rejections. For unexpected failures,
-raise an exception — it surfaces as a <code>Failed</code> result to the client.</p>
+<p>Prefer returning <code>Reject(reason)</code> for expected policy rejections. Pass <code>silent=False</code> when the
+rejection reason should reach the user (e.g. data not yet released); the default is <code>silent=True</code>
+(route-selection). For unexpected failures, raise an exception — it surfaces as a <code>Failed</code> result
+to the client.</p>
 </div>
 
 </div>
@@ -902,7 +1035,8 @@ routes:
 remote pool config (<code>bind: 0.0.0.0:9001</code>, <code>heartbeat_timeout_secs: 60</code>).</li>
 </ul>
 <h2 id="2-worker-api-contract"><a class="header" href="#2-worker-api-contract">2) Worker API contract</a></h2>
-<p>When <code>remote_pool</code> is configured, BITS starts an HTTP server with three endpoints.</p>
+<p>When <code>remote_pool</code> is configured, BITS starts an HTTP server with dedicated work, heartbeat,
+and terminal outcome endpoints.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -911,7 +1045,10 @@ remote pool config (<code>bind: 0.0.0.0:9001</code>, <code>heartbeat_timeout_sec
 <tbody>
 <tr><td><code>/work?timeout_ms=N</code></td><td><code>GET</code></td><td>Long-poll for one available job</td><td><code>200</code>, <code>204</code></td></tr>
 <tr><td><code>/heartbeat/{job_id}</code></td><td><code>POST</code></td><td>Keep an in-progress job alive</td><td><code>200</code>, <code>404</code></td></tr>
-<tr><td><code>/complete/{job_id}</code></td><td><code>POST</code></td><td>Submit final job outcome</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/complete/data/{job_id}</code></td><td><code>POST</code></td><td>Stream successful response body</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/complete/reject/{job_id}</code></td><td><code>POST</code></td><td>Submit business rejection JSON</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/complete/error/{job_id}</code></td><td><code>POST</code></td><td>Submit worker failure JSON</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/complete/redirect/{job_id}</code></td><td><code>POST</code></td><td>Submit redirect JSON</td><td><code>200</code>, <code>404</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -943,45 +1080,33 @@ remote pool config (<code>bind: 0.0.0.0:9001</code>, <code>heartbeat_timeout_sec
 </ul>
 <p>If no heartbeat arrives within <code>heartbeat_timeout_secs</code>, BITS evicts the in-progress job and
 the broker side returns a failed result.</p>
-<h3 id="post-completejob_id"><a class="header" href="#post-completejob_id"><code>POST /complete/{job_id}</code></a></h3>
-<p>Submit exactly one terminal outcome for a claimed job.</p>
-<p><code>status: complete</code>:</p>
-<pre><code class="language-json">{
-  "status": "complete",
-  "content_type": "application/json",
-  "body": "{\"result\":42}"
-}
+<h3 id="post-completedatajob_id"><a class="header" href="#post-completedatajob_id"><code>POST /complete/data/{job_id}</code></a></h3>
+<p>Submit exactly one successful terminal outcome for a claimed job.</p>
+<ul>
+<li>The HTTP request body is the result stream.</li>
+<li><code>Content-Type</code> is forwarded to the final client response.</li>
+<li><code>Content-Length</code> is forwarded when provided, otherwise the client receives a chunked stream.</li>
+</ul>
+<p>Example:</p>
+<pre><code class="language-http">POST /complete/data/broker-a123~9d2f... HTTP/1.1
+Content-Type: application/x-grib
 
-Binary payloads can be sent with base64 encoding:
-
-```json
-{
-  "status": "complete",
-  "content_type": "application/x-grib",
-  "body": "R1JJQg==",
-  "body_encoding": "base64"
-}
+...streamed bytes...
 </code></pre>
-<pre><code>
-`status: reject`:
-
-```json
-{
-  "status": "reject",
+<h3 id="post-completerejectjob_id"><a class="header" href="#post-completerejectjob_id"><code>POST /complete/reject/{job_id}</code></a></h3>
+<pre><code class="language-json">{
   "reason": "unsupported request"
 }
 </code></pre>
-<p><code>status: redirect</code>:</p>
+<h3 id="post-completeredirectjob_id"><a class="header" href="#post-completeredirectjob_id"><code>POST /complete/redirect/{job_id}</code></a></h3>
 <pre><code class="language-json">{
-  "status": "redirect",
   "location": "https://my-bucket.s3.amazonaws.com/path/object.grib?X-Amz-Signature=...",
   "message": "Download is ready"
 }
 </code></pre>
-<p><code>message</code> is optional for <code>redirect</code>.</p>
-<p><code>status: error</code>:</p>
+<p><code>message</code> is optional for redirect.</p>
+<h3 id="post-completeerrorjob_id"><a class="header" href="#post-completeerrorjob_id"><code>POST /complete/error/{job_id}</code></a></h3>
 <pre><code class="language-json">{
-  "status": "error",
   "message": "worker internal failure"
 }
 </code></pre>
@@ -997,7 +1122,7 @@ Binary payloads can be sent with base64 encoding:
 <li>BITS queues the job in the remote pool.</li>
 <li>A worker long-polls <code>/work</code> and receives job payload.</li>
 <li>Worker processes job and sends periodic <code>/heartbeat/{job_id}</code>.</li>
-<li>Worker posts final outcome to <code>/complete/{job_id}</code>.</li>
+<li>Worker posts final outcome to one of the <code>/complete/.../{job_id}</code> endpoints.</li>
 <li>BITS unblocks the waiting route and returns result to the client.</li>
 </ol>
 <h2 id="4-outcome-mapping-inside-bits"><a class="header" href="#4-outcome-mapping-inside-bits">4) Outcome mapping inside BITS</a></h2>
@@ -1007,7 +1132,7 @@ Binary payloads can be sent with base64 encoding:
 <tr><th>Worker outcome</th><th>Internal action result</th><th>Client-visible effect</th></tr>
 </thead>
 <tbody>
-<tr><td><code>complete</code></td><td><code>TargetResult::Complete(JobResult::Success)</code></td><td>Success response with worker <code>content_type</code> and <code>body</code></td></tr>
+<tr><td><code>complete/data</code></td><td><code>TargetResult::Complete(JobResult::Success)</code></td><td>Success response streamed end-to-end with worker <code>Content-Type</code></td></tr>
 <tr><td><code>redirect</code></td><td><code>TargetResult::Complete(JobResult::Redirect)</code></td><td>Redirect response (for HTTP frontends typically <code>303 See Other</code> with <code>Location</code>)</td></tr>
 <tr><td><code>reject</code></td><td><code>TargetResult::Reject</code></td><td>Current route is rejected; switch tries next route. If none match, client gets an error</td></tr>
 <tr><td><code>error</code></td><td><code>ActionError::ResourceError</code></td><td>Job becomes <code>Failed</code></td></tr>
@@ -1019,7 +1144,7 @@ Binary payloads can be sent with base64 encoding:
 <ul>
 <li>Long-poll <code>/work</code> continuously (with jittered retry on transport errors).</li>
 <li>Start heartbeating immediately after receiving a job.</li>
-<li>Stop heartbeating once <code>/complete/{job_id}</code> returns <code>200</code> or <code>404</code>.</li>
+<li>Stop heartbeating once a <code>/complete/.../{job_id}</code> endpoint returns <code>200</code> or <code>404</code>.</li>
 <li>Treat <code>404</code> from heartbeat or complete as terminal for that job.</li>
 <li>Distinguish business rejection (<code>status: reject</code>) from execution failure (<code>status: error</code>).</li>
 <li>Use <code>status: redirect</code> when data should be fetched from object storage rather than streamed
@@ -1042,14 +1167,14 @@ async def heartbeat_loop(session: aiohttp.ClientSession, job_id: str, stop: asyn
                 stop.set()
                 return
 
-async def process_job(work: dict) -&gt; tuple[str, dict]:
+async def process_job(work: dict):
     req = work["request"]
     if "dataset" not in req:
         return "reject", {"reason": "dataset is required"}
-    result = {"ok": True, "dataset": req["dataset"]}
-    return "complete", {
+    result = __import__("json").dumps({"ok": True, "dataset": req["dataset"]}).encode()
+    return "data", {
         "content_type": "application/json",
-        "body": __import__("json").dumps(result),
+        "body": result,
     }
 
 async def worker():
@@ -1072,15 +1197,24 @@ async def worker():
             hb_task = asyncio.create_task(heartbeat_loop(session, job_id, stop))
             try:
                 status, payload = await process_job(work)
-                body = {"status": status, **payload}
-                async with session.post(f"{BASE}/complete/{job_id}", json=body) as done:
-                    # 200 = accepted, 404 = no longer active; both terminal for worker
-                    if done.status not in (200, 404):
-                        done.raise_for_status()
+                if status == "data":
+                    async with session.post(
+                        f"{BASE}/complete/data/{job_id}",
+                        data=payload["body"],
+                        headers={"Content-Type": payload["content_type"]},
+                    ) as done:
+                        if done.status not in (200, 404):
+                            done.raise_for_status()
+                elif status == "reject":
+                    async with session.post(
+                        f"{BASE}/complete/reject/{job_id}", json=payload
+                    ) as done:
+                        if done.status not in (200, 404):
+                            done.raise_for_status()
             except Exception as exc:
                 async with session.post(
-                    f"{BASE}/complete/{job_id}",
-                    json={"status": "error", "message": str(exc)},
+                    f"{BASE}/complete/error/{job_id}",
+                    json={"message": str(exc)},
                 ):
                     pass
             finally:
@@ -1117,9 +1251,8 @@ async def process_job(work: dict) -&gt; tuple[str, dict]:
         "message": "Result stored in S3",
     }
 </code></pre>
-<p>The worker then posts this payload to <code>/complete/{job_id}</code>:</p>
+<p>The worker then posts this payload to <code>/complete/redirect/{job_id}</code>:</p>
 <pre><code class="language-json">{
-  "status": "redirect",
   "location": "https://my-results-bucket.s3.amazonaws.com/results/abc.json?...",
   "message": "Result stored in S3"
 }
@@ -1133,6 +1266,121 @@ authentication themselves.</li>
 receive first.</li>
 <li>Choose <code>heartbeat_timeout_secs</code> to match expected execution time and heartbeat cadence.</li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="http-server-api"><a class="header" href="#http-server-api">HTTP Server API</a></h1>
+<p>BITS is a library first. The core API (<code>Bits::submit()</code>, <code>Bits::poll()</code>,
+<code>Bits::cancel()</code>) is designed for you to embed in your application and build
+whatever interface fits your needs.</p>
+<p>The built-in HTTP server described here is a thin wrapper around that API. It
+provides a working submit/poll interface and serves as a reference
+implementation. The source is in <code>bits/src/server.rs</code>.</p>
+<h2 id="endpoints"><a class="header" href="#endpoints">Endpoints</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Path</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>POST</code></td><td><code>/job</code></td><td>Submit a job (JSON body) and long-poll for the result.</td></tr>
+<tr><td><code>GET</code></td><td><code>/job/{id}</code></td><td>Reconnect to an existing job and long-poll.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="submitting-a-job"><a class="header" href="#submitting-a-job">Submitting a job</a></h2>
+<p>Send the request payload as a JSON body:</p>
+<pre><code class="language-http">POST /job HTTP/1.1
+Host: bits-broker:8080
+Content-Type: application/json
+
+{"class": "od", "param": "2t/msl", "date": "2024-01-15"}
+</code></pre>
+<p>The JSON body becomes the job’s <code>request</code> field. Nothing is added or wrapped.</p>
+<h2 id="response-status-codes"><a class="header" href="#response-status-codes">Response status codes</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Status</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>200 OK</code></td><td>Success with streaming data body.</td></tr>
+<tr><td><code>303 See Other</code></td><td>Redirect to data URL, or pending (poll again).</td></tr>
+<tr><td><code>400 Bad Request</code></td><td>Job-level validation error from the backend.</td></tr>
+<tr><td><code>404 Not Found</code></td><td>Unknown job ID or already consumed.</td></tr>
+<tr><td><code>410 Gone</code></td><td>Job cancelled, client disconnected, or owner broker lost.</td></tr>
+<tr><td><code>500 Internal Server Error</code></td><td>Action panicked or system failure.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="structured-error-responses"><a class="header" href="#structured-error-responses">Structured error responses</a></h2>
+<p>Application-level 4xx/5xx responses from the direct owner broker return a JSON
+body with three fields:</p>
+<pre><code class="language-json">{
+  "code": "JOB_NOT_FOUND",
+  "message": "job does not exist or was already consumed",
+  "retryable": false
+}
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>code</code></td><td>string</td><td>Stable machine-readable error code. Safe to use in monitoring, alerting, and client-side branching.</td></tr>
+<tr><td><code>message</code></td><td>string</td><td>Human-readable description. May change between releases.</td></tr>
+<tr><td><code>retryable</code></td><td>boolean</td><td>Whether the client should retry the same HTTP request (GET poll or POST submit). Currently <code>false</code> for all outcomes.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="error-codes-by-status"><a class="header" href="#error-codes-by-status">Error codes by status</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Status</th><th>Code</th><th>When</th></tr>
+</thead>
+<tbody>
+<tr><td><code>404</code></td><td><code>JOB_NOT_FOUND</code></td><td>Job ID doesn’t exist or result was already consumed.</td></tr>
+<tr><td><code>410</code></td><td><code>JOB_LOST</code></td><td>Job existed but owner broker disappeared without durable state.</td></tr>
+<tr><td><code>410</code></td><td><code>ACTION_CANCELLED</code></td><td>Job was explicitly cancelled.</td></tr>
+<tr><td><code>410</code></td><td><code>ACTION_CLIENT_GONE</code></td><td>Client disconnected and reconnect window expired.</td></tr>
+<tr><td><code>400</code></td><td><code>JOB_ERROR</code></td><td>Backend returned a job-level validation error.</td></tr>
+<tr><td><code>500</code></td><td><code>JOB_FAILED</code></td><td>Action panicked or returned a system-level failure.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="two-code-namespaces"><a class="header" href="#two-code-namespaces">Two code namespaces</a></h3>
+<p>The <code>code</code> field uses two naming conventions:</p>
+<ul>
+<li><strong><code>JOB_*</code> codes</strong> are HTTP-layer codes for poll and result outcomes. They
+exist only in HTTP responses and are defined in <code>bits::server</code>.</li>
+<li><strong><code>ACTION_*</code> codes</strong> bridge the library error system (<code>ActionError::code()</code>)
+and the HTTP layer. <code>ACTION_CANCELLED</code> and <code>ACTION_CLIENT_GONE</code> are the
+same codes used by <code>BitsError::code()</code>.</li>
+</ul>
+<p>Library-level codes like <code>CONFIG_YAML_SYNTAX</code> or <code>PERSISTENCE_BACKEND</code> don’t
+appear in HTTP responses because config and persistence errors happen at
+startup, not during job processing.</p>
+<h3 id="what-is-not-structured"><a class="header" href="#what-is-not-structured">What is NOT structured</a></h3>
+<p>Success responses (<code>200 OK</code>) return the raw streaming body from the backend,
+not JSON. Redirect responses (<code>303 See Other</code>) return headers only.</p>
+<p>Framework-level rejections (malformed JSON body, wrong Content-Type) are
+handled by Axum before the handler runs and currently return plain text
+errors, not structured JSON.</p>
+<p>Proxied responses from a non-owner broker currently preserve the HTTP status
+code but may not carry the structured error body. The <code>code</code> field is
+guaranteed only when the client reaches the job’s owner directly.</p>
+<h2 id="graceful-shutdown"><a class="header" href="#graceful-shutdown">Graceful shutdown</a></h2>
+<p>The server supports graceful shutdown via <code>serve_with_shutdown()</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>bits::server::serve_with_shutdown(
+    bits,
+    server_config,
+    bits::server::shutdown_signal(),
+).await?;
+<span class="boring">}</span></code></pre>
+<p>On SIGTERM/SIGINT, the server stops accepting new connections and drains
+in-flight requests before returning.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="persistence"><a class="header" href="#persistence">Persistence</a></h1>
 <p>BITS persistence is designed around two goals:</p>
@@ -1356,25 +1604,47 @@ as live and will proxy polls to it (which will fail with a network error, return
 to clients). Once the lease expires, peers will attempt to <a href="#poll-proxying-and-recovery">claim and recover</a>
 any outstanding jobs.</p>
 <h2 id="expiry-evaluation"><a class="header" href="#expiry-evaluation">Expiry evaluation</a></h2>
-<p>BITS does not rely on any server-side TTL mechanism. The reading broker compares
-<code>lease.lease_until &gt; current_wall_time</code> to decide if the lease is active. Expired records are
-never deleted from TiKV automatically — they remain until the broker comes back online and
-overwrites them. This is safe because the timestamp comparison is the only check that matters.</p>
-<h2 id="tikv-storage"><a class="header" href="#tikv-storage">TiKV storage</a></h2>
-<p>Broker leases are stored at the key <code>brokers/{broker_id}</code> as a JSON-encoded record. Job records
-are stored at <code>jobs/{job_id}</code>. These key spaces are disjoint.</p>
+<p>The reading broker compares <code>lease.lease_until &gt; current_wall_time</code> to decide if the lease is
+active. Backend-specific cleanup varies:</p>
+<ul>
+<li><strong>NATS</strong>: The leases bucket uses <code>max_age</code> (2× TTL), so expired entries are automatically
+removed by JetStream. The application-level <code>lease_until</code> check is the primary liveness signal.</li>
+<li><strong>TiKV</strong>: Expired records remain until the broker comes back online and overwrites them.
+This is safe because the timestamp comparison is the only check that matters.</li>
+</ul>
+<h2 id="storage-layout"><a class="header" href="#storage-layout">Storage layout</a></h2>
+<p>Broker leases and job records are stored as JSON-encoded values in separate key spaces. The
+key encoding is backend-specific (base64url for NATS, raw string for TiKV) but the key spaces
+are always disjoint.</p>
 <h2 id="configuration-2"><a class="header" href="#configuration-2">Configuration</a></h2>
+<p>The persistence backend is selected via <code>bits.persistence.type</code>:</p>
+<h3 id="nats-jetstream-kv"><a class="header" href="#nats-jetstream-kv">NATS JetStream KV</a></h3>
 <pre><code class="language-yaml">bits:
-  tikv:
-    endpoints: ["pd:2379"]
-    broker_lease_ttl_secs: 30    # default: 30 seconds
+  persistence:
+    type: nats
+    url: "nats://localhost:4222"
+    jobs_bucket: "bits-jobs"         # default
+    leases_bucket: "bits-leases"     # default
+    broker_lease_ttl_secs: 30        # default: 30 seconds
+    num_replicas: 1                  # use 3 for production
 </code></pre>
+<p>Build with <code>--features nats</code>. Requires <code>nats-server</code> with JetStream enabled.</p>
+<h3 id="tikv"><a class="header" href="#tikv">TiKV</a></h3>
+<pre><code class="language-yaml">bits:
+  persistence:
+    type: tikv
+    endpoints: ["pd:2379"]
+    broker_lease_ttl_secs: 30        # default: 30 seconds
+</code></pre>
+<p>Build with <code>--features tikv</code>. Requires a TiKV cluster with PD.</p>
+<h3 id="no-persistence-in-memory-only"><a class="header" href="#no-persistence-in-memory-only">No persistence (in-memory only)</a></h3>
+<p>Omit the <code>persistence</code> section entirely. Jobs are lost on broker restart.</p>
 <p><code>broker_lease_ttl_secs</code> is the only tuning knob for lease lifetime. Setting it lower reduces
 the window during which a crashed broker’s jobs are unrecoverable, at the cost of more frequent
-upserts to TiKV.</p>
+heartbeat writes.</p>
 <blockquote>
 <p><strong>Note:</strong> Broker leases are only active when a persistence store is configured. Without
-<code>bits.tikv</code>, the heartbeat task does not start and no lease records are written.</p>
+<code>bits.persistence</code>, the heartbeat task does not start and no lease records are written.</p>
 </blockquote>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="operational-notes"><a class="header" href="#operational-notes">Operational Notes</a></h1>
@@ -1397,15 +1667,20 @@ upserts to TiKV.</p>
 </tbody>
 </table>
 </div>
-<h3 id="tikv-options-bitstikv"><a class="header" href="#tikv-options-bitstikv">TiKV options (<code>bits.tikv</code>)</a></h3>
+<h3 id="persistence-options-bitspersistence"><a class="header" href="#persistence-options-bitspersistence">Persistence options (<code>bits.persistence</code>)</a></h3>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>endpoints</code></td><td>list of strings</td><td><em>(required)</em></td><td>TiKV PD endpoints, e.g. <code>["pd:2379"]</code>. Must be non-empty.</td></tr>
+<tr><td><code>type</code></td><td>string</td><td><em>(required)</em></td><td>Backend type: <code>nats</code> or <code>tikv</code>.</td></tr>
 <tr><td><code>broker_lease_ttl_secs</code></td><td>float</td><td><code>30.0</code></td><td>Lease TTL in seconds. Heartbeat renews at TTL ÷ 2.</td></tr>
+<tr><td><code>url</code></td><td>string</td><td><em>(nats only, required)</em></td><td>NATS server URL, e.g. <code>"nats://localhost:4222"</code>.</td></tr>
+<tr><td><code>jobs_bucket</code></td><td>string</td><td><code>"bits-jobs"</code></td><td><em>(nats only)</em> KV bucket name for job records.</td></tr>
+<tr><td><code>leases_bucket</code></td><td>string</td><td><code>"bits-leases"</code></td><td><em>(nats only)</em> KV bucket name for broker leases.</td></tr>
+<tr><td><code>num_replicas</code></td><td>integer</td><td><code>1</code></td><td><em>(nats only)</em> JetStream replication factor. Use 3 for production.</td></tr>
+<tr><td><code>endpoints</code></td><td>list of strings</td><td><em>(tikv only, required)</em></td><td>TiKV PD endpoints, e.g. <code>["pd:2379"]</code>.</td></tr>
 </tbody>
 </table>
 </div>
@@ -1425,7 +1700,9 @@ you hit this error.</p>
 </thead>
 <tbody>
 <tr><td><code>dispatcher.persistent</code></td><td>Use <code>bits.persist_after_ms</code></td></tr>
-<tr><td><code>dispatcher.lock_ttl_secs</code></td><td>Use <code>bits.tikv.broker_lease_ttl_secs</code></td></tr>
+<tr><td><code>dispatcher.lock_ttl_secs</code></td><td>Use <code>bits.persistence.broker_lease_ttl_secs</code></td></tr>
+<tr><td><code>bits.tikv</code></td><td>Use <code>bits.persistence</code> with <code>type: tikv</code></td></tr>
+<tr><td><code>bits.nats</code></td><td>Use <code>bits.persistence</code> with <code>type: nats</code></td></tr>
 <tr><td><code>persist</code> as a route step name</td><td>Persistence is now threshold-based; remove the step</td></tr>
 </tbody>
 </table>
@@ -1439,8 +1716,8 @@ example, if clients poll with a 30-second timeout and you require a 1-second gua
 I/O cost for persistence.</p>
 <h3 id="broker_lease_ttl_secs"><a class="header" href="#broker_lease_ttl_secs"><code>broker_lease_ttl_secs</code></a></h3>
 <p>This controls the window during which jobs are unrecoverable after a broker crashes. A lower
-TTL (e.g., 10 s) means faster recovery but more frequent TiKV writes. A higher TTL reduces
-write pressure at the cost of longer client wait times after a crash.</p>
+TTL (e.g., 10 s) means faster recovery but more frequent persistence writes. A higher TTL
+reduces write pressure at the cost of longer client wait times after a crash.</p>
 <h3 id="sticky-ingress"><a class="header" href="#sticky-ingress">Sticky ingress</a></h3>
 <p>Configure your load balancer to hash incoming requests on a stable client property (for example
 <code>Authorization</code>). This maximises the fraction of polls that hit the owning broker and return
@@ -1454,12 +1731,12 @@ from local in-memory state, avoiding proxy or recovery paths entirely.</p>
 <tbody>
 <tr><td>Store unreachable at lease lookup</td><td><code>Pending</code> returned to client. No claim attempted.</td></tr>
 <tr><td>Store unreachable at claim (repeated)</td><td>Exponential backoff (100 ms → 1 s), budget <code>min(timeout, 2 s)</code>. Returns <code>Pending</code> on exhaustion.</td></tr>
-<tr><td>Two brokers claim the same job simultaneously</td><td>TiKV optimistic transaction ensures only one wins. Loser returns <code>Pending</code>; next poll finds the new owner.</td></tr>
+<tr><td>Two brokers claim the same job simultaneously</td><td>Backend-specific CAS ensures only one wins (TiKV: optimistic transaction, NATS: revision-based update). Loser returns <code>Pending</code>; next poll finds the new owner.</td></tr>
 <tr><td><code>upsert_job</code> fails at persist threshold</td><td>Logged as a warning; job continues in memory. If the broker subsequently crashes, the job is unrecoverable.</td></tr>
-<tr><td><code>delete_job</code> fails at job completion</td><td>Error is silently ignored. The stale record remains in TiKV but is harmless — the reading broker will see an active lease for the owning broker.</td></tr>
-<tr><td>Broker crashes without lease cleanup</td><td>Lease expires after <code>broker_lease_ttl_secs</code> (default 30 s). Jobs become recoverable after that window. Old lease records are never purged from TiKV automatically.</td></tr>
-<tr><td><code>tikv</code> config present, feature not compiled</td><td><code>Bits::from_config</code> returns an error immediately at startup.</td></tr>
-<tr><td>Empty <code>tikv.endpoints</code></td><td><code>Bits::from_config</code> returns an error immediately at startup.</td></tr>
+<tr><td><code>delete_job</code> fails at job completion</td><td>Error is silently ignored. The stale record remains in the store but is harmless — the reading broker will see an active lease for the owning broker.</td></tr>
+<tr><td>Broker crashes without lease cleanup</td><td>Lease expires after <code>broker_lease_ttl_secs</code> (default 30 s). Jobs become recoverable after that window. NATS leases auto-expire via bucket <code>max_age</code>; TiKV lease records require application-level expiry checks.</td></tr>
+<tr><td><code>persistence.type</code> set, feature not compiled</td><td><code>Bits::from_config</code> returns an error immediately at startup.</td></tr>
+<tr><td>Missing required backend fields</td><td><code>Bits::from_config</code> returns an error immediately at startup (e.g., empty <code>endpoints</code> for TiKV, empty <code>url</code> for NATS).</td></tr>
 </tbody>
 </table>
 </div>
@@ -1487,22 +1764,6 @@ from local in-memory state, avoiding proxy or recovery paths entirely.</p>
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

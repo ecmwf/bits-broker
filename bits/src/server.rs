@@ -109,6 +109,39 @@ impl ServerConfig {
     }
 }
 
+// ── Structured error response ───────────────────────────────────────────────
+
+pub const CODE_JOB_NOT_FOUND: &str = "JOB_NOT_FOUND";
+pub const CODE_JOB_LOST: &str = "JOB_LOST";
+pub const CODE_JOB_ERROR: &str = "JOB_ERROR";
+pub const CODE_JOB_FAILED: &str = "JOB_FAILED";
+pub const CODE_ACTION_CANCELLED: &str = "ACTION_CANCELLED";
+pub const CODE_ACTION_CLIENT_GONE: &str = "ACTION_CLIENT_GONE";
+
+#[derive(serde::Serialize)]
+struct ErrorBody {
+    code: &'static str,
+    message: String,
+    retryable: bool,
+}
+
+fn json_error(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+    retryable: bool,
+) -> Response {
+    (
+        status,
+        axum::Json(ErrorBody {
+            code,
+            message: message.into(),
+            retryable,
+        }),
+    )
+        .into_response()
+}
+
 // ── Axum state ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -118,6 +151,18 @@ struct AppState {
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
+
+/// Build the axum [`Router`] for the bits HTTP API.
+///
+/// Returns a fully wired router that can be passed directly to [`axum::serve`],
+/// or composed into a larger application.
+pub fn router(bits: Arc<Bits>, poll_timeout: Duration) -> Router {
+    let state = AppState { bits, poll_timeout };
+    Router::new()
+        .route("/job", post(submit_job))
+        .route("/job/{id}", get(poll_job))
+        .with_state(state)
+}
 
 /// Start the HTTP server. Runs until the process is terminated.
 pub async fn serve(
@@ -139,15 +184,7 @@ pub async fn serve_with_shutdown(
     let broker_id = bits.broker_id().to_string();
     let routes = bits.route_names().join(", ");
 
-    let state = AppState {
-        bits,
-        poll_timeout: config.poll_timeout(),
-    };
-
-    let app = Router::new()
-        .route("/job", post(submit_job))
-        .route("/job/{id}", get(poll_job))
-        .with_state(state);
+    let app = router(bits, config.poll_timeout());
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&bind_addr).await?;
@@ -188,8 +225,18 @@ async fn poll_by_id(id: &str, state: &AppState) -> Response {
             ],
         )
             .into_response(),
-        PollOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
-        PollOutcome::JobLost => StatusCode::GONE.into_response(),
+        PollOutcome::NotFound => json_error(
+            StatusCode::NOT_FOUND,
+            CODE_JOB_NOT_FOUND,
+            "job does not exist or was already consumed",
+            false,
+        ),
+        PollOutcome::JobLost => json_error(
+            StatusCode::GONE,
+            CODE_JOB_LOST,
+            "job existed but is no longer recoverable",
+            false,
+        ),
     }
 }
 
@@ -207,8 +254,26 @@ fn result_to_response(result: JobResult) -> Response {
         JobResult::Redirect { location, .. } => {
             (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
         }
-        JobResult::Error { message } => (StatusCode::BAD_REQUEST, message).into_response(),
-        JobResult::Failed { reason } => (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response(),
-        JobResult::Cancelled | JobResult::ClientGone => StatusCode::GONE.into_response(),
+        JobResult::Error { message } => {
+            json_error(StatusCode::BAD_REQUEST, CODE_JOB_ERROR, message, false)
+        }
+        JobResult::Failed { .. } => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            CODE_JOB_FAILED,
+            "internal server error",
+            false,
+        ),
+        JobResult::Cancelled => json_error(
+            StatusCode::GONE,
+            CODE_ACTION_CANCELLED,
+            "job was cancelled",
+            false,
+        ),
+        JobResult::ClientGone => json_error(
+            StatusCode::GONE,
+            CODE_ACTION_CLIENT_GONE,
+            "client disconnected",
+            false,
+        ),
     }
 }

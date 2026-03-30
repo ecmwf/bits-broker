@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-20319a8f.js";
+            window.path_to_searchindex_js = "searchindex-12718aac.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-03391b1f.js"></script>
+        <script src="toc-4f4f24e7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -176,6 +176,7 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="architecture"><a class="header" href="#architecture">Architecture</a></h1>
+<p><img src="images/bits_pipeline_tree.svg" alt="BITS pipeline routing architecture"></p>
 <h2 id="jobs"><a class="header" href="#jobs">Jobs</a></h2>
 <p>A <strong>job</strong> is the unit of work in BITS. When a client submits a request, BITS creates a job
 carrying:</p>
@@ -195,7 +196,7 @@ in sequence. There are three action types:</p>
 <p>A guard condition. It evaluates the job and either <strong>passes</strong> or <strong>rejects</strong>. A rejection stops
 the current route and causes the enclosing <code>switch</code> to try the next named route. Checks do not
 mutate the job.</p>
-<p>Examples: <code>check::has_role</code>, <code>check::has_license</code></p>
+<p>Examples: <code>check::match</code>, <code>check::has_license</code></p>
 <h3 id="transform"><a class="header" href="#transform">Transform</a></h3>
 <p>A mutation step. It modifies the job (for example, expanding request parameters or computing a
 cost), then continues through the pipeline.</p>
@@ -208,13 +209,28 @@ end with a target.</p>
 <p>A <code>switch</code> contains named routes and tries them <strong>in order</strong>, returning the result of the first
 route whose checks all pass. This is the branching primitive — use it to express conditional
 routing such as privileged versus public access paths. Switches can be nested inside routes.</p>
+<p>When all routes reject, the switch collects rejection reasons from non-silent actions and returns
+them to the user. Silent rejections (route-selection checks like <code>match</code>) are omitted; non-silent
+rejections (validation checks like <code>schedule_released</code>) are included so the user understands why
+a matched route still failed.</p>
 <h2 id="dispatcher"><a class="header" href="#dispatcher">Dispatcher</a></h2>
 <p>Any action step — check, transform, or target — can have an optional <strong>dispatcher</strong> that controls
 ordering and concurrency before the action runs.</p>
 <p>A dispatcher has two concerns:</p>
 <ul>
-<li><strong>Queue</strong> — controls which job runs next (<code>fifo</code> or <code>cost_weighted</code>).</li>
-<li><strong>Executor</strong> — controls how the work runs (<code>semaphore</code>, <code>thread_pool</code>, or <code>remote_pool</code>).</li>
+<li><strong>Queue</strong> — controls which job runs next (<code>fifo</code>, <code>cost_weighted</code>, or <code>age_priority</code>). The queue
+only stores <code>Job</code> metadata; it knows nothing about work futures or result types.</li>
+<li><strong>Executor</strong> — owns the scheduling loop that pulls jobs from the queue and runs the associated
+work (<code>async_pool</code>, <code>thread_pool</code>, or <code>remote_pool</code>).</li>
+</ul>
+<p>Each executor implements its own scheduling model:</p>
+<ul>
+<li><strong>Async pool</strong> — N Tokio tasks (one per concurrency slot) each loop on <code>queue.dequeue()</code> and run
+work inline.</li>
+<li><strong>Thread pool</strong> — dedicated OS threads each call <code>queue.dequeue()</code> directly, run work via
+<code>block_on</code>, and send results back.</li>
+<li><strong>Remote pool</strong> — the <code>/work</code> HTTP handler calls <code>queue.dequeue()</code> directly when a remote worker
+polls, so external workers pull work at their own pace with no intermediate feeder task.</li>
 </ul>
 <p>This makes scheduling behavior explicit at the step level rather than a global setting. See
 <a href="configuration.html">Configuration</a> for dispatcher syntax and options.</p>
@@ -240,25 +256,28 @@ is the mechanism by which other brokers determine that this instance is alive. S
 <a href="persistence-broker-leases.html">Broker Leases</a>.</p>
 <h3 id="started-per-dispatcher--at-config-parse-time"><a class="header" href="#started-per-dispatcher--at-config-parse-time">Started per dispatcher — at config parse time</a></h3>
 <p>Each action step with a <code>dispatcher:</code> block starts background workers when the configuration is
-loaded. The number of workers depends on the queue type and executor type configured.</p>
-<p><strong>Dispatcher dequeue worker (1 Tokio task per dispatcher)</strong>
-Waits for jobs to become available in the queue and hands each one to the executor. Spawns an
-additional short-lived Tokio task per dequeued job to run the action without blocking the
-dequeue loop.</p>
+loaded. The executor owns the scheduling loop — the number and kind of workers depend on the
+executor type configured.</p>
+<p><strong>Async pool scheduler (N Tokio tasks, if <code>executor: async_pool</code>)</strong>
+One Tokio task per <code>concurrency</code> slot. Each task loops: dequeue a job from the queue, run
+the work future inline, send the result back, then dequeue the next. Concurrency is controlled
+by the number of tasks.</p>
 <p><strong>Cost-weighted queue worker (1 Tokio task, if <code>queue: cost_weighted</code>)</strong>
 Maintains the priority heap and services dequeue requests in cost order. Not started when
 <code>queue: fifo</code> is used — FIFO uses a plain channel with no background task.</p>
 <p><strong>Thread pool workers (N OS threads, if <code>executor: thread_pool</code>)</strong>
-One OS thread per <code>concurrency</code> unit. Each thread blocks on the work channel and runs the action
-on that OS thread, using <code>block_on</code> against the shared Tokio runtime. Used to isolate
+One OS thread per <code>concurrency</code> unit. Each thread calls <code>queue.dequeue()</code> directly (via
+<code>block_on</code>), resolves the pending work, and runs it on that OS thread. Used to isolate
 CPU-bound or blocking work from the async scheduler. Not started unless <code>executor: thread_pool</code>
 is explicitly configured.</p>
 <p><strong>Remote pool HTTP server + heartbeat reaper (2 Tokio tasks, if <code>executor: remote_pool</code>)</strong>
-One task runs an axum HTTP server on the configured bind address (default <code>0.0.0.0:9001</code>) that
-external workers poll for jobs and post results back to. A second task scans in-progress jobs
-every <code>heartbeat_timeout / 2</code> seconds and evicts any worker that has stopped sending heartbeats.
-Only started when <code>executor: remote_pool</code> is configured (or when <code>target::remote</code> is used, which
-implies it).</p>
+One task runs an axum HTTP server on the configured bind address (default <code>0.0.0.0:9001</code>).
+The <code>/work</code> endpoint calls <code>queue.dequeue()</code> directly when a remote worker long-polls — there
+is no intermediate feeder task. A second task scans in-progress jobs every
+<code>heartbeat_timeout / 2</code> seconds and evicts any worker that has stopped sending heartbeats.
+Started when <code>executor: remote_pool</code> is configured (or when <code>target::remote</code> is used, which
+implies it). When routes are added programmatically via <code>add_route()</code>, remote pools are
+registered during that call and the worker server listener is started automatically.</p>
 <p>For the wire protocol and worker implementation contract, see
 <a href="external-workers.html">External Workers</a>.</p>
 <h3 id="started-per-submitted-job"><a class="header" href="#started-per-submitted-job">Started per submitted job</a></h3>
@@ -276,11 +295,11 @@ There is no separate timer task — the threshold logic lives inside this task v
 <tbody>
 <tr><td>Completed-job sweeper</td><td>OS thread</td><td>1 per <code>Bits</code> instance</td><td>Always, at startup</td></tr>
 <tr><td>Broker lease heartbeat</td><td>Tokio task</td><td>1 per <code>Bits</code> instance</td><td>At startup, if persistence configured</td></tr>
-<tr><td>Dispatcher dequeue worker</td><td>Tokio task</td><td>1 per dispatcher</td><td>At config parse, per dispatcher block</td></tr>
+<tr><td>Async pool scheduler</td><td>Tokio tasks</td><td>N per <code>async_pool</code> executor</td><td>At config parse, per dispatcher block</td></tr>
 <tr><td>Cost-weighted queue worker</td><td>Tokio task</td><td>1 per <code>cost_weighted</code> queue</td><td>At config parse, if <code>queue: cost_weighted</code></td></tr>
 <tr><td>Thread pool OS workers</td><td>OS threads</td><td>N per <code>thread_pool</code> executor</td><td>At config parse, if <code>executor: thread_pool</code></td></tr>
-<tr><td>Remote pool HTTP server</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, if <code>executor: remote_pool</code></td></tr>
-<tr><td>Remote pool heartbeat reaper</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, if <code>executor: remote_pool</code></td></tr>
+<tr><td>Remote pool HTTP server</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
+<tr><td>Remote pool heartbeat reaper</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
 <tr><td>Job dispatch + persist timer</td><td>Tokio task</td><td>1 per submitted job</td><td>Per <code>Bits::submit()</code></td></tr>
 </tbody>
 </table>
@@ -334,22 +353,6 @@ storage.</li>
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

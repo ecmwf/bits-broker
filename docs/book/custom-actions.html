@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-20319a8f.js";
+            window.path_to_searchindex_js = "searchindex-12718aac.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-03391b1f.js"></script>
+        <script src="toc-4f4f24e7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -194,7 +194,10 @@ types, the same YAML registration model, and the same job data model.</p>
 </table>
 </div>
 <p>A <code>Reject</code> from any action type stops the current route and causes the enclosing <code>switch</code> to
-try the next named branch.</p>
+try the next named branch. Each <code>Reject</code> carries a <code>silent</code> flag: when <code>silent</code> is <code>true</code> (the
+default for route-selection checks), the rejection reason is not shown to the user. When <code>silent</code>
+is <code>false</code> (the default for validation checks like <code>schedule_released</code>), the reason is included in
+the error if all routes fail. The <code>silent</code> config key on any action step can override this default.</p>
 <hr>
 <h2 id="the-job-object"><a class="header" href="#the-job-object">The Job object</a></h2>
 <p>All actions receive a job. The fields relevant to action authors:</p>
@@ -240,9 +243,11 @@ impl CheckAction for HasLicense {
             Some(l) if l == self.license =&gt; Ok(CheckResult::Pass),
             Some(l) =&gt; Ok(CheckResult::Reject {
                 reason: format!("license '{}' does not match required '{}'", l, self.license),
+                silent: true,
             }),
             None =&gt; Ok(CheckResult::Reject {
                 reason: "no license field found".to_string(),
+                silent: true,
             }),
         }
     }
@@ -405,6 +410,7 @@ impl TargetAction for MyHttpTarget {
         if response.status().is_client_error() {
             return Ok(TargetResult::Reject {
                 reason: format!("upstream rejected: {}", response.status()),
+                silent: true,
             });
         }
         if !response.status().is_success() {
@@ -481,7 +487,8 @@ bits::register_action!(transform, "my_transform", MyTransform);
 bits::register_action!(target,    "my_target",    MyTarget);
 <span class="boring">}</span></code></pre>
 <p>The macro deserialises the YAML config block into your struct via <code>serde_json</code>. Your struct must
-derive <code>Deserialize</code>. All YAML keys except <code>type</code> and <code>dispatcher</code> are passed as config fields.</p>
+derive <code>Deserialize</code>. All YAML keys except <code>type</code>, <code>dispatcher</code>, and <code>silent</code> are passed as
+config fields.</p>
 <h3 id="crate-setup"><a class="header" href="#crate-setup">Crate setup</a></h3>
 <p>Actions can live in any crate that depends on <code>bits</code>. A minimal <code>Cargo.toml</code>:</p>
 <pre><code class="language-toml">[dependencies]
@@ -495,8 +502,10 @@ inventory   = "0.3"
 initialisation, which only fires if the crate is linked. If the action crate is not a direct
 dependency of the binary, add an explicit <code>use</code> to force linkage.</p>
 <h3 id="error-handling"><a class="header" href="#error-handling">Error handling</a></h3>
-<p>Prefer returning <code>Reject { reason }</code> for expected policy rejections (wrong role, wrong class,
-etc.). Reserve <code>Err(ActionError)</code> for unexpected system failures.</p>
+<p>Prefer returning <code>Reject { reason, silent }</code> for expected policy rejections. Set <code>silent: true</code>
+for route-selection logic (wrong class, missing key) and <code>silent: false</code> for validation failures
+the user should see (data not released, date out of range). Reserve <code>Err(ActionError)</code> for
+unexpected system failures.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -532,16 +541,18 @@ class MyTarget(TargetAction):
 register_action("my_target", MyTarget)          # register first
 bits = await Bits.from_config(config_yaml)      # then load config
 </code></pre>
-<p>YAML config keys (excluding <code>type</code> and <code>dispatcher</code>) are forwarded to <code>__init__</code> as keyword
-arguments when the action is instantiated at config-load time:</p>
+<p>YAML config keys (excluding <code>type</code>, <code>dispatcher</code>, and <code>silent</code>) are forwarded to <code>__init__</code> as
+keyword arguments when the action is instantiated at config-load time:</p>
 <pre><code class="language-yaml">checks:
   gate:
     type: my_check
     role: admin        # → MyCheck(role="admin")
 </code></pre>
 <h3 id="error-handling-1"><a class="header" href="#error-handling-1">Error handling</a></h3>
-<p>Prefer returning <code>Reject(reason)</code> for expected policy rejections. For unexpected failures,
-raise an exception — it surfaces as a <code>Failed</code> result to the client.</p>
+<p>Prefer returning <code>Reject(reason)</code> for expected policy rejections. Pass <code>silent=False</code> when the
+rejection reason should reach the user (e.g. data not yet released); the default is <code>silent=True</code>
+(route-selection). For unexpected failures, raise an exception — it surfaces as a <code>Failed</code> result
+to the client.</p>
 </div>
 
 </div>
@@ -582,22 +593,6 @@ raise an exception — it surfaces as a <code>Failed</code> result to the client
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>

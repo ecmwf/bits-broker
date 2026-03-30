@@ -9,6 +9,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bits::db::{PersistenceStore, memory::MemoryStore};
+use bits::server::CODE_JOB_ERROR;
 use bits::{Job, JobResult, PollOutcome};
 use common::recovery::{
     BackendFailingStore, LeaseLookupFailingStore, TargetBehavior, insert_job_record,
@@ -188,7 +189,11 @@ async fn active_lease_proxies_error_result() {
     .await;
 
     match wait_for_ready(&claimant.bits, &job_id, Duration::from_secs(1)).await {
-        JobResult::Error { message } => assert_eq!(message, "bad request"),
+        JobResult::Error { message } => assert_eq!(
+            message,
+            json!({"code": CODE_JOB_ERROR, "message": "bad request", "retryable": false})
+                .to_string()
+        ),
         other => panic!("expected error result, got {other:?}"),
     }
 }

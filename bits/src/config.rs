@@ -222,6 +222,15 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         );
     }
 
+    const KNOWN_SECTIONS: &[&str] = &["bits", "server", "routes", "checks", "transforms", "targets"];
+    if let Some(map) = raw.as_object() {
+        for key in map.keys() {
+            if !KNOWN_SECTIONS.contains(&key.as_str()) {
+                tracing::warn!("unknown top-level config section '{key}' will be ignored");
+            }
+        }
+    }
+
     let bits_cfg: BitsConfig = raw
         .get("bits")
         .cloned()

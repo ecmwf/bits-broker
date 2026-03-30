@@ -55,7 +55,7 @@ runs `claim_with_backoff`:
 
 - Budget: `min(requested_timeout, 2 s)`
 - Backoff: starts at 100 ms, doubles each retry, capped at 1 s
-- Uses an optimistic transaction in TiKV; up to 2 commit retries before returning `Conflict`
+- Uses backend-specific CAS: optimistic transaction in TiKV, revision-based update with retry in NATS
 
 On a successful claim, `Job::restore` reconstructs the job from the durable record:
 

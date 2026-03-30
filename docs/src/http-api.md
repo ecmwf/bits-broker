@@ -1,7 +1,15 @@
 # HTTP Server API
 
-BITS includes a built-in HTTP server for submitting and polling jobs. The server
-is started by calling `bits::server::serve()` or
+BITS is a library first. The core API (`Bits::submit()`, `Bits::poll()`,
+`Bits::cancel()`) is designed for you to embed in your own application and
+build whatever HTTP/gRPC/CLI interface makes sense for your use case.
+
+The built-in HTTP server described here is a thin wrapper around that API. It
+provides a working submit/poll interface out of the box and serves as a
+reference implementation for building your own. The source is in
+`bits/src/server.rs`.
+
+The server is started by calling `bits::server::serve()` or
 `bits::server::serve_with_shutdown()`.
 
 ## Configuration

@@ -109,6 +109,47 @@ impl ServerConfig {
     }
 }
 
+// ── Structured error response ───────────────────────────────────────────────
+
+pub const CODE_JOB_NOT_FOUND: &str = "JOB_NOT_FOUND";
+pub const CODE_JOB_LOST: &str = "JOB_LOST";
+pub const CODE_JOB_ERROR: &str = "JOB_ERROR";
+pub const CODE_JOB_FAILED: &str = "JOB_FAILED";
+pub const CODE_ACTION_CANCELLED: &str = "ACTION_CANCELLED";
+pub const CODE_ACTION_CLIENT_GONE: &str = "ACTION_CLIENT_GONE";
+
+#[derive(serde::Serialize)]
+struct ErrorBody {
+    code: &'static str,
+    message: String,
+    retryable: bool,
+}
+
+fn sanitize_failure_reason(reason: &str) -> String {
+    if reason.contains('/') || reason.contains("panic") || reason.len() > 200 {
+        "internal server error".to_string()
+    } else {
+        reason.to_string()
+    }
+}
+
+fn json_error(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+    retryable: bool,
+) -> Response {
+    (
+        status,
+        axum::Json(ErrorBody {
+            code,
+            message: message.into(),
+            retryable,
+        }),
+    )
+        .into_response()
+}
+
 // ── Axum state ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -188,8 +229,18 @@ async fn poll_by_id(id: &str, state: &AppState) -> Response {
             ],
         )
             .into_response(),
-        PollOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
-        PollOutcome::JobLost => StatusCode::GONE.into_response(),
+        PollOutcome::NotFound => json_error(
+            StatusCode::NOT_FOUND,
+            CODE_JOB_NOT_FOUND,
+            "job does not exist or was already consumed",
+            false,
+        ),
+        PollOutcome::JobLost => json_error(
+            StatusCode::GONE,
+            CODE_JOB_LOST,
+            "job existed but is no longer recoverable",
+            false,
+        ),
     }
 }
 
@@ -207,8 +258,26 @@ fn result_to_response(result: JobResult) -> Response {
         JobResult::Redirect { location, .. } => {
             (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
         }
-        JobResult::Error { message } => (StatusCode::BAD_REQUEST, message).into_response(),
-        JobResult::Failed { reason } => (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response(),
-        JobResult::Cancelled | JobResult::ClientGone => StatusCode::GONE.into_response(),
+        JobResult::Error { message } => {
+            json_error(StatusCode::BAD_REQUEST, CODE_JOB_ERROR, message, false)
+        }
+        JobResult::Failed { reason } => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            CODE_JOB_FAILED,
+            sanitize_failure_reason(&reason),
+            false,
+        ),
+        JobResult::Cancelled => json_error(
+            StatusCode::GONE,
+            CODE_ACTION_CANCELLED,
+            "job was cancelled",
+            false,
+        ),
+        JobResult::ClientGone => json_error(
+            StatusCode::GONE,
+            CODE_ACTION_CLIENT_GONE,
+            "client disconnected",
+            false,
+        ),
     }
 }

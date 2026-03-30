@@ -41,9 +41,6 @@
 Define your routing policy in YAML:
 
 ```yaml
-bits:
-  persist_after_secs: 10.0
-
 checks:
   is_operational:
     type: match
@@ -215,7 +212,7 @@ routes:
 | Field | Values | Default |
 |-------|--------|---------|
 | `queue` | `fifo`, `cost_weighted`, `age_priority` | `fifo` |
-| `executor` | `async_pool`, `thread_pool`, `remote_pool`* | `async_pool` |
+| `executor.type` | `async_pool`, `thread_pool`, `remote_pool`* | `async_pool` |
 | `executor.concurrency` | positive integer | 256 |
 
 \* `remote_pool` is only valid with `target::remote`.

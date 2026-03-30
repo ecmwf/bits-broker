@@ -108,9 +108,12 @@ impl ServerConfig {
     ///
     /// # Panics
     ///
-    /// Panics if `poll_timeout_secs` is negative, NaN, or infinite.
+    /// Panics if `poll_timeout_secs` is negative, NaN, infinite, or a finite
+    /// value large enough to overflow [`Duration`].
+    ///
     /// Configs produced by [`parse_bootstrap`](crate::parse_bootstrap) are
-    /// always validated, so this only affects manually constructed instances.
+    /// always validated, so this only affects manually constructed instances
+    /// or those deserialized outside of `parse_bootstrap` without validation.
     pub fn poll_timeout(&self) -> Duration {
         Duration::from_secs_f64(self.poll_timeout_secs)
     }

@@ -119,7 +119,10 @@ impl<T: Send + 'static> Dispatcher<T> {
         const DEFAULT_POOL_SIZE: usize = 256;
         let executor: Arc<dyn Executor<T>> = match executor {
             None => {
-                tracing::debug!("no executor specified, defaulting to async_pool({})", DEFAULT_POOL_SIZE);
+                tracing::debug!(
+                    "no executor specified, defaulting to async_pool({})",
+                    DEFAULT_POOL_SIZE
+                );
                 Arc::new(AsyncPoolExecutor::new(DEFAULT_POOL_SIZE))
             }
             Some(ExecutorKind::AsyncPool { concurrency: None }) => {

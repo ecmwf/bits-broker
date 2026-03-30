@@ -9,6 +9,10 @@ use axum::extract::{Json, Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use bits::server::{
+    CODE_ACTION_CANCELLED, CODE_ACTION_CLIENT_GONE, CODE_JOB_ERROR, CODE_JOB_FAILED, CODE_JOB_LOST,
+    CODE_JOB_NOT_FOUND,
+};
 use bits::{Bits, Job, JobResult, PollOutcome};
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -32,6 +36,21 @@ async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Resp
     poll_by_id(&id, &state).await
 }
 
+fn json_error(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+    retryable: bool,
+) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json".to_string())],
+        serde_json::json!({ "code": code, "message": message.into(), "retryable": retryable })
+            .to_string(),
+    )
+        .into_response()
+}
+
 async fn poll_by_id(id: &str, state: &AppState) -> Response {
     match state.bits.poll(id, Some(state.poll_timeout)).await {
         PollOutcome::Ready(result) => match result {
@@ -47,11 +66,27 @@ async fn poll_by_id(id: &str, state: &AppState) -> Response {
             JobResult::Redirect { location, .. } => {
                 (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
             }
-            JobResult::Error { message } => (StatusCode::BAD_REQUEST, message).into_response(),
-            JobResult::Failed { reason } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response()
+            JobResult::Error { message } => {
+                json_error(StatusCode::BAD_REQUEST, CODE_JOB_ERROR, message, false)
             }
-            JobResult::Cancelled | JobResult::ClientGone => StatusCode::GONE.into_response(),
+            JobResult::Failed { reason } => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                CODE_JOB_FAILED,
+                reason,
+                false,
+            ),
+            JobResult::Cancelled => json_error(
+                StatusCode::GONE,
+                CODE_ACTION_CANCELLED,
+                "job was cancelled",
+                false,
+            ),
+            JobResult::ClientGone => json_error(
+                StatusCode::GONE,
+                CODE_ACTION_CLIENT_GONE,
+                "client disconnected",
+                false,
+            ),
         },
         PollOutcome::Pending { id } => (
             StatusCode::SEE_OTHER,
@@ -61,8 +96,18 @@ async fn poll_by_id(id: &str, state: &AppState) -> Response {
             ],
         )
             .into_response(),
-        PollOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
-        PollOutcome::JobLost => StatusCode::GONE.into_response(),
+        PollOutcome::NotFound => json_error(
+            StatusCode::NOT_FOUND,
+            CODE_JOB_NOT_FOUND,
+            "job does not exist or was already consumed",
+            false,
+        ),
+        PollOutcome::JobLost => json_error(
+            StatusCode::GONE,
+            CODE_JOB_LOST,
+            "job existed but is no longer recoverable",
+            false,
+        ),
     }
 }
 
@@ -385,6 +430,7 @@ routes:
 
     let handle = server.bits.submit(Job::new(serde_json::json!({})));
     server.bits.cancel(&handle.id);
+    tokio::time::sleep(Duration::from_millis(600)).await;
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -402,4 +448,55 @@ routes:
         reqwest::StatusCode::GONE,
         "cancelled job should return 410 GONE"
     );
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/json"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], CODE_ACTION_CANCELLED);
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn not_found_returns_json_error_body() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let config = r#"
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+    let server = start_server(config, Duration::from_secs(5)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/job/does-not-exist"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/json"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], CODE_JOB_NOT_FOUND);
+    assert_eq!(body["retryable"], false);
+    assert!(body["message"].as_str().unwrap().contains("does not exist"));
 }

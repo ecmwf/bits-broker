@@ -272,8 +272,8 @@ The broker cannot connect to the NATS server.
 The broker cannot establish a connection to the persistence backend within
 the 10-second connection timeout.
 
-**Diagnostic**: Look for `PERSISTENCE_BACKEND` errors with
-`"timed out after 10s"` or backend-specific timeout messages.
+**Diagnostic**: Look for `PERSISTENCE_BACKEND` errors with `timed out after 10s`
+or backend-specific timeout messages.
 
 **Solutions**:
 - Verify the backend is running and the URL/endpoints are correct

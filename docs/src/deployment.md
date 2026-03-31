@@ -379,7 +379,7 @@ from blocking the broker indefinitely:
 | Connection | Default timeout | Scope |
 |------------|----------------|-------|
 | HTTP targets (`target::http`) | 30s connect + 30s idle-read | Per-chunk; large streams are not capped |
-| Internal broker-to-broker proxy | 10s client-level, 2.5s per-request | Per-request `internal_poll_timeout_secs` overrides downward |
+| Internal broker-to-broker proxy | 10s client-level, 2.5s per-request | Per-request `internal_poll_timeout_secs` overrides client default |
 | TiKV client initialization | 10s per attempt | First DB operation; retries automatically on next use |
 | NATS connect + bucket setup | 10s per attempt, 6 attempts | Startup only; exponential backoff 1/2/4/8/10/10s (~85s total budget) |
 

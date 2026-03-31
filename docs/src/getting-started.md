@@ -12,7 +12,7 @@ The repository is a Cargo workspace with these crates:
 | Crate | Purpose |
 |-------|---------|
 | `bits` | Core library: routing engine, pipeline execution, dispatcher, persistence |
-| `bits-ecmwf` | Application crate built on the core library with ECMWF-specific actions |
+| `bits-server` | Standalone HTTP server binary wrapping the core library |
 | `bits-py` | Asyncio-native Python extension (built with `maturin`) |
 
 ## Build and test

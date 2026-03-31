@@ -43,11 +43,10 @@ end with a target.
 Examples: `target::http`, `target::remote`
 
 > **Note:** The core `bits` crate ships only `target::http` and
-> `target::remote`. All other actions (`match`, `has_license`,
+> `target::remote`. Domain-specific actions (`match`, `has_license`,
 > `metkit_expansion`, `schedule_released`, etc.) are provided by the
-> `bits-ecmwf` application crate. Your application registers its own
-> actions using `register_action!`. See
-> [Custom Actions](custom-actions.md).
+> host application. Register your own actions using `register_action!`.
+> See [Custom Actions](custom-actions.md).
 
 ## Switch
 
@@ -92,7 +91,7 @@ interaction with the host's thread model.
 
 ### Tokio async runtime
 
-The `bits-ecmwf` binary uses `#[tokio::main]` with the default multi-thread scheduler. Tokio
+The `bits-server` binary uses `#[tokio::main]` with the default multi-thread scheduler. Tokio
 spawns one worker thread per logical CPU. These are OS threads managed entirely by Tokio and
 are not counted in the items below.
 

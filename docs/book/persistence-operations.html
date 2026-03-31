@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -261,7 +262,7 @@ from local in-memory state, avoiding proxy or recovery paths entirely.</p>
 <tr><td>Store unreachable at claim (repeated)</td><td>Exponential backoff (100 ms → 1 s), budget <code>min(timeout, 2 s)</code>. Returns <code>Pending</code> on exhaustion.</td></tr>
 <tr><td>Two brokers claim the same job simultaneously</td><td>Backend-specific CAS ensures only one wins (TiKV: optimistic transaction, NATS: revision-based update). Loser returns <code>Pending</code>; next poll finds the new owner.</td></tr>
 <tr><td><code>upsert_job</code> fails at persist threshold</td><td>Logged as a warning; job continues in memory. If the broker subsequently crashes, the job is unrecoverable.</td></tr>
-<tr><td><code>delete_job</code> fails at job completion</td><td>Error is silently ignored. The stale record remains in the store but is harmless — the reading broker will see an active lease for the owning broker.</td></tr>
+<tr><td><code>delete_job</code> fails at job completion</td><td>Logged as a warning (<code>durable record cleanup failed</code>). The stale record remains in the store. While the owning broker’s lease is active, peers still see that lease. If the owner later loses its lease, the stale record may be treated as recoverable.</td></tr>
 <tr><td>Broker crashes without lease cleanup</td><td>Lease expires after <code>broker_lease_ttl_secs</code> (default 30 s). Jobs become recoverable after that window. NATS leases auto-expire via bucket <code>max_age</code>; TiKV lease records require application-level expiry checks.</td></tr>
 <tr><td><code>persistence.type</code> set, feature not compiled</td><td><code>Bits::from_config</code> returns an error immediately at startup.</td></tr>
 <tr><td>Missing required backend fields</td><td><code>Bits::from_config</code> returns an error immediately at startup (e.g., empty <code>endpoints</code> for TiKV, empty <code>url</code> for NATS).</td></tr>
@@ -277,6 +278,9 @@ from local in-memory state, avoiding proxy or recovery paths entirely.</p>
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
+                            <a rel="next prefetch" href="deployment.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
 
                         <div style="clear: both"></div>
                     </nav>
@@ -288,6 +292,9 @@ from local in-memory state, avoiding proxy or recovery paths entirely.</p>
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
+                    <a rel="next prefetch" href="deployment.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
             </nav>
 
         </div>
@@ -315,6 +322,8 @@ from local in-memory state, avoiding proxy or recovery paths entirely.</p>
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

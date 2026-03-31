@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Architecture - BITS Documentation</title>
+        <title>Data Flow - BITS Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -176,165 +176,234 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="architecture"><a class="header" href="#architecture">Architecture</a></h1>
-<p><img src="images/bits_pipeline_tree.svg" alt="BITS pipeline routing architecture"></p>
-<h2 id="jobs"><a class="header" href="#jobs">Jobs</a></h2>
-<p>A <strong>job</strong> is the unit of work in BITS. When a client submits a request, BITS creates a job
-carrying:</p>
+                        <h1 id="data-flow"><a class="header" href="#data-flow">Data Flow</a></h1>
+<p>This page explains how data moves through BITS, from client submission to
+backend dispatch and back. Understanding the data flow helps you debug routing
+issues, write custom actions, and reason about what each component sees.</p>
+<h2 id="the-life-of-a-job"><a class="header" href="#the-life-of-a-job">The life of a job</a></h2>
+<p>When a client submits a request, BITS creates a Job and routes it through a
+pipeline of checks, transforms, and a terminal target:</p>
+<pre class="mermaid">sequenceDiagram
+    participant C as Client
+    participant B as BITS Broker
+    participant T as Backend
+
+    C-&gt;&gt;B: POST /job {"class":"od","date":"2024-01-15"}
+    Note over B: Create Job&lt;br/&gt;id = broker-1-abc~def&lt;br/&gt;original_request = frozen copy&lt;br/&gt;request = working copy
+    Note over B: Spawn pipeline task
+    Note over B: Pipeline:&lt;br/&gt;check → pass&lt;br/&gt;transform → mutate request&lt;br/&gt;target → dispatch
+    B-&gt;&gt;T: POST http://backend/api&lt;br/&gt;Body: job.request (after transforms)
+    T--&gt;&gt;B: 200 OK + result bytes
+    Note over B: Write result to Job&lt;br/&gt;Notify waiting pollers
+    B--&gt;&gt;C: 200 OK (stream body)
+</pre>
+
+<p>Key points:</p>
 <ul>
-<li><code>original_request</code> - the payload exactly as submitted. Never mutated. Used as the restart
-point if the job needs to be recovered after a broker failure.</li>
-<li><code>request</code> - a working copy of the payload, mutated by transform actions as the job flows
-through the pipeline.</li>
-<li><code>metadata</code> - mutable annotations added by transforms during routing (for example, a computed
-cost value).</li>
-<li><code>user</code> - identity of the submitting user.</li>
+<li><code>submit()</code> is non-blocking. It creates the Job and spawns a background
+task, returning immediately with a <code>JobHandle</code>.</li>
+<li><code>poll()</code> is a long-poll. It waits for the result or times out.</li>
+<li>The pipeline runs in a separate async task from the poll.</li>
+<li>Results are delivered via a shared <code>Notify</code>. The poll task sleeps until
+the pipeline writes the result and wakes it.</li>
 </ul>
-<h2 id="pipelines"><a class="header" href="#pipelines">Pipelines</a></h2>
-<p>Every job flows through a <strong>pipeline</strong>: an ordered list of actions. BITS evaluates each action
-in sequence. There are three action types:</p>
-<h3 id="check"><a class="header" href="#check">Check</a></h3>
-<p>A guard condition. It evaluates the job and either <strong>passes</strong> or <strong>rejects</strong>. A rejection stops
-the current route and causes the enclosing <code>switch</code> to try the next named route. Checks do not
-mutate the job.</p>
-<p>Examples: <code>check::match</code>, <code>check::has_license</code></p>
-<h3 id="transform"><a class="header" href="#transform">Transform</a></h3>
-<p>A mutation step. It modifies the job (for example, expanding request parameters or computing a
-cost), then continues through the pipeline.</p>
-<p>Examples: <code>transform::metkit_expansion</code>, <code>transform::cost</code></p>
-<h3 id="target"><a class="header" href="#target">Target</a></h3>
-<p>The terminal dispatch step. It sends the job to a backend and returns a result. Every route must
-end with a target.</p>
-<p>Examples: <code>target::http</code>, <code>target::remote</code></p>
-<blockquote>
-<p><strong>Note:</strong> The core <code>bits</code> crate ships only <code>target::http</code> and
-<code>target::remote</code>. Domain-specific actions (<code>match</code>, <code>has_license</code>,
-<code>metkit_expansion</code>, <code>schedule_released</code>, etc.) are provided by the
-host application. Register your own actions using <code>register_action!</code>.
-See <a href="custom-actions.html">Custom Actions</a>.</p>
-</blockquote>
-<h2 id="switch"><a class="header" href="#switch">Switch</a></h2>
-<p>A <code>switch</code> contains named routes and tries them <strong>in order</strong>, returning the result of the first
-route whose checks all pass. This is the branching primitive. Use it to express conditional
-routing such as privileged versus public access paths. Switches can be nested inside routes.</p>
-<p>When all routes reject, the switch collects rejection reasons from non-silent actions and returns
-them to the user. Silent rejections (route-selection checks like <code>match</code>) are omitted; non-silent
-rejections (validation checks like <code>schedule_released</code>) are included so the user understands why
-a matched route still failed.</p>
-<h2 id="dispatcher"><a class="header" href="#dispatcher">Dispatcher</a></h2>
-<p>Any action step (check, transform, or target) can have an optional <strong>dispatcher</strong> that controls
-ordering and concurrency before the action runs.</p>
-<p>A dispatcher has two concerns:</p>
+<h2 id="what-the-backend-receives"><a class="header" href="#what-the-backend-receives">What the backend receives</a></h2>
+<p>When <code>target::http</code> dispatches a job, it takes the job’s <code>request</code> field and
+POSTs it as the JSON body:</p>
+<pre><code class="language-http">POST /api HTTP/1.1
+Host: my-backend
+Content-Type: application/json
+
+{"class": "od", "date": "2024-01-15"}
+</code></pre>
+<p>The request body is exactly <code>job.request</code>, the working copy after any
+transforms. Nothing is added or wrapped. HTTP headers like <code>Content-Type</code>
+are set automatically by the HTTP client.</p>
+<h2 id="what-transforms-do-to-the-data"><a class="header" href="#what-transforms-do-to-the-data">What transforms do to the data</a></h2>
+<p>Transforms can mutate <code>request</code>, <code>metadata</code>, or both. Each transform in the
+pipeline sees the changes from the previous one:</p>
+<pre class="mermaid">flowchart TD
+    A["Client submits&lt;br/&gt;{class: od, param: 2t/msl}"]
+    A --&gt; B["Transform: coercion"]
+    B --&gt; C["request becomes&lt;br/&gt;{class: od, param: [2t, msl]}"]
+    C --&gt; D["Transform: metkit_expansion"]
+    D --&gt; E["metadata becomes&lt;br/&gt;{metkit_expanded: true}"]
+    E --&gt; F["Target dispatches request to backend"]
+</pre>
+
+<p>The <code>original_request</code> is never touched. It stays as the client submitted
+it. This frozen copy is used to restart the job from scratch if the broker
+crashes and another broker recovers it.</p>
+<h2 id="two-http-servers-two-data-paths"><a class="header" href="#two-http-servers-two-data-paths">Two HTTP servers, two data paths</a></h2>
+<p>BITS runs two independent HTTP servers for different audiences:</p>
+<pre class="mermaid">graph LR
+    subgraph "BITS Broker"
+        subgraph "Client Server :8080"
+            A1["POST /job"]
+            A2["GET /job/{id}"]
+        end
+        subgraph "Worker Server :9001"
+            B1["GET /mars/work"]
+            B2["POST /mars/complete/..."]
+        end
+    end
+    Users["API Clients"] --&gt; A1
+    Users --&gt; A2
+    Workers["External Workers"] --&gt; B1
+    Workers --&gt; B2
+</pre>
+
+<p><strong>Client server</strong> (port 8080): Receives job submissions from end users and
+serves poll results. Configured under <code>server:</code> in the YAML.</p>
+<p><strong>Worker server</strong> (port 9001): Serves work to external pull-based workers.
+Configured under <code>bits.worker_server:</code> in the YAML. Only started when
+<code>target::remote</code> is used.</p>
+<h2 id="push-model-targethttp"><a class="header" href="#push-model-targethttp">Push model: target::http</a></h2>
+<p>BITS calls the backend:</p>
+<pre class="mermaid">sequenceDiagram
+    participant B as BITS Broker
+    participant S as Backend Service
+
+    B-&gt;&gt;S: POST http://backend/api&lt;br/&gt;Body: job.request (JSON)
+    alt 2xx
+        S--&gt;&gt;B: Body: result data
+        Note over B: JobResult::Success { stream }
+    else 4xx (route rejection)
+        S--&gt;&gt;B: Body: reason
+        Note over B: TargetResult::Reject&lt;br/&gt;Switch tries next route
+    else 5xx / transport error
+        S--&gt;&gt;B: failure
+        Note over B: JobResult::Failed { reason }
+    end
+</pre>
+
+<p>A <code>4xx</code> from the backend does not immediately fail the job. It becomes a
+route rejection. If there are more routes in the switch, the next route is
+tried. Only if all routes reject does the client see the rejection.</p>
+<h2 id="pull-model-targetremote"><a class="header" href="#pull-model-targetremote">Pull model: target::remote</a></h2>
+<p>Workers call BITS:</p>
+<pre class="mermaid">sequenceDiagram
+    participant W as Worker
+    participant B as BITS Broker :9001
+
+    W-&gt;&gt;B: GET /mars/work?timeout_ms=30000
+    Note over B: Dequeue job from queue
+    B--&gt;&gt;W: 200 {job_id, request, user, metadata}
+
+    loop Every N seconds
+        W-&gt;&gt;B: POST /mars/heartbeat/{job_id}
+        B--&gt;&gt;W: 200 OK
+    end
+
+    W-&gt;&gt;B: POST /mars/complete/data/{job_id}&lt;br/&gt;Body: result bytes
+    B--&gt;&gt;W: 200 OK
+    Note over B: Result delivered to waiting poller
+</pre>
+
+<p>When a worker receives a job, the response body contains:</p>
+<pre><code class="language-json">{
+  "job_id": "broker-1-abc123~def456",
+  "request": {"class": "od", "param": ["2t", "msl"]},
+  "user": {"name": "alice", "group": "research"},
+  "metadata": {"cost": 42, "metkit_expanded": true}
+}
+</code></pre>
 <ul>
-<li><strong>Queue</strong>: controls which job runs next (<code>fifo</code>, <code>cost_weighted</code>, or <code>age_priority</code>). The queue
-only stores <code>Job</code> metadata; it knows nothing about work futures or result types.</li>
-<li><strong>Executor</strong>: owns the scheduling loop that pulls jobs from the queue and runs the associated
-work (<code>async_pool</code>, <code>thread_pool</code>, or <code>remote_pool</code>).</li>
+<li><code>request</code> is the working copy after transforms.</li>
+<li><code>user</code> and <code>metadata</code> are passed through as-is.</li>
+<li><code>job_id</code> is used for heartbeats and completion calls.</li>
 </ul>
-<p>Each executor implements its own scheduling model:</p>
-<ul>
-<li><strong>Async pool</strong> - N Tokio tasks (one per concurrency slot) each loop on <code>queue.dequeue()</code> and run
-work inline.</li>
-<li><strong>Thread pool</strong> - dedicated OS threads each call <code>queue.dequeue()</code> directly, run work via
-<code>block_on</code>, and send results back.</li>
-<li><strong>Remote pool</strong> - the <code>/work</code> HTTP handler calls <code>queue.dequeue()</code> directly when a remote worker
-polls, so external workers pull work at their own pace with no intermediate feeder task.</li>
-</ul>
-<p>This makes scheduling behavior explicit at the step level rather than a global setting. See
-<a href="configuration.html">Configuration</a> for dispatcher syntax and options.</p>
-<h2 id="background-threads-and-tasks"><a class="header" href="#background-threads-and-tasks">Background threads and tasks</a></h2>
-<p>BITS starts background threads and async tasks at startup and per-job. Operators should be
-aware of these when reasoning about resource usage, process behaviour on shutdown, and
-interaction with the host’s thread model.</p>
-<h3 id="tokio-async-runtime"><a class="header" href="#tokio-async-runtime">Tokio async runtime</a></h3>
-<p>The <code>bits-server</code> binary uses <code>#[tokio::main]</code> with the default multi-thread scheduler. Tokio
-spawns one worker thread per logical CPU. These are OS threads managed entirely by Tokio and
-are not counted in the items below.</p>
-<h3 id="started-at-bitsfrom_config---always"><a class="header" href="#started-at-bitsfrom_config---always">Started at <code>Bits::from_config()</code> - always</a></h3>
-<p><strong>Completed-job sweeper (1 OS thread)</strong>
-A single <code>std::thread::spawn</code> thread that wakes every 5 seconds (configurable via
-<code>bits.job_cleanup_interval_ms</code>) and removes finished jobs from the in-memory map once no client
-is polling them. A real blocking OS thread is used deliberately so it cannot interfere with the
-Tokio scheduler even if it is saturated.</p>
-<h3 id="started-at-bitsfrom_config---only-when-persistence-is-configured"><a class="header" href="#started-at-bitsfrom_config---only-when-persistence-is-configured">Started at <code>Bits::from_config()</code> - only when persistence is configured</a></h3>
-<p><strong>Broker lease heartbeat (1 Tokio task)</strong>
-A long-running async task that periodically upserts this broker’s lease record in the persistence
-store. It renews at half the configured lease TTL (minimum 100 ms between renewals). This task
-is the mechanism by which other brokers determine that this instance is alive. See
-<a href="persistence-broker-leases.html">Broker Leases</a>.</p>
-<h3 id="started-per-dispatcher---at-config-parse-time"><a class="header" href="#started-per-dispatcher---at-config-parse-time">Started per dispatcher - at config parse time</a></h3>
-<p>Each action step with a <code>dispatcher:</code> block starts background workers when the configuration is
-loaded. The executor owns the scheduling loop. The number and kind of workers depend on the
-executor type configured.</p>
-<p><strong>Async pool scheduler (N Tokio tasks, if <code>executor: async_pool</code>)</strong>
-One Tokio task per <code>concurrency</code> slot. Each task loops: dequeue a job from the queue, run
-the work future inline, send the result back, then dequeue the next. Concurrency is controlled
-by the number of tasks.</p>
-<p><strong>Cost-weighted queue worker (1 Tokio task, if <code>queue: cost_weighted</code>)</strong>
-Maintains the priority heap and services dequeue requests in cost order. Not started when
-<code>queue: fifo</code> is used. FIFO uses a plain channel with no background task.</p>
-<p><strong>Thread pool workers (N OS threads, if <code>executor: thread_pool</code>)</strong>
-One OS thread per <code>concurrency</code> unit. Each thread calls <code>queue.dequeue()</code> directly (via
-<code>block_on</code>), resolves the pending work, and runs it on that OS thread. Used to isolate
-CPU-bound or blocking work from the async scheduler. Not started unless <code>executor: thread_pool</code>
-is explicitly configured.</p>
-<p><strong>Remote pool HTTP server + heartbeat reaper (2 Tokio tasks, if <code>executor: remote_pool</code>)</strong>
-One task runs an axum HTTP server on the configured bind address (default <code>0.0.0.0:9001</code>).
-The <code>/work</code> endpoint calls <code>queue.dequeue()</code> directly when a remote worker long-polls. There
-is no intermediate feeder task. A second task scans in-progress jobs every
-<code>heartbeat_timeout / 2</code> seconds and evicts any worker that has stopped sending heartbeats.
-Started when <code>executor: remote_pool</code> is configured (or when <code>target::remote</code> is used, which
-implies it). When routes are added programmatically via <code>add_route()</code>, remote pools are
-registered during that call and the worker server listener is started automatically.</p>
-<p>For the wire protocol and worker implementation contract, see
-<a href="external-workers.html">External Workers</a>.</p>
-<h3 id="started-per-submitted-job"><a class="header" href="#started-per-submitted-job">Started per submitted job</a></h3>
-<p><strong>Job dispatch task (1 Tokio task per job)</strong>
-Runs the full pipeline for one job. If <code>bits.persist_after_ms</code> is configured, this task also
-handles the persistence threshold: it races the pipeline against a timer, and if the timer fires
-first it writes the durable job record before continuing to wait for the pipeline to complete.
-There is no separate timer task. The threshold logic lives inside this task via <code>tokio::select!</code>.</p>
-<h3 id="summary"><a class="header" href="#summary">Summary</a></h3>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Background worker</th><th>Kind</th><th>Count</th><th>Started when</th></tr>
-</thead>
-<tbody>
-<tr><td>Completed-job sweeper</td><td>OS thread</td><td>1 per <code>Bits</code> instance</td><td>Always, at startup</td></tr>
-<tr><td>Broker lease heartbeat</td><td>Tokio task</td><td>1 per <code>Bits</code> instance</td><td>At startup, if persistence configured</td></tr>
-<tr><td>Async pool scheduler</td><td>Tokio tasks</td><td>N per <code>async_pool</code> executor</td><td>At config parse, per dispatcher block</td></tr>
-<tr><td>Cost-weighted queue worker</td><td>Tokio task</td><td>1 per <code>cost_weighted</code> queue</td><td>At config parse, if <code>queue: cost_weighted</code></td></tr>
-<tr><td>Thread pool OS workers</td><td>OS threads</td><td>N per <code>thread_pool</code> executor</td><td>At config parse, if <code>executor: thread_pool</code></td></tr>
-<tr><td>Remote pool HTTP server</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
-<tr><td>Remote pool heartbeat reaper</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
-<tr><td>Job dispatch + persist timer</td><td>Tokio task</td><td>1 per submitted job</td><td>Per <code>Bits::submit()</code></td></tr>
-</tbody>
-</table>
-</div>
-<h2 id="multi-broker-cooperation"><a class="header" href="#multi-broker-cooperation">Multi-broker cooperation</a></h2>
-<p>In production, multiple broker instances run behind a load balancer. Each broker holds an
-in-memory shard of the dispatcher state and a broker lease record in durable storage.</p>
-<p>When a poll request arrives at a broker that does not own the job:</p>
-<ol>
-<li>The broker parses the owner from the job ID.</li>
-<li>It resolves the owner’s endpoint from broker lease records.</li>
-<li>It proxies the poll internally to the owner.</li>
-<li>If the owner lease is missing or expired, it may claim and recover the job from durable
-storage.</li>
-</ol>
-<p>For full details, see the <a href="persistence.html">Persistence</a> section.</p>
-<p>For implementation-level detail and design rationale, see <code>design.md</code> in the repository root.</p>
+<p>If the worker stops sending heartbeats, the broker times out the entry and
+the job fails. It is not automatically re-queued.</p>
+<h2 id="multi-broker-data-flow"><a class="header" href="#multi-broker-data-flow">Multi-broker data flow</a></h2>
+<p>When multiple brokers run behind a load balancer, a poll might land on a
+different broker than the one processing the job:</p>
+<pre class="mermaid">sequenceDiagram
+    participant C as Client
+    participant LB as Load Balancer
+    participant A as Broker A
+    participant B as Broker B
+    participant S as NATS/TiKV
+
+    C-&gt;&gt;LB: POST /job
+    LB-&gt;&gt;A: forward
+    A-&gt;&gt;A: Submit + dispatch job
+    A-&gt;&gt;S: Persist (after threshold)
+
+    Note over A: Broker A crashes
+
+    C-&gt;&gt;LB: GET /job/{id}
+    LB-&gt;&gt;B: forward
+    B-&gt;&gt;S: Check A's lease → expired
+    B-&gt;&gt;S: Claim job (atomic CAS)
+    B-&gt;&gt;B: Restore from original_request
+    B-&gt;&gt;B: Re-dispatch through pipeline
+    B--&gt;&gt;C: Result
+</pre>
+
+<p>If Broker A is still alive, Broker B proxies the poll instead of claiming:</p>
+<pre class="mermaid">sequenceDiagram
+    participant C as Client
+    participant B as Broker B
+    participant A as Broker A
+
+    C-&gt;&gt;B: GET /job/{id}
+    B-&gt;&gt;B: A owns this, lease active
+    B-&gt;&gt;A: Proxy poll to A's internal URL
+    A--&gt;&gt;B: Result
+    B--&gt;&gt;C: Result
+</pre>
+
+<p>If the proxy fails (A is unreachable but lease hasn’t expired), B returns
+<code>Pending</code> to the client. It does not trigger a reclaim while the lease is
+active.</p>
+<h2 id="the-persistence-threshold"><a class="header" href="#the-persistence-threshold">The persistence threshold</a></h2>
+<p>Not all jobs are persisted. Fast jobs stay entirely in memory:</p>
+<pre class="mermaid">flowchart TD
+    A[Job submitted] --&gt; B{Timer: persist_after_ms}
+    B --&gt;|Job finishes first| C[No persistence - fast path]
+    B --&gt;|Timer fires first| D[Write record to store]
+    D --&gt; E[Job finishes]
+    E --&gt; F[Delete record from store]
+</pre>
+
+<p>Only <code>original_request</code>, <code>user</code>, <code>metadata</code>, and <code>created_at</code> are persisted.
+The working <code>request</code> (after transforms) is not stored. On recovery, the
+job is rebuilt from <code>original_request</code> and transforms run again.</p>
+<h2 id="the-reconnect-window"><a class="header" href="#the-reconnect-window">The reconnect window</a></h2>
+<p>Between polls, a 5-second reconnect window keeps the job alive:</p>
+<pre class="mermaid">sequenceDiagram
+    participant C as Client
+    participant B as BITS Broker
+
+    C-&gt;&gt;B: POST /job
+    Note over B: Job running...
+    B--&gt;&gt;C: 303 /job/{id}, Retry-After: 0
+
+    Note over C: Reconnect window: 5s
+
+    C-&gt;&gt;B: GET /job/{id}
+    Note over B: Still running...
+    B--&gt;&gt;C: 303 /job/{id}
+
+    C-&gt;&gt;B: GET /job/{id}
+    Note over B: Job finished!
+    B--&gt;&gt;C: 200 OK (result body)
+</pre>
+
+<p>If the client disconnects mid-poll, the <code>ConnectedGuard</code> extends the
+reconnect deadline automatically. If the client never comes back, the
+sweeper eventually removes the completed job from memory.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="getting-started.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="architecture.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="data-flow.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="error-handling.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -344,11 +413,11 @@ storage.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="getting-started.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="architecture.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="data-flow.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="error-handling.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

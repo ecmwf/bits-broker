@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -177,11 +178,32 @@
                     <main>
                         <h1 id="http-server-api"><a class="header" href="#http-server-api">HTTP Server API</a></h1>
 <p>BITS is a library first. The core API (<code>Bits::submit()</code>, <code>Bits::poll()</code>,
-<code>Bits::cancel()</code>) is designed for you to embed in your application and build
-whatever interface fits your needs.</p>
+<code>Bits::cancel()</code>) is designed for you to embed in your own application and
+build whatever HTTP/gRPC/CLI interface makes sense for your use case.</p>
 <p>The built-in HTTP server described here is a thin wrapper around that API. It
-provides a working submit/poll interface and serves as a reference
-implementation. The source is in <code>bits/src/server.rs</code>.</p>
+provides a working submit/poll interface out of the box and serves as a
+reference implementation for building your own. The source is in
+<code>bits/src/server.rs</code>.</p>
+<p>The server is started by calling <code>bits::server::serve()</code> or
+<code>bits::server::serve_with_shutdown()</code>.</p>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<pre><code class="language-yaml">server:
+  host: "0.0.0.0"
+  port: 8080
+  poll_timeout_ms: 25000
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>host</code></td><td><code>0.0.0.0</code></td><td>Interface to bind to.</td></tr>
+<tr><td><code>port</code></td><td><code>8080</code></td><td>TCP port.</td></tr>
+<tr><td><code>poll_timeout_ms</code></td><td><code>25000</code></td><td>Long-poll timeout in milliseconds.</td></tr>
+</tbody>
+</table>
+</div>
 <h2 id="endpoints"><a class="header" href="#endpoints">Endpoints</a></h2>
 <div class="table-wrapper">
 <table>
@@ -202,20 +224,73 @@ Content-Type: application/json
 
 {"class": "od", "param": "2t/msl", "date": "2024-01-15"}
 </code></pre>
-<p>The JSON body becomes the job’s <code>request</code> field. Nothing is added or wrapped.</p>
+<p>The server creates a <code>Job</code> from the JSON body and immediately starts a
+long-poll. The JSON body becomes the job’s <code>request</code> field. Nothing is added
+or wrapped.</p>
+<h3 id="if-the-job-finishes-within-the-poll-timeout"><a class="header" href="#if-the-job-finishes-within-the-poll-timeout">If the job finishes within the poll timeout</a></h3>
+<p>The result is returned directly. For a successful data response:</p>
+<pre><code class="language-http">HTTP/1.1 200 OK
+Content-Type: application/x-grib
+
+...binary data...
+</code></pre>
+<p>For a redirect (the backend tells the client to fetch data from another URL):</p>
+<pre><code class="language-http">HTTP/1.1 303 See Other
+Location: https://storage.example.com/data/result.grib
+</code></pre>
+<h3 id="if-the-job-is-still-running"><a class="header" href="#if-the-job-is-still-running">If the job is still running</a></h3>
+<p>The server returns a pending redirect with the job ID:</p>
+<pre><code class="language-http">HTTP/1.1 303 See Other
+Location: /job/broker-1-abc123~def456
+Retry-After: 0
+</code></pre>
+<p>The client should follow the <code>Location</code> to reconnect and continue polling.</p>
+<h2 id="reconnecting-to-a-job"><a class="header" href="#reconnecting-to-a-job">Reconnecting to a job</a></h2>
+<pre><code class="language-http">GET /job/broker-1-abc123~def456 HTTP/1.1
+Host: bits-broker:8080
+</code></pre>
+<p>This starts another long-poll. The server waits up to <code>poll_timeout_ms</code> for
+the result. If the job finishes, the result is returned. If not, another
+pending redirect is returned and the cycle repeats.</p>
+<h2 id="connection-model"><a class="header" href="#connection-model">Connection model</a></h2>
+<pre class="mermaid">sequenceDiagram
+    participant C as Client
+    participant B as BITS Broker
+
+    C-&gt;&gt;B: POST /job (JSON body)
+    Note over B: Submit job + long-poll (25s)
+    alt Job finishes in time
+        B--&gt;&gt;C: 200 OK (stream result)
+    else Poll times out
+        B--&gt;&gt;C: 303 /job/{id}, Retry-After: 0
+    end
+
+    C-&gt;&gt;B: GET /job/{id}
+    Note over B: Reconnect + long-poll
+    alt Job finishes
+        B--&gt;&gt;C: 200 OK (stream result)
+    else Still running
+        B--&gt;&gt;C: 303 /job/{id}, Retry-After: 0
+    end
+</pre>
+
+<p>Between polls, BITS keeps the job alive for 5 seconds (the reconnect window).
+If the client doesn’t come back within that window, the job is eligible for
+cleanup by the sweeper. If the client disconnects mid-poll (e.g. network
+drop), the reconnect window is extended automatically.</p>
 <h2 id="response-status-codes"><a class="header" href="#response-status-codes">Response status codes</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Status</th><th>Meaning</th></tr>
+<tr><th>Status</th><th>Meaning</th><th>When</th></tr>
 </thead>
 <tbody>
-<tr><td><code>200 OK</code></td><td>Success with streaming data body.</td></tr>
-<tr><td><code>303 See Other</code></td><td>Redirect to data URL, or pending (poll again).</td></tr>
-<tr><td><code>400 Bad Request</code></td><td>Job-level validation error from the backend.</td></tr>
-<tr><td><code>404 Not Found</code></td><td>Unknown job ID or already consumed.</td></tr>
-<tr><td><code>410 Gone</code></td><td>Job cancelled, client disconnected, or owner broker lost.</td></tr>
-<tr><td><code>500 Internal Server Error</code></td><td>Action panicked or system failure.</td></tr>
+<tr><td><code>200 OK</code></td><td>Success with body.</td><td>Job completed with streaming data.</td></tr>
+<tr><td><code>303 See Other</code></td><td>Follow <code>Location</code>.</td><td>Redirect to data URL, or pending.</td></tr>
+<tr><td><code>400 Bad Request</code></td><td>Client error.</td><td>Validation failure from backend.</td></tr>
+<tr><td><code>404 Not Found</code></td><td>Unknown job.</td><td>ID doesn’t exist or was consumed.</td></tr>
+<tr><td><code>410 Gone</code></td><td>Job lost.</td><td>Cancelled, client disconnected, or owner broker disappeared without durable state.</td></tr>
+<tr><td><code>500 Internal Server Error</code></td><td>System failure.</td><td>Action panicked or routing failed.</td></tr>
 </tbody>
 </table>
 </div>
@@ -274,11 +349,44 @@ not JSON. Redirect responses (<code>303 See Other</code>) return headers only.</
 <p>Framework-level rejections (malformed JSON body, wrong Content-Type) are
 handled by Axum before the handler runs and currently return plain text
 errors, not structured JSON.</p>
-<p>Proxied responses from a non-owner broker currently preserve the HTTP status
-code but may not carry the structured error body. The <code>code</code> field is
-guaranteed only when the client reaches the job’s owner directly.</p>
+<p>Proxied responses from a non-owner broker always use the structured JSON
+error envelope, but the <code>code</code> and <code>message</code> fields may differ from the
+owner’s original response. The proxy maps HTTP status to <code>PollOutcome</code> and
+back, which is lossy: for example, all <code>410</code> responses become
+<code>ACTION_CANCELLED</code> regardless of the original code, and <code>500</code> from the owner
+is treated as transient (returned as a pending redirect, not surfaced as
+<code>JOB_FAILED</code>).</p>
+<h2 id="data-flow"><a class="header" href="#data-flow">Data flow</a></h2>
+<p>Here’s what happens end-to-end when you <code>POST /job</code>:</p>
+<pre class="mermaid">sequenceDiagram
+    participant C as Client
+    participant S as HTTP Server :8080
+    participant B as Bits Engine
+    participant T as Backend
+
+    C-&gt;&gt;S: POST /job {"dataset":"era5"}
+    S-&gt;&gt;B: submit(Job::new(body))
+    Note over B: Spawn pipeline task
+    S-&gt;&gt;B: poll(job_id, timeout)
+    B-&gt;&gt;T: POST http://backend/api&lt;br/&gt;Body: {"dataset":"era5"}
+    T--&gt;&gt;B: 200 OK (result bytes)
+    B--&gt;&gt;S: PollOutcome::Ready(Success)
+    S--&gt;&gt;C: 200 OK (stream body)
+</pre>
+
+<p>The JSON body you POST is the exact JSON body the backend receives.
+Transforms may modify it between submission and dispatch, but the HTTP
+server itself adds nothing.</p>
 <h2 id="graceful-shutdown"><a class="header" href="#graceful-shutdown">Graceful shutdown</a></h2>
-<p>The server supports graceful shutdown via <code>serve_with_shutdown()</code>:</p>
+<p>The server supports graceful shutdown via <code>serve_with_shutdown()</code>. On
+SIGTERM/SIGINT:</p>
+<ol>
+<li>The server stops accepting new connections.</li>
+<li>In-flight requests are drained (existing long-polls complete or timeout).</li>
+<li>After all requests finish, the server returns.</li>
+<li><code>Bits::drop</code> runs. The sweeper and heartbeat threads are joined, and the broker
+lease is deleted.</li>
+</ol>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>bits::server::serve_with_shutdown(
@@ -287,18 +395,16 @@ guaranteed only when the client reaches the job’s owner directly.</p>
     bits::server::shutdown_signal(),
 ).await?;
 <span class="boring">}</span></code></pre>
-<p>On SIGTERM/SIGINT, the server stops accepting new connections and drains
-in-flight requests before returning.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="external-workers.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="custom-actions.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="persistence.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="external-workers.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -308,11 +414,11 @@ in-flight requests before returning.</p>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="external-workers.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="custom-actions.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="persistence.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="external-workers.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -342,6 +448,8 @@ in-flight requests before returning.</p>
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -185,7 +186,7 @@ can determine the intended owner by splitting the job ID on <code>~</code>, with
 table or database.</p>
 <h2 id="why-sticky-ingress-matters"><a class="header" href="#why-sticky-ingress-matters">Why sticky ingress matters</a></h2>
 <p>On poll, a broker first checks its <strong>local in-memory state</strong>. If the job is found there, the
-result is returned immediately — no database access, no network call. If the job is not found
+result is returned immediately with no database access and no network call. If the job is not found
 locally but the parsed owner prefix names a different broker, the request must be proxied or
 the job must be recovered.</p>
 <p>Configuring your load balancer to apply session affinity (for example, consistent hashing on
@@ -194,7 +195,7 @@ path. Without affinity, every poll may incur an internal proxy call.</p>
 <h2 id="internal-proxy"><a class="header" href="#internal-proxy">Internal proxy</a></h2>
 <p>When a poll misses locally and the job ID names another broker, BITS looks up that broker’s
 registered endpoint from the <a href="persistence-broker-leases.html">broker lease table</a> and proxies the
-poll directly — without involving the client. The client receives the same response it would
+poll directly without involving the client. The client receives the same response it would
 have received had it contacted the owner directly.</p>
 <p>Proxy failure (network error, timeout) while the owner’s lease is still active returns
 <code>Pending</code> to the client. BITS does <strong>not</strong> attempt to claim the job while a valid lease exists.</p>
@@ -263,6 +264,8 @@ forms the proxy target: <code>{internal_poll_base_url}/{job_id}</code>.</p>
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

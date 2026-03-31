@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Architecture - BITS Documentation</title>
+        <title>Deployment - BITS Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -176,165 +176,476 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="architecture"><a class="header" href="#architecture">Architecture</a></h1>
-<p><img src="images/bits_pipeline_tree.svg" alt="BITS pipeline routing architecture"></p>
-<h2 id="jobs"><a class="header" href="#jobs">Jobs</a></h2>
-<p>A <strong>job</strong> is the unit of work in BITS. When a client submits a request, BITS creates a job
-carrying:</p>
-<ul>
-<li><code>original_request</code> - the payload exactly as submitted. Never mutated. Used as the restart
-point if the job needs to be recovered after a broker failure.</li>
-<li><code>request</code> - a working copy of the payload, mutated by transform actions as the job flows
-through the pipeline.</li>
-<li><code>metadata</code> - mutable annotations added by transforms during routing (for example, a computed
-cost value).</li>
-<li><code>user</code> - identity of the submitting user.</li>
-</ul>
-<h2 id="pipelines"><a class="header" href="#pipelines">Pipelines</a></h2>
-<p>Every job flows through a <strong>pipeline</strong>: an ordered list of actions. BITS evaluates each action
-in sequence. There are three action types:</p>
-<h3 id="check"><a class="header" href="#check">Check</a></h3>
-<p>A guard condition. It evaluates the job and either <strong>passes</strong> or <strong>rejects</strong>. A rejection stops
-the current route and causes the enclosing <code>switch</code> to try the next named route. Checks do not
-mutate the job.</p>
-<p>Examples: <code>check::match</code>, <code>check::has_license</code></p>
-<h3 id="transform"><a class="header" href="#transform">Transform</a></h3>
-<p>A mutation step. It modifies the job (for example, expanding request parameters or computing a
-cost), then continues through the pipeline.</p>
-<p>Examples: <code>transform::metkit_expansion</code>, <code>transform::cost</code></p>
-<h3 id="target"><a class="header" href="#target">Target</a></h3>
-<p>The terminal dispatch step. It sends the job to a backend and returns a result. Every route must
-end with a target.</p>
-<p>Examples: <code>target::http</code>, <code>target::remote</code></p>
-<blockquote>
-<p><strong>Note:</strong> The core <code>bits</code> crate ships only <code>target::http</code> and
-<code>target::remote</code>. Domain-specific actions (<code>match</code>, <code>has_license</code>,
-<code>metkit_expansion</code>, <code>schedule_released</code>, etc.) are provided by the
-host application. Register your own actions using <code>register_action!</code>.
-See <a href="custom-actions.html">Custom Actions</a>.</p>
-</blockquote>
-<h2 id="switch"><a class="header" href="#switch">Switch</a></h2>
-<p>A <code>switch</code> contains named routes and tries them <strong>in order</strong>, returning the result of the first
-route whose checks all pass. This is the branching primitive. Use it to express conditional
-routing such as privileged versus public access paths. Switches can be nested inside routes.</p>
-<p>When all routes reject, the switch collects rejection reasons from non-silent actions and returns
-them to the user. Silent rejections (route-selection checks like <code>match</code>) are omitted; non-silent
-rejections (validation checks like <code>schedule_released</code>) are included so the user understands why
-a matched route still failed.</p>
-<h2 id="dispatcher"><a class="header" href="#dispatcher">Dispatcher</a></h2>
-<p>Any action step (check, transform, or target) can have an optional <strong>dispatcher</strong> that controls
-ordering and concurrency before the action runs.</p>
-<p>A dispatcher has two concerns:</p>
-<ul>
-<li><strong>Queue</strong>: controls which job runs next (<code>fifo</code>, <code>cost_weighted</code>, or <code>age_priority</code>). The queue
-only stores <code>Job</code> metadata; it knows nothing about work futures or result types.</li>
-<li><strong>Executor</strong>: owns the scheduling loop that pulls jobs from the queue and runs the associated
-work (<code>async_pool</code>, <code>thread_pool</code>, or <code>remote_pool</code>).</li>
-</ul>
-<p>Each executor implements its own scheduling model:</p>
-<ul>
-<li><strong>Async pool</strong> - N Tokio tasks (one per concurrency slot) each loop on <code>queue.dequeue()</code> and run
-work inline.</li>
-<li><strong>Thread pool</strong> - dedicated OS threads each call <code>queue.dequeue()</code> directly, run work via
-<code>block_on</code>, and send results back.</li>
-<li><strong>Remote pool</strong> - the <code>/work</code> HTTP handler calls <code>queue.dequeue()</code> directly when a remote worker
-polls, so external workers pull work at their own pace with no intermediate feeder task.</li>
-</ul>
-<p>This makes scheduling behavior explicit at the step level rather than a global setting. See
-<a href="configuration.html">Configuration</a> for dispatcher syntax and options.</p>
-<h2 id="background-threads-and-tasks"><a class="header" href="#background-threads-and-tasks">Background threads and tasks</a></h2>
-<p>BITS starts background threads and async tasks at startup and per-job. Operators should be
-aware of these when reasoning about resource usage, process behaviour on shutdown, and
-interaction with the host’s thread model.</p>
-<h3 id="tokio-async-runtime"><a class="header" href="#tokio-async-runtime">Tokio async runtime</a></h3>
-<p>The <code>bits-server</code> binary uses <code>#[tokio::main]</code> with the default multi-thread scheduler. Tokio
-spawns one worker thread per logical CPU. These are OS threads managed entirely by Tokio and
-are not counted in the items below.</p>
-<h3 id="started-at-bitsfrom_config---always"><a class="header" href="#started-at-bitsfrom_config---always">Started at <code>Bits::from_config()</code> - always</a></h3>
-<p><strong>Completed-job sweeper (1 OS thread)</strong>
-A single <code>std::thread::spawn</code> thread that wakes every 5 seconds (configurable via
-<code>bits.job_cleanup_interval_ms</code>) and removes finished jobs from the in-memory map once no client
-is polling them. A real blocking OS thread is used deliberately so it cannot interfere with the
-Tokio scheduler even if it is saturated.</p>
-<h3 id="started-at-bitsfrom_config---only-when-persistence-is-configured"><a class="header" href="#started-at-bitsfrom_config---only-when-persistence-is-configured">Started at <code>Bits::from_config()</code> - only when persistence is configured</a></h3>
-<p><strong>Broker lease heartbeat (1 Tokio task)</strong>
-A long-running async task that periodically upserts this broker’s lease record in the persistence
-store. It renews at half the configured lease TTL (minimum 100 ms between renewals). This task
-is the mechanism by which other brokers determine that this instance is alive. See
-<a href="persistence-broker-leases.html">Broker Leases</a>.</p>
-<h3 id="started-per-dispatcher---at-config-parse-time"><a class="header" href="#started-per-dispatcher---at-config-parse-time">Started per dispatcher - at config parse time</a></h3>
-<p>Each action step with a <code>dispatcher:</code> block starts background workers when the configuration is
-loaded. The executor owns the scheduling loop. The number and kind of workers depend on the
-executor type configured.</p>
-<p><strong>Async pool scheduler (N Tokio tasks, if <code>executor: async_pool</code>)</strong>
-One Tokio task per <code>concurrency</code> slot. Each task loops: dequeue a job from the queue, run
-the work future inline, send the result back, then dequeue the next. Concurrency is controlled
-by the number of tasks.</p>
-<p><strong>Cost-weighted queue worker (1 Tokio task, if <code>queue: cost_weighted</code>)</strong>
-Maintains the priority heap and services dequeue requests in cost order. Not started when
-<code>queue: fifo</code> is used. FIFO uses a plain channel with no background task.</p>
-<p><strong>Thread pool workers (N OS threads, if <code>executor: thread_pool</code>)</strong>
-One OS thread per <code>concurrency</code> unit. Each thread calls <code>queue.dequeue()</code> directly (via
-<code>block_on</code>), resolves the pending work, and runs it on that OS thread. Used to isolate
-CPU-bound or blocking work from the async scheduler. Not started unless <code>executor: thread_pool</code>
-is explicitly configured.</p>
-<p><strong>Remote pool HTTP server + heartbeat reaper (2 Tokio tasks, if <code>executor: remote_pool</code>)</strong>
-One task runs an axum HTTP server on the configured bind address (default <code>0.0.0.0:9001</code>).
-The <code>/work</code> endpoint calls <code>queue.dequeue()</code> directly when a remote worker long-polls. There
-is no intermediate feeder task. A second task scans in-progress jobs every
-<code>heartbeat_timeout / 2</code> seconds and evicts any worker that has stopped sending heartbeats.
-Started when <code>executor: remote_pool</code> is configured (or when <code>target::remote</code> is used, which
-implies it). When routes are added programmatically via <code>add_route()</code>, remote pools are
-registered during that call and the worker server listener is started automatically.</p>
-<p>For the wire protocol and worker implementation contract, see
-<a href="external-workers.html">External Workers</a>.</p>
-<h3 id="started-per-submitted-job"><a class="header" href="#started-per-submitted-job">Started per submitted job</a></h3>
-<p><strong>Job dispatch task (1 Tokio task per job)</strong>
-Runs the full pipeline for one job. If <code>bits.persist_after_ms</code> is configured, this task also
-handles the persistence threshold: it races the pipeline against a timer, and if the timer fires
-first it writes the durable job record before continuing to wait for the pipeline to complete.
-There is no separate timer task. The threshold logic lives inside this task via <code>tokio::select!</code>.</p>
-<h3 id="summary"><a class="header" href="#summary">Summary</a></h3>
+                        <h1 id="deployment"><a class="header" href="#deployment">Deployment</a></h1>
+<p>This guide covers production deployment of BITS brokers, from a single instance
+to multi-broker clusters with persistence.</p>
+<h2 id="single-broker-setup"><a class="header" href="#single-broker-setup">Single broker setup</a></h2>
+<p>The simplest deployment runs one broker with no persistence. Jobs exist only
+in memory and are lost on restart.</p>
+<pre><code class="language-yaml">server:
+  host: "0.0.0.0"
+  port: 8080
+  poll_timeout_ms: 25000
+
+targets:
+  backend:
+    type: http
+    url: "http://backend-service/api"
+
+routes:
+  - default:
+      - target::backend
+</code></pre>
+<p>Start the broker:</p>
+<pre><code class="language-bash">bits-server config.yaml
+</code></pre>
+<p>Suitable for development, testing, or stateless workloads where job loss on
+restart is acceptable.</p>
+<h2 id="multi-broker-setup"><a class="header" href="#multi-broker-setup">Multi-broker setup</a></h2>
+<p>For high availability and horizontal scaling, run multiple brokers behind a
+load balancer with a shared persistence backend.</p>
+<pre class="mermaid">graph TD
+    C[Clients] --&gt; LB[Load Balancer&lt;br/&gt;sticky sessions]
+    LB --&gt; B1[Broker 1]
+    LB --&gt; B2[Broker 2]
+    LB --&gt; B3[Broker N...]
+    B1 &lt;--&gt; P[Persistence&lt;br/&gt;NATS or TiKV]
+    B2 &lt;--&gt; P
+    B3 &lt;--&gt; P
+    B1 &lt;-.-&gt;|proxy| B2
+    B2 &lt;-.-&gt;|proxy| B3
+</pre>
+
+<p>Each broker needs:</p>
+<ol>
+<li>A unique <code>broker_id</code> prefix (for example <code>bits-api</code>)</li>
+<li>Reachable <code>internal_poll_base_url</code> for broker-to-broker communication</li>
+<li>Access to the shared persistence backend</li>
+</ol>
+<h2 id="persistence-backend-setup"><a class="header" href="#persistence-backend-setup">Persistence backend setup</a></h2>
+<p>BITS supports two persistence backends: NATS JetStream KV and TiKV.</p>
+<h3 id="nats-jetstream-kv"><a class="header" href="#nats-jetstream-kv">NATS JetStream KV</a></h3>
+<p>Build BITS with the <code>nats</code> feature enabled.</p>
+<p><strong>Single node (development)</strong></p>
+<pre><code class="language-yaml">bits:
+  broker_id: "bits-dev"
+  internal_poll_base_url: "http://127.0.0.1:8080/job"
+  persist_after_ms: 10000
+  persistence:
+    type: nats
+    url: "nats://localhost:4222"
+    jobs_bucket: "bits-jobs"
+    leases_bucket: "bits-leases"
+    broker_lease_ttl_secs: 30
+    num_replicas: 1
+</code></pre>
+<p><strong>3-node cluster (production)</strong></p>
+<p>Start NATS servers with JetStream enabled:</p>
+<pre><code class="language-bash"># On each node
+nats-server -js -cluster_name bits -routes nats://node1:6222,nats://node2:6222,nats://node3:6222
+</code></pre>
+<p>Configure BITS with cluster endpoints and replication:</p>
+<pre><code class="language-yaml">bits:
+  broker_id: "bits-prod"
+  internal_poll_base_url: "http://bits-0.bits-headless:8080/job"
+  persist_after_ms: 10000
+  persistence:
+    type: nats
+    url: "nats://nats-0:4222,nats://nats-1:4222,nats://nats-2:4222"
+    jobs_bucket: "bits-jobs"
+    leases_bucket: "bits-leases"
+    broker_lease_ttl_secs: 30
+    num_replicas: 3
+</code></pre>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Background worker</th><th>Kind</th><th>Count</th><th>Started when</th></tr>
+<tr><th>Field</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td>Completed-job sweeper</td><td>OS thread</td><td>1 per <code>Bits</code> instance</td><td>Always, at startup</td></tr>
-<tr><td>Broker lease heartbeat</td><td>Tokio task</td><td>1 per <code>Bits</code> instance</td><td>At startup, if persistence configured</td></tr>
-<tr><td>Async pool scheduler</td><td>Tokio tasks</td><td>N per <code>async_pool</code> executor</td><td>At config parse, per dispatcher block</td></tr>
-<tr><td>Cost-weighted queue worker</td><td>Tokio task</td><td>1 per <code>cost_weighted</code> queue</td><td>At config parse, if <code>queue: cost_weighted</code></td></tr>
-<tr><td>Thread pool OS workers</td><td>OS threads</td><td>N per <code>thread_pool</code> executor</td><td>At config parse, if <code>executor: thread_pool</code></td></tr>
-<tr><td>Remote pool HTTP server</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
-<tr><td>Remote pool heartbeat reaper</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
-<tr><td>Job dispatch + persist timer</td><td>Tokio task</td><td>1 per submitted job</td><td>Per <code>Bits::submit()</code></td></tr>
+<tr><td><code>url</code></td><td>Comma-separated list of NATS server URLs</td></tr>
+<tr><td><code>num_replicas</code></td><td>JetStream replication factor. Use 3 for production.</td></tr>
+<tr><td><code>jobs_bucket</code></td><td>KV bucket name for job records (default: <code>bits-jobs</code>)</td></tr>
+<tr><td><code>leases_bucket</code></td><td>KV bucket name for broker leases (default: <code>bits-leases</code>)</td></tr>
+<tr><td><code>broker_lease_ttl_secs</code></td><td>Lease TTL in seconds (default: 30)</td></tr>
 </tbody>
 </table>
 </div>
-<h2 id="multi-broker-cooperation"><a class="header" href="#multi-broker-cooperation">Multi-broker cooperation</a></h2>
-<p>In production, multiple broker instances run behind a load balancer. Each broker holds an
-in-memory shard of the dispatcher state and a broker lease record in durable storage.</p>
-<p>When a poll request arrives at a broker that does not own the job:</p>
+<h3 id="tikv"><a class="header" href="#tikv">TiKV</a></h3>
+<p>Build BITS with the <code>tikv</code> feature enabled. Requires a TiKV cluster with PD
+(Placement Driver).</p>
+<p><strong>PD + TiKV cluster setup</strong></p>
+<p>A minimal production cluster needs:</p>
+<ul>
+<li>3 PD nodes for consensus and metadata</li>
+<li>3 TiKV nodes for data storage</li>
+</ul>
+<pre><code class="language-yaml">bits:
+  broker_id: "bits-prod"
+  internal_poll_base_url: "http://bits-0.bits-headless:8080/job"
+  persist_after_ms: 10000
+  persistence:
+    type: tikv
+    endpoints: ["pd-0:2379", "pd-1:2379", "pd-2:2379"]
+    broker_lease_ttl_secs: 30
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>endpoints</code></td><td>List of PD (Placement Driver) endpoints</td></tr>
+<tr><td><code>broker_lease_ttl_secs</code></td><td>Lease TTL in seconds (default: 30)</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="choosing-a-backend"><a class="header" href="#choosing-a-backend">Choosing a backend</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Consideration</th><th>NATS</th><th>TiKV</th></tr>
+</thead>
+<tbody>
+<tr><td>Operational complexity</td><td>Lower</td><td>Higher</td></tr>
+<tr><td>Throughput</td><td>Excellent</td><td>Excellent</td></tr>
+<tr><td>Latency</td><td>Low</td><td>Low</td></tr>
+<tr><td>Existing infrastructure</td><td>Good if already using NATS</td><td>Good if already using TiDB/TiKV</td></tr>
+<tr><td>Geographic distribution</td><td>Good</td><td>Good</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="load-balancer-configuration"><a class="header" href="#load-balancer-configuration">Load balancer configuration</a></h2>
+<h3 id="session-affinity-sticky-routing"><a class="header" href="#session-affinity-sticky-routing">Session affinity (sticky routing)</a></h3>
+<p>Configure your load balancer to use session affinity based on a stable client
+property. Good choices:</p>
+<ul>
+<li><code>Authorization</code> header (hashed)</li>
+<li>Client IP address</li>
+<li>Custom header with user ID</li>
+</ul>
+<p><strong>Why it matters</strong></p>
+<p>Each job is owned by the broker that accepted it. When a poll request arrives
+at the owning broker, it returns immediately from local in-memory state. When
+a poll arrives at a different broker, BITS must either proxy to the owner or
+recover the job from persistence.</p>
+<p>Without sticky routing, every poll may hit a different broker, causing:</p>
+<ul>
+<li>Increased latency from proxy calls</li>
+<li>Higher load on the persistence backend</li>
+<li>More complex failure scenarios</li>
+</ul>
+<p><strong>Example: NGINX with IP hash</strong></p>
+<pre><code class="language-nginx">upstream bits_backend {
+    ip_hash;
+    server bits-0:8080;
+    server bits-1:8080;
+    server bits-2:8080;
+}
+
+server {
+    listen 80;
+    location / {
+        proxy_pass http://bits_backend;
+        proxy_set_header Host $host;
+    }
+}
+</code></pre>
+<p><strong>Example: HAProxy with header hash</strong></p>
+<pre><code class="language-haproxy">backend bits_backend
+    balance hdr(Authorization)
+    hash-type consistent
+    server bits-0 bits-0:8080 check
+    server bits-1 bits-1:8080 check
+    server bits-2 bits-2:8080 check
+</code></pre>
+<h3 id="health-checks"><a class="header" href="#health-checks">Health checks</a></h3>
+<p>Standard TCP health checks on the HTTP port are sufficient. BITS does not yet
+expose dedicated health endpoints, planned for a future release.</p>
+<h2 id="kubernetes-deployment"><a class="header" href="#kubernetes-deployment">Kubernetes deployment</a></h2>
+<h3 id="graceful-shutdown"><a class="header" href="#graceful-shutdown">Graceful shutdown</a></h3>
+<p>BITS handles SIGTERM for graceful shutdown. When a pod receives SIGTERM
+(during rolling update or scale-down):</p>
 <ol>
-<li>The broker parses the owner from the job ID.</li>
-<li>It resolves the owner’s endpoint from broker lease records.</li>
-<li>It proxies the poll internally to the owner.</li>
-<li>If the owner lease is missing or expired, it may claim and recover the job from durable
-storage.</li>
+<li>The HTTP server stops accepting new connections</li>
+<li>In-flight requests are allowed to complete</li>
+<li>The process exits</li>
 </ol>
-<p>For full details, see the <a href="persistence.html">Persistence</a> section.</p>
-<p>For implementation-level detail and design rationale, see <code>design.md</code> in the repository root.</p>
+<p>Configure your container lifecycle:</p>
+<pre><code class="language-yaml">lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "sleep 10"]
+</code></pre>
+<p>The <code>preStop</code> hook gives the load balancer time to remove the pod from its
+endpoint list before the SIGTERM is sent.</p>
+<p>Set an appropriate termination grace period:</p>
+<pre><code class="language-yaml">terminationGracePeriodSeconds: 60
+</code></pre>
+<h3 id="resource-sizing"><a class="header" href="#resource-sizing">Resource sizing</a></h3>
+<p><strong>CPU</strong></p>
+<ul>
+<li>Baseline: 100m (0.1 cores) for light traffic</li>
+<li>Typical: 500m per broker for moderate load</li>
+<li>Heavy: 1-2 cores with thread_pool executors for CPU-bound work</li>
+</ul>
+<p><strong>Memory</strong></p>
+<ul>
+<li>Baseline: 128Mi</li>
+<li>Typical: 512Mi-1Gi per broker</li>
+<li>Scale with: concurrent job count, dispatcher queue depths</li>
+</ul>
+<p><strong>Example resource limits</strong></p>
+<pre><code class="language-yaml">resources:
+  requests:
+    memory: "512Mi"
+    cpu: "500m"
+  limits:
+    memory: "1Gi"
+    cpu: "2000m"
+</code></pre>
+<h3 id="deployment-manifest"><a class="header" href="#deployment-manifest">Deployment manifest</a></h3>
+<pre><code class="language-yaml">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bits-broker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: bits-broker
+  template:
+    metadata:
+      labels:
+        app: bits-broker
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: broker
+          image: bits-broker:latest
+          args: ["/etc/bits/config.yaml"]
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9001
+              name: worker
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/bits
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+      volumes:
+        - name: config
+          configMap:
+            name: bits-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bits-headless
+spec:
+  selector:
+    app: bits-broker
+  ports:
+    - port: 8080
+      name: http
+  clusterIP: None
+</code></pre>
+<p>The headless service (<code>clusterIP: None</code>) gives each pod a stable DNS name
+for <code>internal_poll_base_url</code>:</p>
+<pre><code>bits-0.bits-headless.default.svc.cluster.local
+bits-1.bits-headless.default.svc.cluster.local
+bits-2.bits-headless.default.svc.cluster.local
+</code></pre>
+<h3 id="readiness-and-liveness-probes"><a class="header" href="#readiness-and-liveness-probes">Readiness and liveness probes</a></h3>
+<p>Dedicated health endpoints are planned but not yet implemented. For now, use
+TCP socket checks. If you need HTTP probes, use <code>GET /job/healthcheck</code> which
+returns a fast <code>404</code> without creating a job or long-polling.</p>
+<pre><code class="language-yaml">livenessProbe:
+  tcpSocket:
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 10
+
+readinessProbe:
+  tcpSocket:
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+</code></pre>
+<h2 id="operator-notes"><a class="header" href="#operator-notes">Operator notes</a></h2>
+<h3 id="internal_poll_base_url-must-be-broker-to-broker-reachable"><a class="header" href="#internal_poll_base_url-must-be-broker-to-broker-reachable"><code>internal_poll_base_url</code> must be broker-to-broker reachable</a></h3>
+<p>The <code>internal_poll_base_url</code> is used by peer brokers to proxy polls. It must
+be reachable from all other brokers in the cluster. Common mistakes:</p>
+<ul>
+<li>Using <code>localhost</code> or <code>127.0.0.1</code></li>
+<li>Using a load balancer URL that routes back through the LB</li>
+<li>Using an internal IP that changes on pod restart without updating the URL</li>
+</ul>
+<p>In Kubernetes, use the headless service DNS name as shown above.</p>
+<h3 id="worker-server-port-9001-is-unauthenticated"><a class="header" href="#worker-server-port-9001-is-unauthenticated">Worker server (port 9001) is unauthenticated</a></h3>
+<p>The remote worker API on port 9001 does not implement authentication. Keep it
+internal to your cluster:</p>
+<ul>
+<li>Do not expose port 9001 through the load balancer</li>
+<li>Use network policies to restrict access</li>
+<li>In Kubernetes, do not include port 9001 in the public service</li>
+</ul>
+<h3 id="persist_after_ms-tuning"><a class="header" href="#persist_after_ms-tuning"><code>persist_after_ms</code> tuning</a></h3>
+<p>Set <code>persist_after_ms</code> shorter than your expected job duration but with enough
+margin for the persistence write to complete before client polls time out.</p>
+<p>The startup validation checks:</p>
+<pre><code>server.poll_timeout_ms &gt; bits.persist_after_ms + bits.persist_guard_ms
+</code></pre>
+<p><code>bits.poll_timeout_ms</code> is only used for this validation. Set it to match
+<code>server.poll_timeout_ms</code> (or whatever timeout your custom API layer uses).</p>
+<p>Example for 30-second client poll timeout:</p>
+<pre><code class="language-yaml">server:
+  poll_timeout_ms: 30000     # actual client long-poll timeout
+
+bits:
+  persist_after_ms: 25000    # persist after 25 seconds
+  poll_timeout_ms: 30000     # validation only, match server.poll_timeout_ms
+  persist_guard_ms: 1000     # 1 second guard buffer
+</code></pre>
+<p>Jobs that complete before <code>persist_after_ms</code> never touch the database, keeping
+short requests fast.</p>
+<h3 id="broker_lease_ttl_secs-controls-recovery-window"><a class="header" href="#broker_lease_ttl_secs-controls-recovery-window"><code>broker_lease_ttl_secs</code> controls recovery window</a></h3>
+<p>When a broker crashes, its jobs remain unrecoverable until the lease expires.
+Default is 30 seconds. Tradeoffs:</p>
+<ul>
+<li>Lower TTL (10s): Faster recovery, more heartbeat writes</li>
+<li>Higher TTL (60s): Fewer writes, longer wait after crashes</li>
+</ul>
+<p>Tune based on your tolerance for recovery time versus write load.</p>
+<h2 id="configuration-example"><a class="header" href="#configuration-example">Configuration example</a></h2>
+<p>Complete production configuration:</p>
+<pre><code class="language-yaml"># =============================================================================
+# Server configuration
+# =============================================================================
+server:
+  host: "0.0.0.0"
+  port: 8080
+  poll_timeout_ms: 30000
+
+# =============================================================================
+# BITS broker identity and persistence
+# =============================================================================
+bits:
+  # Stable prefix for this broker set. Each instance appends a UUID.
+  broker_id: "bits-prod"
+
+  # URL at which peer brokers can reach this instance
+  internal_poll_base_url: "http://bits-0.bits-headless:8080/job"
+
+  # How long to wait for internal proxy polls
+  internal_poll_timeout_ms: 2500
+
+  # How often to sweep completed jobs from memory
+  job_cleanup_interval_ms: 5000
+
+  # Persist jobs still in-flight after 25 seconds
+  persist_after_ms: 25000
+
+  # Poll timeout and guard buffer for validation
+  poll_timeout_ms: 30000
+  persist_guard_ms: 1000
+
+  # Persistence backend: NATS or TiKV
+  persistence:
+    type: nats
+    url: "nats://nats-0:4222,nats://nats-1:4222,nats://nats-2:4222"
+    jobs_bucket: "bits-jobs"
+    leases_bucket: "bits-leases"
+    broker_lease_ttl_secs: 30
+    num_replicas: 3
+
+  # Worker server for remote pools (internal only)
+  worker_server:
+    host: "0.0.0.0"
+    port: 9001
+
+# =============================================================================
+# Action registries
+# =============================================================================
+checks:
+  is_privileged:
+    type: match
+    class: od
+    silent: true
+
+transforms:
+  expand:
+    type: metkit_expansion
+    expand_parameters: true
+
+  compute_cost:
+    type: cost
+
+targets:
+  # Inline HTTP backend
+  backend_http:
+    type: http
+    url: "http://backend-service:8080/api"
+    dispatcher:
+      queue: cost_weighted
+      executor:
+        type: async_pool
+        concurrency: 16
+
+  # Remote worker pool
+  backend_workers:
+    type: remote
+    dispatcher:
+      queue: fifo
+      executor:
+        type: remote_pool
+        heartbeat_timeout_secs: 60
+
+# =============================================================================
+# Routes
+# =============================================================================
+routes:
+  - privileged:
+      - check::is_privileged
+      - transform::expand
+      - transform::compute_cost
+      - target::backend_workers
+
+  - default:
+      - transform::expand
+      - target::backend_http
+</code></pre>
+<h2 id="validation-checklist"><a class="header" href="#validation-checklist">Validation checklist</a></h2>
+<p>Before deploying to production:</p>
+<ul>
+<li><input disabled="" type="checkbox"> <code>broker_id</code> is set to a stable, human-readable prefix</li>
+<li><input disabled="" type="checkbox"> <code>internal_poll_base_url</code> uses a broker-to-broker reachable address</li>
+<li><input disabled="" type="checkbox"> <code>persist_after_ms + persist_guard_ms &lt; poll_timeout_ms</code></li>
+<li><input disabled="" type="checkbox"> Load balancer uses session affinity (sticky routing)</li>
+<li><input disabled="" type="checkbox"> Worker server port (9001) is not exposed externally</li>
+<li><input disabled="" type="checkbox"> Persistence backend is accessible from all brokers</li>
+<li><input disabled="" type="checkbox"> For NATS: <code>num_replicas</code> matches your cluster size (typically 3)</li>
+<li><input disabled="" type="checkbox"> For TiKV: all PD endpoints are listed</li>
+<li><input disabled="" type="checkbox"> Resource limits are configured appropriately</li>
+<li><input disabled="" type="checkbox"> Graceful shutdown is configured (termination grace period, preStop hook)</li>
+</ul>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="getting-started.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="persistence-operations.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="data-flow.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="troubleshooting.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -344,11 +655,11 @@ storage.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="getting-started.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="persistence-operations.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="data-flow.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="troubleshooting.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

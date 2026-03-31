@@ -267,17 +267,21 @@ The broker cannot connect to the NATS server.
 - Check network connectivity between broker and NATS
 - Review NATS authentication credentials if configured
 
-### TiKV timeout
+### NATS or TiKV connection timeout
 
-Connection to the TiKV cluster times out.
+The broker cannot establish a connection to the persistence backend within
+the 10-second connection timeout.
 
-**Diagnostic**: Look for `PERSISTENCE_BACKEND` errors with timeout messages.
+**Diagnostic**: Look for `PERSISTENCE_BACKEND` errors with
+`"timed out after 10s"` or backend-specific timeout messages.
 
 **Solutions**:
-- Verify PD endpoint is correct and reachable
-- Check TiKV cluster health with `pd-ctl`
-- Ensure sufficient network bandwidth between broker and TiKV nodes
-- Review TiKV logs for storage or replication issues
+- Verify the backend is running and the URL/endpoints are correct
+- Check network connectivity and firewall rules between broker and backend
+- For TiKV: confirm PD endpoints are reachable with `pd-ctl`
+- For NATS: confirm JetStream is enabled (`-js` flag)
+- The 10-second timeout covers initial connection and bucket setup; once
+  connected, individual operations use the backend's own timeouts
 
 ### Broker lease expired while jobs running
 

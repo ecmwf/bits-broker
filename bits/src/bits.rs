@@ -82,6 +82,7 @@ impl Bits {
             job_store,
             internal_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(10))
                 .build()
                 .expect("failed to build reqwest client"),
             shutdown: shutdown.clone(),
@@ -132,6 +133,7 @@ impl Bits {
             job_store: parsed.job_store,
             internal_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| ConfigError::validation("internal_client", e.to_string()))?,
             shutdown: shutdown.clone(),

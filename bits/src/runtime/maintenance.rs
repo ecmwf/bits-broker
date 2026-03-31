@@ -77,11 +77,21 @@ pub(crate) fn start_sweeper(
     shutdown: Arc<ShutdownSignal>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let runtime = job_store.as_ref().map(|_| {
-            tokio::runtime::Builder::new_current_thread()
+        let runtime = job_store.as_ref().and_then(|_| {
+            match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("sweeper tokio runtime")
+            {
+                Ok(rt) => Some(rt),
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "sweeper: failed to build tokio runtime, \
+                         durable cleanup will be skipped"
+                    );
+                    None
+                }
+            }
         });
 
         loop {

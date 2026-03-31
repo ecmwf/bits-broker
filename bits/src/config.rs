@@ -449,13 +449,44 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                         "nats requires a running Tokio runtime for init",
                     )
                 })?;
-                tokio::task::block_in_place(|| handle.block_on(store.init())).map_err(|e| {
-                    ConfigError::PersistenceInit {
+
+                // Retry NATS init with backoff. In Kubernetes the NATS cluster
+                // may not be ready when the broker pod starts; retrying here
+                // avoids CrashLoopBackOff delays from the kubelet.
+                const MAX_INIT_ATTEMPTS: u32 = 6;
+                let mut last_err: Option<String> = None;
+                let mut delay = Duration::from_secs(1);
+                for attempt in 1..=MAX_INIT_ATTEMPTS {
+                    match tokio::task::block_in_place(|| handle.block_on(store.init())) {
+                        Ok(()) => {
+                            last_err = None;
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = Some(e.to_string());
+                            if attempt < MAX_INIT_ATTEMPTS {
+                                tracing::warn!(
+                                    attempt,
+                                    max_attempts = MAX_INIT_ATTEMPTS,
+                                    error = %last_err.as_deref().unwrap_or("unknown"),
+                                    retry_in_secs = delay.as_secs(),
+                                    "NATS init failed, retrying"
+                                );
+                                tokio::task::block_in_place(|| std::thread::sleep(delay));
+                                delay = delay.saturating_mul(2).min(Duration::from_secs(10));
+                            }
+                        }
+                    }
+                }
+                if let Some(reason) = last_err {
+                    return Err(ConfigError::PersistenceInit {
                         path: "bits.persistence".into(),
                         backend: "nats".into(),
-                        reason: e.to_string(),
+                        reason,
                     }
-                })?;
+                    .into());
+                }
+
                 (Some(Arc::new(store) as Arc<dyn PersistenceStore>), ttl)
             }
         }
@@ -478,7 +509,10 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             }
             (
                 None,
-                Duration::from_secs_f64(default_broker_lease_ttl_secs()),
+                duration_secs(
+                    "bits.broker_lease_ttl_secs",
+                    default_broker_lease_ttl_secs(),
+                )?,
             )
         }
     };

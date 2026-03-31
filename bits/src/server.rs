@@ -62,6 +62,7 @@ pub async fn shutdown_signal() {
 }
 
 const DEFAULT_POLL_TIMEOUT_SECS: f64 = 25.0;
+const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Configuration for the built-in HTTP server.
 #[derive(Debug, Clone, Deserialize)]
@@ -106,16 +107,12 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// Returns the poll timeout as a [`Duration`].
     ///
-    /// # Panics
-    ///
-    /// Panics if `poll_timeout_secs` is negative, NaN, infinite, or a finite
-    /// value large enough to overflow [`Duration`].
-    ///
-    /// Configs produced by [`parse_bootstrap`](crate::parse_bootstrap) are
-    /// always validated, so this only affects manually constructed instances
-    /// or those deserialized outside of `parse_bootstrap` without validation.
+    /// Falls back to the default (25s) if `poll_timeout_secs` is negative,
+    /// NaN, infinite, or overflows [`Duration`]. Configs produced by
+    /// [`parse_bootstrap`](crate::parse_bootstrap) are always validated,
+    /// so the fallback only applies to manually constructed instances.
     pub fn poll_timeout(&self) -> Duration {
-        Duration::from_secs_f64(self.poll_timeout_secs)
+        Duration::try_from_secs_f64(self.poll_timeout_secs).unwrap_or(DEFAULT_POLL_TIMEOUT)
     }
 }
 

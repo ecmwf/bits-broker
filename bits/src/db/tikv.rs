@@ -35,9 +35,13 @@ impl TiKvStore {
     async fn client(&self) -> Result<&tikv_client::TransactionClient, DbError> {
         self.client
             .get_or_try_init(|| async {
-                tikv_client::TransactionClient::new(self.endpoints.clone())
-                    .await
-                    .map_err(|err| DbError::Backend(format!("failed to connect to TiKV: {err}")))
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    tikv_client::TransactionClient::new(self.endpoints.clone()),
+                )
+                .await
+                .map_err(|_| DbError::Backend("TiKV connection timed out after 10s".into()))?
+                .map_err(|err| DbError::Backend(format!("failed to connect to TiKV: {err}")))
             })
             .await
     }

@@ -1,4 +1,5 @@
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
@@ -7,6 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::actions::{ActionError, TargetAction, TargetResult};
 use crate::job::Job;
 use crate::result::JobResult;
+
+/// Default connect and idle-read timeout for outbound HTTP target requests.
+/// `connect_timeout` caps TCP + TLS handshake. `read_timeout` caps the gap
+/// between consecutive body chunks, so large streams are not killed mid-transfer.
+const DEFAULT_TARGET_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ================================
 //   HttpTarget
@@ -37,7 +43,13 @@ impl HttpTarget {
     }
 
     fn client(&self) -> &reqwest::Client {
-        self.client.get_or_init(reqwest::Client::new)
+        self.client.get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(DEFAULT_TARGET_TIMEOUT)
+                .read_timeout(DEFAULT_TARGET_TIMEOUT)
+                .build()
+                .expect("reqwest client with timeout")
+        })
     }
 }
 

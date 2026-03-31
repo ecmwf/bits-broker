@@ -41,38 +41,42 @@ impl NatsStore {
     async fn stores(&self) -> Result<&(kv::Store, kv::Store), DbError> {
         self.stores
             .get_or_try_init(|| async {
-                let client = async_nats::connect(&self.url)
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    let client = async_nats::connect(&self.url)
+                        .await
+                        .map_err(|e| DbError::Backend(format!("NATS connect failed: {e}")))?;
+                    let js = jetstream::new(client);
+
+                    let jobs = Self::get_or_create_bucket(
+                        &js,
+                        kv::Config {
+                            bucket: self.jobs_bucket.clone(),
+                            history: 1,
+                            num_replicas: self.num_replicas,
+                            ..Default::default()
+                        },
+                    )
                     .await
-                    .map_err(|e| DbError::Backend(format!("NATS connect failed: {e}")))?;
-                let js = jetstream::new(client);
+                    .map_err(|e| DbError::Backend(format!("jobs bucket: {e}")))?;
 
-                let jobs = Self::get_or_create_bucket(
-                    &js,
-                    kv::Config {
-                        bucket: self.jobs_bucket.clone(),
-                        history: 1,
-                        num_replicas: self.num_replicas,
-                        ..Default::default()
-                    },
-                )
+                    let leases = Self::get_or_create_bucket(
+                        &js,
+                        kv::Config {
+                            bucket: self.leases_bucket.clone(),
+                            history: 1,
+                            num_replicas: self.num_replicas,
+                            storage: async_nats::jetstream::stream::StorageType::Memory,
+                            max_age: self.lease_ttl.saturating_mul(2),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|e| DbError::Backend(format!("leases bucket: {e}")))?;
+
+                    Ok((jobs, leases))
+                })
                 .await
-                .map_err(|e| DbError::Backend(format!("jobs bucket: {e}")))?;
-
-                let leases = Self::get_or_create_bucket(
-                    &js,
-                    kv::Config {
-                        bucket: self.leases_bucket.clone(),
-                        history: 1,
-                        num_replicas: self.num_replicas,
-                        storage: async_nats::jetstream::stream::StorageType::Memory,
-                        max_age: self.lease_ttl.saturating_mul(2),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|e| DbError::Backend(format!("leases bucket: {e}")))?;
-
-                Ok((jobs, leases))
+                .map_err(|_| DbError::Backend("NATS connection timed out after 10s".into()))?
             })
             .await
     }

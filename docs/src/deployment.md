@@ -371,6 +371,27 @@ internal to your cluster:
 - Use network policies to restrict access
 - In Kubernetes, do not include port 9001 in the public service
 
+### Timeout defaults
+
+BITS applies default timeouts to all outbound I/O to prevent hung connections
+from blocking the broker indefinitely:
+
+| Connection | Default timeout | Scope |
+|------------|----------------|-------|
+| HTTP targets (`target::http`) | 30s connect + 30s idle-read | Per-chunk; large streams are not capped |
+| Internal broker-to-broker proxy | 10s client-level, 2.5s per-request | Per-request `internal_poll_timeout_secs` overrides downward |
+| TiKV client initialization | 10s per attempt | First DB operation; retries automatically on next use |
+| NATS connect + bucket setup | 10s per attempt, 6 attempts | Startup only; exponential backoff 1/2/4/8/10/10s (~85s total budget) |
+
+NATS initialization is retried at startup with exponential backoff so the
+broker tolerates dependency ordering in Kubernetes without entering
+CrashLoopBackOff. TiKV connections are lazy (first use, not startup) and
+retry automatically on each operation.
+
+These defaults are not yet configurable via YAML. If a target endpoint
+routinely takes longer than 30 seconds, the request will fail with a timeout
+error. A future release will add per-target timeout configuration.
+
 ### `persist_after_secs` tuning
 
 Set `persist_after_secs` shorter than your expected job duration but with enough

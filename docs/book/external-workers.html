@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -186,56 +187,56 @@
 </ul>
 <h2 id="1-configure-a-remote-target"><a class="header" href="#1-configure-a-remote-target">1) Configure a remote target</a></h2>
 <p>You can define a named target:</p>
-<pre><code class="language-yaml">targets:
+<pre><code class="language-yaml">bits:
+  worker_server:
+    host: "0.0.0.0"
+    port: 9001
+
+targets:
   worker_pool:
     type: remote
     dispatcher:
       queue: cost_weighted
       executor:
-        remote_pool:
-          bind: "0.0.0.0:9001"
-          heartbeat_timeout_secs: 60
+        type: remote_pool
+        heartbeat_timeout_secs: 60
 
 routes:
-  default:
-    - target::worker_pool
-</code></pre>
-<p>Or inline:</p>
-<pre><code class="language-yaml">routes:
-  default:
-    - target::remote: ~
-      dispatcher:
-        executor:
-          remote_pool:
-            bind: "0.0.0.0:9001"
-            heartbeat_timeout_secs: 60
+  - default:
+      - target::worker_pool
 </code></pre>
 <p>Important rules:</p>
 <ul>
-<li><code>target::remote</code> must use <code>executor: remote_pool</code>.</li>
-<li><code>executor: remote_pool</code> is only valid with <code>target::remote</code>.</li>
-<li>If you use <code>target::remote</code> without an explicit executor, BITS injects a default
-remote pool config (<code>bind: 0.0.0.0:9001</code>, <code>heartbeat_timeout_secs: 60</code>).</li>
+<li>Remote targets must be defined as named entries in the <code>targets:</code> registry
+(not inline). The registry entry name becomes the pool name in the worker
+API path (e.g. <code>targets.mars</code> exposes <code>/mars/work</code>).</li>
+<li><code>type: remote</code> automatically uses the <code>remote_pool</code> executor. If you omit
+the <code>dispatcher.executor</code> block, BITS injects a default remote pool config
+(<code>heartbeat_timeout_secs: 60</code>).</li>
+<li>The worker server bind address is configured at <code>bits.worker_server</code>, not
+inside the executor. All remote pools share a single HTTP server.</li>
 </ul>
 <h2 id="2-worker-api-contract"><a class="header" href="#2-worker-api-contract">2) Worker API contract</a></h2>
 <p>When <code>remote_pool</code> is configured, BITS starts an HTTP server with dedicated work, heartbeat,
 and terminal outcome endpoints.</p>
+<p>All endpoints are namespaced under <code>/{pool_name}/</code>, where <code>pool_name</code> is the
+target’s registry entry name (e.g., <code>mars</code>):</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Endpoint</th><th>Method</th><th>Purpose</th><th>Success codes</th></tr>
 </thead>
 <tbody>
-<tr><td><code>/work?timeout_ms=N</code></td><td><code>GET</code></td><td>Long-poll for one available job</td><td><code>200</code>, <code>204</code></td></tr>
-<tr><td><code>/heartbeat/{job_id}</code></td><td><code>POST</code></td><td>Keep an in-progress job alive</td><td><code>200</code>, <code>404</code></td></tr>
-<tr><td><code>/complete/data/{job_id}</code></td><td><code>POST</code></td><td>Stream successful response body</td><td><code>200</code>, <code>404</code></td></tr>
-<tr><td><code>/complete/reject/{job_id}</code></td><td><code>POST</code></td><td>Submit business rejection JSON</td><td><code>200</code>, <code>404</code></td></tr>
-<tr><td><code>/complete/error/{job_id}</code></td><td><code>POST</code></td><td>Submit worker failure JSON</td><td><code>200</code>, <code>404</code></td></tr>
-<tr><td><code>/complete/redirect/{job_id}</code></td><td><code>POST</code></td><td>Submit redirect JSON</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/{pool}/work?timeout_ms=N</code></td><td><code>GET</code></td><td>Long-poll for one available job</td><td><code>200</code>, <code>204</code></td></tr>
+<tr><td><code>/{pool}/heartbeat/{job_id}</code></td><td><code>POST</code></td><td>Keep an in-progress job alive</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/{pool}/complete/data/{job_id}</code></td><td><code>POST</code></td><td>Stream successful response body</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/{pool}/complete/reject/{job_id}</code></td><td><code>POST</code></td><td>Submit business rejection JSON</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/{pool}/complete/error/{job_id}</code></td><td><code>POST</code></td><td>Submit worker failure JSON</td><td><code>200</code>, <code>404</code></td></tr>
+<tr><td><code>/{pool}/complete/redirect/{job_id}</code></td><td><code>POST</code></td><td>Submit redirect JSON</td><td><code>200</code>, <code>404</code></td></tr>
 </tbody>
 </table>
 </div>
-<h3 id="get-worktimeout_msn"><a class="header" href="#get-worktimeout_msn"><code>GET /work?timeout_ms=N</code></a></h3>
+<h3 id="get-poolworktimeout_msn"><a class="header" href="#get-poolworktimeout_msn"><code>GET /{pool}/work?timeout_ms=N</code></a></h3>
 <ul>
 <li>Blocks until a job is available or timeout expires.</li>
 <li>Returns <code>200 OK</code> with JSON when a job is assigned.</li>
@@ -255,7 +256,7 @@ and terminal outcome endpoints.</p>
 <li><code>metadata</code> includes values produced by earlier transforms.</li>
 <li>One poll returns at most one job.</li>
 </ul>
-<h3 id="post-heartbeatjob_id"><a class="header" href="#post-heartbeatjob_id"><code>POST /heartbeat/{job_id}</code></a></h3>
+<h3 id="post-poolheartbeatjob_id"><a class="header" href="#post-poolheartbeatjob_id"><code>POST /{pool}/heartbeat/{job_id}</code></a></h3>
 <p>Send heartbeats while processing a job.</p>
 <ul>
 <li><code>200 OK</code>: heartbeat accepted.</li>
@@ -263,7 +264,7 @@ and terminal outcome endpoints.</p>
 </ul>
 <p>If no heartbeat arrives within <code>heartbeat_timeout_secs</code>, BITS evicts the in-progress job and
 the broker side returns a failed result.</p>
-<h3 id="post-completedatajob_id"><a class="header" href="#post-completedatajob_id"><code>POST /complete/data/{job_id}</code></a></h3>
+<h3 id="post-poolcompletedatajob_id"><a class="header" href="#post-poolcompletedatajob_id"><code>POST /{pool}/complete/data/{job_id}</code></a></h3>
 <p>Submit exactly one successful terminal outcome for a claimed job.</p>
 <ul>
 <li>The HTTP request body is the result stream.</li>
@@ -276,19 +277,19 @@ Content-Type: application/x-grib
 
 ...streamed bytes...
 </code></pre>
-<h3 id="post-completerejectjob_id"><a class="header" href="#post-completerejectjob_id"><code>POST /complete/reject/{job_id}</code></a></h3>
+<h3 id="post-poolcompleterejectjob_id"><a class="header" href="#post-poolcompleterejectjob_id"><code>POST /{pool}/complete/reject/{job_id}</code></a></h3>
 <pre><code class="language-json">{
   "reason": "unsupported request"
 }
 </code></pre>
-<h3 id="post-completeredirectjob_id"><a class="header" href="#post-completeredirectjob_id"><code>POST /complete/redirect/{job_id}</code></a></h3>
+<h3 id="post-poolcompleteredirectjob_id"><a class="header" href="#post-poolcompleteredirectjob_id"><code>POST /{pool}/complete/redirect/{job_id}</code></a></h3>
 <pre><code class="language-json">{
   "location": "https://my-bucket.s3.amazonaws.com/path/object.grib?X-Amz-Signature=...",
   "message": "Download is ready"
 }
 </code></pre>
 <p><code>message</code> is optional for redirect.</p>
-<h3 id="post-completeerrorjob_id"><a class="header" href="#post-completeerrorjob_id"><code>POST /complete/error/{job_id}</code></a></h3>
+<h3 id="post-poolcompleteerrorjob_id"><a class="header" href="#post-poolcompleteerrorjob_id"><code>POST /{pool}/complete/error/{job_id}</code></a></h3>
 <pre><code class="language-json">{
   "message": "worker internal failure"
 }
@@ -454,11 +455,11 @@ receive first.</li>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="custom-actions.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="http-api.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="http-api.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="persistence.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -468,11 +469,11 @@ receive first.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="custom-actions.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="http-api.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="http-api.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="persistence.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -502,6 +503,8 @@ receive first.</li>
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

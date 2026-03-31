@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -336,7 +337,7 @@ class ComputeCost(TransformAction):
         cost = float((job.request or {}).get(self.cost_field, 1.0))
         meta = dict(job.metadata) if job.metadata else {}
         meta["cost"] = cost
-        job.metadata = meta  # must assign back — in-place mutation is not detected
+        job.metadata = meta  # must assign back - in-place mutation is not detected
         return Continue()
 
 register_action("compute_cost", ComputeCost)
@@ -358,24 +359,40 @@ Mutating the returned dict in-place without reassigning has no effect.</p>
 </code></pre>
 <hr>
 <h2 id="target-action"><a class="header" href="#target-action">Target action</a></h2>
-<p>A target dispatches the job and returns one of four outcome types:</p>
+<p>A target dispatches the job and returns one of these outcome types:</p>
+<p><strong>In Rust:</strong></p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Type</th><th>Meaning</th></tr>
+<tr><th>Return</th><th>Meaning</th></tr>
 </thead>
 <tbody>
-<tr><td><code>Success(body, content_type=...)</code></td><td>Job completed. <code>body</code> is <code>bytes</code> or <code>str</code> (auto-encoded UTF-8).</td></tr>
-<tr><td><code>Success.json(value)</code></td><td>Serialise a Python dict / list as <code>application/json</code>.</td></tr>
-<tr><td><code>Redirect(location, message="")</code></td><td>Tell the client to follow a redirect URL.</td></tr>
-<tr><td><code>Error(message)</code></td><td>Job-level error (invalid request, auth failure, etc.).</td></tr>
-<tr><td><code>Reject(reason)</code></td><td>This route cannot handle the job — try the next branch.</td></tr>
+<tr><td><code>TargetResult::Complete(JobResult::Success { stream, content_type, size })</code></td><td>Job completed with a streaming body.</td></tr>
+<tr><td><code>TargetResult::Complete(JobResult::Redirect { location, message })</code></td><td>Client should follow a redirect URL.</td></tr>
+<tr><td><code>TargetResult::Complete(JobResult::Error { message })</code></td><td>Job-level error (invalid request, validation failure). Terminal, not retried.</td></tr>
+<tr><td><code>TargetResult::Reject { reason, silent }</code></td><td>This route cannot handle the job. The switch tries the next branch.</td></tr>
+<tr><td><code>Err(ActionError::NetworkError(...))</code></td><td>Transient upstream failure.</td></tr>
+<tr><td><code>Err(ActionError::ResourceError(...))</code></td><td>Non-transient resource issue.</td></tr>
 </tbody>
 </table>
 </div>
-<p>When using <code>target::remote</code>, an external worker can return the same redirect outcome by posting
-<code>{"status":"redirect", "location":"...", "message":"..."}</code> to
-<code>POST /complete/{job_id}</code>. See <a href="external-workers.html">External Workers</a>.</p>
+<p><strong>In Python:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Return</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Success(body, content_type="...")</code></td><td>Job completed. <code>body</code> is <code>bytes</code> or <code>str</code> (auto-encoded UTF-8).</td></tr>
+<tr><td><code>Success.json(value)</code></td><td>Convenience: serializes a Python dict/list as <code>application/json</code>. Equivalent to <code>Success(json.dumps(value).encode(), content_type="application/json")</code>.</td></tr>
+<tr><td><code>Redirect(location, message="")</code></td><td>Client should follow a redirect URL.</td></tr>
+<tr><td><code>Error(message)</code></td><td>Job-level error (invalid request, auth failure, etc.).</td></tr>
+<tr><td><code>Reject(reason)</code></td><td>This route cannot handle the job. The switch tries the next branch.</td></tr>
+</tbody>
+</table>
+</div>
+<p>When using <code>target::remote</code>, an external worker returns outcomes by posting
+to the <code>/{pool}/complete/...</code> endpoints. See <a href="external-workers.html">External Workers</a>.</p>
 <div class="mdbook-tabs-container" data-tabglobal="lang">
 <nav class="mdbook-tabs">
 <button class="mdbook-tab active" data-tabname="Rust">Rust</button>
@@ -478,7 +495,7 @@ register_action("my_http", MyHttpTarget)
 <div class="mdbook-tab-content" data-tabname="Rust">
 <h3 id="register_action-macro"><a class="header" href="#register_action-macro"><code>register_action!</code> macro</a></h3>
 <p>Call the macro at the bottom of the same file as the implementation. It uses the
-<a href="https://docs.rs/inventory"><code>inventory</code></a> crate for compile-time distributed registration — no
+<a href="https://docs.rs/inventory"><code>inventory</code></a> crate for compile-time distributed registration. No
 central file needs to be edited.</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -498,9 +515,31 @@ serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 inventory   = "0.3"
 </code></pre>
-<p>Make sure the crate is actually linked into your binary. <code>inventory</code> relies on static
-initialisation, which only fires if the crate is linked. If the action crate is not a direct
-dependency of the binary, add an explicit <code>use</code> to force linkage.</p>
+<p>Make sure the crate is actually linked into your binary. <code>inventory</code> relies on
+static initialisation, which only fires if the crate is linked. If the action
+crate is not a direct dependency of the binary, the linker may drop it
+entirely and your actions won’t be registered.</p>
+<p>To force linkage, add an explicit <code>use</code> in your binary’s <code>main.rs</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Force the linker to include the my_actions crate so that
+// its register_action! calls fire during static initialisation.
+use my_actions as _;
+<span class="boring">}</span></code></pre>
+<p>This works in standard Cargo debug and release builds. If you encounter a
+platform where aggressive dead-code elimination still drops the registrations
+(actions missing at runtime), expose a dummy init function from your crate
+and call it from main:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// In my_actions/src/lib.rs:
+pub fn init() {} // no-op, just ensures linkage
+
+// In your binary's main.rs:
+my_actions::init();
+<span class="boring">}</span></code></pre>
+<p>Without forced linkage, <code>Bits::from_config</code> won’t find your actions and will
+return <code>ROUTING_INVALID_ACTION</code> errors.</p>
 <h3 id="error-handling"><a class="header" href="#error-handling">Error handling</a></h3>
 <p>Prefer returning <code>Reject { reason, silent }</code> for expected policy rejections. Set <code>silent: true</code>
 for route-selection logic (wrong class, missing key) and <code>silent: false</code> for validation failures
@@ -551,7 +590,7 @@ keyword arguments when the action is instantiated at config-load time:</p>
 <h3 id="error-handling-1"><a class="header" href="#error-handling-1">Error handling</a></h3>
 <p>Prefer returning <code>Reject(reason)</code> for expected policy rejections. Pass <code>silent=False</code> when the
 rejection reason should reach the user (e.g. data not yet released); the default is <code>silent=True</code>
-(route-selection). For unexpected failures, raise an exception — it surfaces as a <code>Failed</code> result
+(route-selection). For unexpected failures, raise an exception. It surfaces as a <code>Failed</code> result
 to the client.</p>
 </div>
 
@@ -566,7 +605,7 @@ to the client.</p>
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="external-workers.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="http-api.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -580,7 +619,7 @@ to the client.</p>
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="external-workers.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="http-api.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -610,6 +649,8 @@ to the client.</p>
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -179,7 +180,7 @@
 <h2 id="owner-aware-job-ids"><a class="header" href="#owner-aware-job-ids">Owner-aware job IDs</a></h2>
 <p>Every job ID has the form <code>{broker_id}~{uuid}</code>.</p>
 <p>The <code>broker_id</code> prefix encodes which broker originally accepted the job. This means any broker
-that receives a poll for that job can determine the likely owner from the ID alone — without
+that receives a poll for that job can determine the likely owner from the ID alone without
 scanning all broker instances or querying a central coordinator.</p>
 <h2 id="threshold-persistence"><a class="header" href="#threshold-persistence">Threshold persistence</a></h2>
 <p>When <code>bits.persist_after_ms</code> is configured, BITS applies a threshold before writing to the
@@ -199,15 +200,19 @@ threshold are written exactly once. There are no heartbeat writes for individual
 periodically renews a lease record in durable storage. If a broker’s lease expires, that broker
 is considered unavailable and its persisted jobs are eligible for reclaim.</p>
 <p>This means the persistence store sees one write per long-running job (on persist) and one delete
-(on completion), plus periodic lease renewals per broker — not one heartbeat per in-flight job.</p>
+(on completion), plus periodic lease renewals per broker, not one heartbeat per in-flight job.</p>
 <h2 id="store-abstraction"><a class="header" href="#store-abstraction">Store abstraction</a></h2>
-<p>The persistence layer is implemented behind a trait interface, so the same behavior works with
-different backends. An in-memory store (for testing) and a TiKV store (for production) both
-implement this interface.</p>
+<p>The persistence layer is implemented behind a trait interface (<code>PersistenceStore</code>),
+so the same behavior works with different backends. Three implementations exist:</p>
+<ul>
+<li><strong>MemoryStore</strong> for testing (no durability)</li>
+<li><strong>NatsStore</strong> using NATS JetStream KV (build with <code>--features nats</code>)</li>
+<li><strong>TiKvStore</strong> using TiKV (build with <code>--features tikv</code>)</li>
+</ul>
 <p>Two logical namespaces keep records separate:</p>
 <ul>
-<li><strong>Job records</strong> — one record per persisted job.</li>
-<li><strong>Broker lease records</strong> — one record per live broker.</li>
+<li><strong>Job records</strong> - one record per persisted job.</li>
+<li><strong>Broker lease records</strong> - one record per live broker.</li>
 </ul>
 
                     </main>
@@ -262,6 +267,8 @@ implement this interface.</p>
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

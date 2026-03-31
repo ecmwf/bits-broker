@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -178,28 +179,56 @@
                         <h1 id="bits-documentation"><a class="header" href="#bits-documentation">BITS Documentation</a></h1>
 <p>BITS (Broker for Intelligent Task Scheduling) is a policy-aware job broker that classifies,
 transforms, and dispatches requests across distributed infrastructure.</p>
-<p>It is designed for environments where jobs vary widely in cost and duration — from millisecond
-checks to long-running compute tasks — and where multiple broker instances must coordinate
-without per-job coordination overhead.</p>
+<p>BITS is a Rust library. You embed it in your application, register your own
+actions, and build whatever API layer fits your needs (HTTP, gRPC, CLI). A
+built-in HTTP server is included for quick starts and as a reference
+implementation.</p>
+<p>It is designed for environments where jobs vary widely in cost and duration,
+from millisecond checks to long-running compute tasks, and where multiple
+broker instances must coordinate without per-job coordination overhead.</p>
 <h2 id="what-bits-does"><a class="header" href="#what-bits-does">What BITS does</a></h2>
 <p>A client submits a job. BITS routes it through a configurable pipeline of <strong>checks</strong>,
 <strong>transforms</strong>, and a <strong>target</strong>. The pipeline enforces access policy, mutates the request as
 needed, and dispatches to the right backend. Short jobs are handled entirely in-memory; long
 jobs are persisted so they survive broker restarts and can be recovered by other brokers.</p>
 <h2 id="how-to-use-these-docs"><a class="header" href="#how-to-use-these-docs">How to use these docs</a></h2>
+<p><strong>Getting started:</strong></p>
 <ul>
-<li><strong><a href="getting-started.html">Getting Started</a></strong> — build, test, and run BITS locally.</li>
-<li><strong><a href="architecture.html">Architecture</a></strong> — understand the core concepts: jobs, pipelines, actions,
-and how multiple brokers cooperate.</li>
-<li><strong><a href="configuration.html">Configuration</a></strong> — reference for YAML configuration: registries, routes,
-dispatchers, and top-level settings.</li>
-<li><strong><a href="external-workers.html">External Workers</a></strong> — implement pull-based remote workers using
-<code>target::remote</code>, including completion, rejection, error, and redirect outcomes.</li>
-<li><strong><a href="persistence.html">Persistence</a></strong> — how jobs are persisted, recovered, and routed across
-broker instances.</li>
+<li><strong><a href="getting-started.html">Quick Start</a></strong> - build, test, and run BITS locally.</li>
 </ul>
-<p>For a concise overview and quick-start example, see the repository <code>README</code>.
-For implementation-level design rationale, see <code>design.md</code> in the repository root.</p>
+<p><strong>Understand the system:</strong></p>
+<ul>
+<li><strong><a href="architecture.html">Architecture</a></strong> - core concepts: jobs, pipelines, actions,
+switches, dispatchers.</li>
+<li><strong><a href="data-flow.html">Data Flow</a></strong> - how data moves through the system, with
+diagrams showing what each component sends and receives.</li>
+<li><strong><a href="error-handling.html">Error Handling</a></strong> - typed error hierarchy, machine-readable
+codes, retryability hints.</li>
+</ul>
+<p><strong>Configure and extend:</strong></p>
+<ul>
+<li><strong><a href="configuration.html">Configuration</a></strong> - YAML reference: registries, routes,
+dispatchers, top-level settings.</li>
+<li><strong><a href="custom-actions.html">Custom Actions</a></strong> - write checks, transforms, and targets
+in Rust or Python.</li>
+</ul>
+<p><strong>Integrate:</strong></p>
+<ul>
+<li><strong><a href="http-api.html">HTTP Server API</a></strong> - submit jobs, poll for results, status
+codes, connection model.</li>
+<li><strong><a href="external-workers.html">External Workers</a></strong> - pull-based remote workers with
+HTTP long-poll.</li>
+</ul>
+<p><strong>Operate:</strong></p>
+<ul>
+<li><strong><a href="persistence.html">Persistence</a></strong> - durable storage, recovery, multi-broker
+coordination.</li>
+<li><strong><a href="deployment.html">Deployment</a></strong> - production setup, persistence backends, load
+balancing, Kubernetes.</li>
+<li><strong><a href="troubleshooting.html">Troubleshooting</a></strong> - common issues and how to fix them.</li>
+</ul>
+<p>For implementation-level design rationale, see <code>design.md</code> in the repository
+root.</p>
 
                     </main>
 
@@ -247,6 +276,8 @@ For implementation-level design rationale, see <code>design.md</code> in the rep
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

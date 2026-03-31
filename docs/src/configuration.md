@@ -34,10 +34,10 @@ Named registry entries are referenced in routes using the `check::`, `transform:
 `target::` prefixes. This makes the type of each step visible in the route and ensures shared
 resources (such as a target with a dispatcher) are the same instance in memory.
 
-> The examples in this page use actions from the `bits-ecmwf` application crate
-> (`match`, `metkit_expansion`, `has_role`, `schedule_released`, etc.). The core
-> `bits` library ships only `target::http` and `target::remote`. Your application
-> registers its own actions. See [Custom Actions](custom-actions.md).
+> The examples in this page use domain-specific actions (`match`,
+> `metkit_expansion`, `has_role`, `schedule_released`, etc.) that would be
+> registered by the host application. The core `bits` library ships only
+> `target::http` and `target::remote`. See [Custom Actions](custom-actions.md).
 
 ## Routes
 
@@ -181,17 +181,6 @@ routes:
         silent: false          # override: surface this match check's rejections
       - target::backend
 ```
-
-Built-in defaults (from `bits-ecmwf`):
-
-| Action | `silent` |
-|--------|----------|
-| `match` | `true` |
-| `has_role` | `false` |
-| `has_license` | `true` |
-| `has_key` | `true` |
-| `date_checker` | `false` |
-| `schedule_released` | `false` |
 
 ## Top-level bits settings
 

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Configuration - BITS Documentation</title>
+        <title>Configuration Reference - BITS Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -203,22 +204,28 @@ targets:
 <p>Named registry entries are referenced in routes using the <code>check::</code>, <code>transform::</code>, and
 <code>target::</code> prefixes. This makes the type of each step visible in the route and ensures shared
 resources (such as a target with a dispatcher) are the same instance in memory.</p>
+<blockquote>
+<p>The examples in this page use domain-specific actions (<code>match</code>,
+<code>metkit_expansion</code>, <code>has_role</code>, <code>schedule_released</code>, etc.) that would be
+registered by the host application. The core <code>bits</code> library ships only
+<code>target::http</code> and <code>target::remote</code>. See <a href="custom-actions.html">Custom Actions</a>.</p>
+</blockquote>
 <h2 id="routes"><a class="header" href="#routes">Routes</a></h2>
 <p>The <code>routes</code> section is <strong>optional</strong>. When present, it defines ordered pipelines of action steps
 that are loaded at config parse time. Steps reference named registry entries or define actions
-inline. When omitted, routes must be added programmatically via <code>add_route()</code> — see
+inline. When omitted, routes must be added programmatically via <code>add_route()</code>. See
 <a href="#programmatic-routes">Programmatic Routes</a>.</p>
 <pre><code class="language-yaml">routes:
-  default:
-    - transform::expand          # reference a named registry entry
-    - switch:
-        privileged:
-          - check::is_privileged
-          - target::backend
-        public:
-          - check::match:        # inline action — no registry entry needed
-              class: ea
-          - target::backend
+  - default:
+      - transform::expand          # reference a named registry entry
+      - switch:
+          - privileged:
+              - check::is_privileged
+              - target::backend
+          - public:
+              - check::match:      # inline action - no registry entry needed
+                  class: ea
+              - target::backend
 </code></pre>
 <p>A <code>switch</code> tries its named routes in order and returns the result of the first route whose checks
 all pass. Routes may be nested.</p>
@@ -227,7 +234,7 @@ all pass. Routes may be nested.</p>
 <pre><code class="language-yaml">- check::match:
     class: od
 </code></pre>
-<p>Inline actions are not reusable — each occurrence is an independent instance. Use the registry
+<p>Inline actions are not reusable. Each occurrence is an independent instance. Use the registry
 when you want to share an action (and its dispatcher) across multiple routes.</p>
 <h3 id="role-based-access-control"><a class="header" href="#role-based-access-control">Role-based access control</a></h3>
 <p><code>has_role</code> checks that the authenticated user belongs to a listed realm and holds at least one of
@@ -245,12 +252,12 @@ that realm. Users whose realm is not listed, or who lack a matching role, are re
 <p>Rejections use a generic <code>"insufficient permissions"</code> message to avoid leaking realm/role details.
 Two distinct <code>WARN</code>-level log messages help operators diagnose failures:</p>
 <ul>
-<li><code>"user realm not listed in allowed realms"</code> — the user’s realm doesn’t appear in the <code>roles</code> map.</li>
-<li><code>"realm matched but user lacks a required role"</code> — the realm matched but the user holds none of the
+<li><code>"user realm not listed in allowed realms"</code>: the user’s realm doesn’t appear in the <code>roles</code> map.</li>
+<li><code>"realm matched but user lacks a required role"</code>: the realm matched but the user holds none of the
 allowed roles.</li>
 </ul>
 <h2 id="dispatcher"><a class="header" href="#dispatcher">Dispatcher</a></h2>
-<p>Any action step — check, transform, or target — can include a <code>dispatcher:</code> section to control
+<p>Any action step (check, transform, or target) can include a <code>dispatcher:</code> section to control
 queuing and concurrency.</p>
 <p>For <strong>named registry entries</strong>, <code>dispatcher:</code> is nested inside the entry alongside <code>type:</code>:</p>
 <pre><code class="language-yaml">targets:
@@ -259,16 +266,20 @@ queuing and concurrency.</p>
     url: "http://my-service/api"
     dispatcher:
       queue: cost_weighted
-      concurrency: 8
+      executor:
+        type: async_pool
+        concurrency: 8
 </code></pre>
 <p>For <strong>inline steps</strong>, <code>dispatcher:</code> is a sibling key in the action mapping:</p>
 <pre><code class="language-yaml">routes:
-  default:
-    - target::http:
-        url: "http://my-service/api"
-      dispatcher:
-        queue: cost_weighted
-        concurrency: 8
+  - default:
+      - target::http:
+          url: "http://my-service/api"
+        dispatcher:
+          queue: cost_weighted
+          executor:
+            type: async_pool
+            concurrency: 8
 </code></pre>
 <h3 id="dispatcher-fields"><a class="header" href="#dispatcher-fields">Dispatcher fields</a></h3>
 <div class="table-wrapper">
@@ -277,16 +288,19 @@ queuing and concurrency.</p>
 <tr><th>Field</th><th>Values</th><th>Default</th></tr>
 </thead>
 <tbody>
-<tr><td><code>queue</code></td><td><code>fifo</code>, <code>cost_weighted</code>, <code>age_priority</code></td><td>none (FIFO when <code>concurrency</code> is set)</td></tr>
-<tr><td><code>executor</code></td><td><code>async_pool</code>, <code>thread_pool</code>, <code>remote_pool</code></td><td><code>async_pool</code></td></tr>
-<tr><td><code>concurrency</code></td><td>positive integer</td><td>unlimited</td></tr>
+<tr><td><code>queue</code></td><td><code>fifo</code>, <code>cost_weighted</code>, <code>age_priority</code></td><td><code>fifo</code></td></tr>
+<tr><td><code>executor.type</code></td><td><code>async_pool</code>, <code>thread_pool</code>, <code>remote_pool</code></td><td><code>async_pool</code></td></tr>
+<tr><td><code>executor.concurrency</code></td><td>positive integer</td><td>256</td></tr>
 </tbody>
 </table>
 </div>
 <ul>
+<li><code>executor.concurrency</code> applies to <code>async_pool</code> and <code>thread_pool</code> only.
+<code>remote_pool</code> does not accept a concurrency setting; parallelism is
+determined by how many workers are polling.</li>
 <li><code>cost_weighted</code> ordering requires a <code>metadata["cost"]</code> value set by a prior transform.</li>
 <li><code>age_priority</code> ages waiting jobs into service while still making larger-cost jobs wait longer to gain queue priority.</li>
-<li><code>thread_pool</code> offloads work to dedicated OS threads — use this for CPU-bound or blocking work.</li>
+<li><code>thread_pool</code> offloads work to dedicated OS threads. Use this for CPU-bound or blocking work.</li>
 <li><code>remote_pool</code> is only valid with <code>target::remote</code> and is auto-inserted when using that target
 type. Any other combination is rejected at config parse time.</li>
 <li>For the remote worker HTTP API and worker lifecycle, see
@@ -295,8 +309,8 @@ type. Any other combination is rejected at config parse time.</li>
 <h2 id="silent-rejections"><a class="header" href="#silent-rejections">Silent rejections</a></h2>
 <p>When all routes in a switch reject a job, the error returned to the user includes rejection
 reasons from actions that are <strong>not silent</strong>. Route-selection checks (like <code>match</code>) are silent by
-default — their rejections are internal routing decisions. Validation checks (like
-<code>schedule_released</code>) are not silent — their rejections should reach the user.</p>
+default, so their rejections are internal routing decisions. Validation checks (like
+<code>schedule_released</code>) are not silent, so their rejections should reach the user.</p>
 <p>Each action sets its own default. You can override per-step with the <code>silent</code> key:</p>
 <p>For <strong>named registry entries</strong>:</p>
 <pre><code class="language-yaml">checks:
@@ -313,28 +327,12 @@ default — their rejections are internal routing decisions. Validation checks (
         silent: false          # override: surface this match check's rejections
       - target::backend
 </code></pre>
-<p>Built-in defaults:</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Action</th><th><code>silent</code></th></tr>
-</thead>
-<tbody>
-<tr><td><code>match</code></td><td><code>true</code></td></tr>
-<tr><td><code>has_role</code></td><td><code>false</code></td></tr>
-<tr><td><code>has_license</code></td><td><code>true</code></td></tr>
-<tr><td><code>has_key</code></td><td><code>true</code></td></tr>
-<tr><td><code>date_checker</code></td><td><code>false</code></td></tr>
-<tr><td><code>schedule_released</code></td><td><code>false</code></td></tr>
-</tbody>
-</table>
-</div>
 <h2 id="top-level-bits-settings"><a class="header" href="#top-level-bits-settings">Top-level bits settings</a></h2>
 <p>The optional <code>bits:</code> section configures broker identity and persistence policy:</p>
 <pre><code class="language-yaml">bits:
   persist_after_ms: 10000    # persist jobs still in-flight after this many milliseconds
-  poll_timeout_ms: 30000     # how long a poll can wait before returning Pending
-  persist_guard_ms: 1000     # extra margin before a persisted job is eligible for reclaim
+  poll_timeout_ms: 30000     # validation only: should match your API layer's poll timeout
+  persist_guard_ms: 1000     # extra margin for the persist_after + guard &lt; poll_timeout check
 </code></pre>
 <div class="table-wrapper">
 <table>
@@ -343,19 +341,25 @@ default — their rejections are internal routing decisions. Validation checks (
 </thead>
 <tbody>
 <tr><td><code>persist_after_ms</code></td><td>Threshold before a job is written to durable storage. Jobs completing before this threshold are never persisted.</td></tr>
-<tr><td><code>poll_timeout_ms</code></td><td>Maximum time a poll request waits before returning a <code>Pending</code> response to the client.</td></tr>
-<tr><td><code>persist_guard_ms</code></td><td>Grace period added to the lease TTL before another broker may reclaim a persisted job.</td></tr>
+<tr><td><code>poll_timeout_ms</code></td><td>Used for startup validation only (<code>persist_after_ms + persist_guard_ms &lt; poll_timeout_ms</code>). Set this to match whatever your API layer uses for polling. The built-in HTTP server’s actual poll timeout is <code>server.poll_timeout_ms</code>. Library users pass a timeout per <code>Bits::poll()</code> call.</td></tr>
+<tr><td><code>persist_guard_ms</code></td><td>Extra margin in the validation inequality. Ensures persistence has time to complete before the client poll would time out.</td></tr>
 </tbody>
 </table>
 </div>
-<p>Persistence requires a configured storage backend. TiKV is supported when the <code>tikv</code> Cargo
-feature is enabled. If TiKV configuration is present but the crate is built without the <code>tikv</code>
-feature, startup fails immediately with a configuration error.</p>
+<p>Persistence requires a storage backend configured under <code>bits.persistence</code>.
+Two backends are supported:</p>
+<ul>
+<li><strong>NATS JetStream KV</strong> (<code>type: nats</code>): build with <code>--features nats</code></li>
+<li><strong>TiKV</strong> (<code>type: tikv</code>): build with <code>--features tikv</code></li>
+</ul>
+<p>If a persistence backend is configured but the crate is built without the
+matching feature, startup fails immediately with a <code>CONFIG_FEATURE_DISABLED</code>
+error. See <a href="deployment.html">Deployment</a> for backend setup details.</p>
 <h2 id="programmatic-routes"><a class="header" href="#programmatic-routes">Programmatic Routes</a></h2>
 <p>When the host application manages its own routing model (e.g. per-collection or per-tenant
 routing), routes can be added after config load via <code>Bits::add_route()</code>.</p>
 <p>The YAML file still defines registries (<code>checks</code>, <code>targets</code>, <code>transforms</code>), <code>bits:</code> settings, and
-optionally a <code>worker_server:</code> block — but the <code>routes</code> section can be omitted entirely.</p>
+optionally a <code>worker_server:</code> block, but the <code>routes</code> section can be omitted entirely.</p>
 <h3 id="add_route"><a class="header" href="#add_route">add_route</a></h3>
 <p><code>Bits::add_route()</code> parses a route YAML fragment against the already-loaded registries and
 returns a <code>RouteHandle</code>:</p>
@@ -363,7 +367,7 @@ returns a <code>RouteHandle</code>:</p>
 </span><span class="boring">fn main() {
 </span>let bits = Bits::from_config(config)?;
 
-// Parse a route from a YAML value — actions that reference named
+// Parse a route from a YAML value. Actions that reference named
 // registry entries (e.g. target::backend) share the same Arc instances.
 let handle: RouteHandle = bits.add_route("my_collection", &amp;route_yaml_value)?;
 
@@ -371,26 +375,26 @@ let handle: RouteHandle = bits.add_route("my_collection", &amp;route_yaml_value)
 let job_handle = handle.submit(Job::new(json!({"class": "od"})));
 <span class="boring">}</span></code></pre>
 <h3 id="routehandle"><a class="header" href="#routehandle">RouteHandle</a></h3>
-<p><code>add_route()</code> returns a <code>RouteHandle</code> — an opaque handle the host application uses to submit
+<p><code>add_route()</code> returns a <code>RouteHandle</code>, an opaque handle the host application uses to submit
 jobs to a specific route. The host keeps the mapping from its own collection/tenant names to
 route handles.</p>
 <h3 id="shared-resources"><a class="header" href="#shared-resources">Shared resources</a></h3>
 <p>Routes added via <code>add_route()</code> share the same action registries and target <code>Arc</code>s as routes
 defined in the YAML. This means a named target like <code>target::backend</code> with a dispatcher is the
-same instance across all routes — jobs from any route contend on the same concurrency pool and
+same instance across all routes, so jobs from any route contend on the same concurrency pool and
 queue.</p>
 <h3 id="worker-server"><a class="header" href="#worker-server">Worker server</a></h3>
 <p>When using <code>target::remote</code> with programmatic routes, remote pool targets may be registered
-during <code>add_route()</code> — after the initial config parse. The worker server is started
+during <code>add_route()</code>, after the initial config parse. The worker server is started
 automatically inside <code>add_route()</code> whenever remote pools have been registered. The call is
-idempotent — once the listener is bound, subsequent <code>add_route()</code> calls skip re-binding.</p>
+idempotent. Once the listener is bound, subsequent <code>add_route()</code> calls skip re-binding.</p>
 <p>No explicit worker server management is needed from the host application.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="architecture.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="error-handling.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
@@ -404,7 +408,7 @@ idempotent — once the listener is bound, subsequent <code>add_route()</code> c
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="architecture.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="error-handling.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
@@ -438,6 +442,8 @@ idempotent — once the listener is bound, subsequent <code>add_route()</code> c
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

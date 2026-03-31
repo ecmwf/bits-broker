@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Getting Started - BITS Documentation</title>
+        <title>Quick Start - BITS Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -180,7 +181,6 @@
 <ul>
 <li>Rust toolchain matching the version in <code>rust-toolchain.toml</code></li>
 <li>Cargo workspace checked out locally</li>
-<li>A YAML configuration file defining your checks, transforms, targets, and routes</li>
 </ul>
 <h2 id="workspace-layout"><a class="header" href="#workspace-layout">Workspace layout</a></h2>
 <p>The repository is a Cargo workspace with these crates:</p>
@@ -191,7 +191,7 @@
 </thead>
 <tbody>
 <tr><td><code>bits</code></td><td>Core library: routing engine, pipeline execution, dispatcher, persistence</td></tr>
-<tr><td><code>bits-ecmwf</code></td><td>Application crate built on the core library with ECMWF-specific actions</td></tr>
+<tr><td><code>bits-server</code></td><td>Standalone HTTP server binary wrapping the core library</td></tr>
 <tr><td><code>bits-py</code></td><td>Asyncio-native Python extension (built with <code>maturin</code>)</td></tr>
 </tbody>
 </table>
@@ -201,12 +201,30 @@
 <pre><code class="language-bash">cargo build
 cargo test
 </code></pre>
-<h2 id="run-locally"><a class="header" href="#run-locally">Run locally</a></h2>
-<p>The <code>bits-ecmwf</code> crate contains runnable examples. Start by copying and adapting one of the
-example configs from <code>bits-ecmwf/examples/</code>, or adapt <code>design_config.yaml</code> in the repository root.</p>
-<p>To run an example:</p>
-<pre><code class="language-bash">cargo run --bin &lt;example-name&gt;
+<h2 id="run-the-hello_bits-example"><a class="header" href="#run-the-hello_bits-example">Run the hello_bits example</a></h2>
+<p>The fastest way to see BITS in action:</p>
+<pre><code class="language-bash">cargo run -p bits --example hello_bits
 </code></pre>
+<p>This demonstrates custom actions and conditional routing. The config is embedded
+in the example source. See <code>bits/examples/hello_bits.rs</code>.</p>
+<h2 id="write-your-own-config"><a class="header" href="#write-your-own-config">Write your own config</a></h2>
+<p>Create a file called <code>my-config.yaml</code>:</p>
+<pre><code class="language-yaml">routes:
+  - default:
+      - target::http:
+          url: "http://httpbin.org/post"
+</code></pre>
+<p>This routes every job to <code>httpbin.org</code> which echoes back whatever you send.</p>
+<p>Start the server:</p>
+<pre><code class="language-bash">cargo run -p bits-server -- my-config.yaml
+</code></pre>
+<p>Then submit a job from another terminal:</p>
+<pre><code class="language-bash">curl -X POST http://localhost:8080/job \
+  -H "Content-Type: application/json" \
+  -d '{"dataset": "era5", "date": "2024-01-15"}'
+</code></pre>
+<p>You’ll get back either the result directly (if the backend responds within the
+poll timeout) or a <code>303</code> redirect to <code>/job/{id}</code> for reconnection.</p>
 <h2 id="python-extension"><a class="header" href="#python-extension">Python extension</a></h2>
 <p>An asyncio-native Python interface is available via the <code>bits-py</code> crate. To build and install it
 into your current Python environment:</p>
@@ -280,6 +298,8 @@ python bits-py/examples/custom_transform.py
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

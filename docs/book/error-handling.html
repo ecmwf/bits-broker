@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Architecture - BITS Documentation</title>
+        <title>Error Handling - BITS Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -176,165 +176,236 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="architecture"><a class="header" href="#architecture">Architecture</a></h1>
-<p><img src="images/bits_pipeline_tree.svg" alt="BITS pipeline routing architecture"></p>
-<h2 id="jobs"><a class="header" href="#jobs">Jobs</a></h2>
-<p>A <strong>job</strong> is the unit of work in BITS. When a client submits a request, BITS creates a job
-carrying:</p>
-<ul>
-<li><code>original_request</code> - the payload exactly as submitted. Never mutated. Used as the restart
-point if the job needs to be recovered after a broker failure.</li>
-<li><code>request</code> - a working copy of the payload, mutated by transform actions as the job flows
-through the pipeline.</li>
-<li><code>metadata</code> - mutable annotations added by transforms during routing (for example, a computed
-cost value).</li>
-<li><code>user</code> - identity of the submitting user.</li>
-</ul>
-<h2 id="pipelines"><a class="header" href="#pipelines">Pipelines</a></h2>
-<p>Every job flows through a <strong>pipeline</strong>: an ordered list of actions. BITS evaluates each action
-in sequence. There are three action types:</p>
-<h3 id="check"><a class="header" href="#check">Check</a></h3>
-<p>A guard condition. It evaluates the job and either <strong>passes</strong> or <strong>rejects</strong>. A rejection stops
-the current route and causes the enclosing <code>switch</code> to try the next named route. Checks do not
-mutate the job.</p>
-<p>Examples: <code>check::match</code>, <code>check::has_license</code></p>
-<h3 id="transform"><a class="header" href="#transform">Transform</a></h3>
-<p>A mutation step. It modifies the job (for example, expanding request parameters or computing a
-cost), then continues through the pipeline.</p>
-<p>Examples: <code>transform::metkit_expansion</code>, <code>transform::cost</code></p>
-<h3 id="target"><a class="header" href="#target">Target</a></h3>
-<p>The terminal dispatch step. It sends the job to a backend and returns a result. Every route must
-end with a target.</p>
-<p>Examples: <code>target::http</code>, <code>target::remote</code></p>
-<blockquote>
-<p><strong>Note:</strong> The core <code>bits</code> crate ships only <code>target::http</code> and
-<code>target::remote</code>. Domain-specific actions (<code>match</code>, <code>has_license</code>,
-<code>metkit_expansion</code>, <code>schedule_released</code>, etc.) are provided by the
-host application. Register your own actions using <code>register_action!</code>.
-See <a href="custom-actions.html">Custom Actions</a>.</p>
-</blockquote>
-<h2 id="switch"><a class="header" href="#switch">Switch</a></h2>
-<p>A <code>switch</code> contains named routes and tries them <strong>in order</strong>, returning the result of the first
-route whose checks all pass. This is the branching primitive. Use it to express conditional
-routing such as privileged versus public access paths. Switches can be nested inside routes.</p>
-<p>When all routes reject, the switch collects rejection reasons from non-silent actions and returns
-them to the user. Silent rejections (route-selection checks like <code>match</code>) are omitted; non-silent
-rejections (validation checks like <code>schedule_released</code>) are included so the user understands why
-a matched route still failed.</p>
-<h2 id="dispatcher"><a class="header" href="#dispatcher">Dispatcher</a></h2>
-<p>Any action step (check, transform, or target) can have an optional <strong>dispatcher</strong> that controls
-ordering and concurrency before the action runs.</p>
-<p>A dispatcher has two concerns:</p>
-<ul>
-<li><strong>Queue</strong>: controls which job runs next (<code>fifo</code>, <code>cost_weighted</code>, or <code>age_priority</code>). The queue
-only stores <code>Job</code> metadata; it knows nothing about work futures or result types.</li>
-<li><strong>Executor</strong>: owns the scheduling loop that pulls jobs from the queue and runs the associated
-work (<code>async_pool</code>, <code>thread_pool</code>, or <code>remote_pool</code>).</li>
-</ul>
-<p>Each executor implements its own scheduling model:</p>
-<ul>
-<li><strong>Async pool</strong> - N Tokio tasks (one per concurrency slot) each loop on <code>queue.dequeue()</code> and run
-work inline.</li>
-<li><strong>Thread pool</strong> - dedicated OS threads each call <code>queue.dequeue()</code> directly, run work via
-<code>block_on</code>, and send results back.</li>
-<li><strong>Remote pool</strong> - the <code>/work</code> HTTP handler calls <code>queue.dequeue()</code> directly when a remote worker
-polls, so external workers pull work at their own pace with no intermediate feeder task.</li>
-</ul>
-<p>This makes scheduling behavior explicit at the step level rather than a global setting. See
-<a href="configuration.html">Configuration</a> for dispatcher syntax and options.</p>
-<h2 id="background-threads-and-tasks"><a class="header" href="#background-threads-and-tasks">Background threads and tasks</a></h2>
-<p>BITS starts background threads and async tasks at startup and per-job. Operators should be
-aware of these when reasoning about resource usage, process behaviour on shutdown, and
-interaction with the host’s thread model.</p>
-<h3 id="tokio-async-runtime"><a class="header" href="#tokio-async-runtime">Tokio async runtime</a></h3>
-<p>The <code>bits-server</code> binary uses <code>#[tokio::main]</code> with the default multi-thread scheduler. Tokio
-spawns one worker thread per logical CPU. These are OS threads managed entirely by Tokio and
-are not counted in the items below.</p>
-<h3 id="started-at-bitsfrom_config---always"><a class="header" href="#started-at-bitsfrom_config---always">Started at <code>Bits::from_config()</code> - always</a></h3>
-<p><strong>Completed-job sweeper (1 OS thread)</strong>
-A single <code>std::thread::spawn</code> thread that wakes every 5 seconds (configurable via
-<code>bits.job_cleanup_interval_ms</code>) and removes finished jobs from the in-memory map once no client
-is polling them. A real blocking OS thread is used deliberately so it cannot interfere with the
-Tokio scheduler even if it is saturated.</p>
-<h3 id="started-at-bitsfrom_config---only-when-persistence-is-configured"><a class="header" href="#started-at-bitsfrom_config---only-when-persistence-is-configured">Started at <code>Bits::from_config()</code> - only when persistence is configured</a></h3>
-<p><strong>Broker lease heartbeat (1 Tokio task)</strong>
-A long-running async task that periodically upserts this broker’s lease record in the persistence
-store. It renews at half the configured lease TTL (minimum 100 ms between renewals). This task
-is the mechanism by which other brokers determine that this instance is alive. See
-<a href="persistence-broker-leases.html">Broker Leases</a>.</p>
-<h3 id="started-per-dispatcher---at-config-parse-time"><a class="header" href="#started-per-dispatcher---at-config-parse-time">Started per dispatcher - at config parse time</a></h3>
-<p>Each action step with a <code>dispatcher:</code> block starts background workers when the configuration is
-loaded. The executor owns the scheduling loop. The number and kind of workers depend on the
-executor type configured.</p>
-<p><strong>Async pool scheduler (N Tokio tasks, if <code>executor: async_pool</code>)</strong>
-One Tokio task per <code>concurrency</code> slot. Each task loops: dequeue a job from the queue, run
-the work future inline, send the result back, then dequeue the next. Concurrency is controlled
-by the number of tasks.</p>
-<p><strong>Cost-weighted queue worker (1 Tokio task, if <code>queue: cost_weighted</code>)</strong>
-Maintains the priority heap and services dequeue requests in cost order. Not started when
-<code>queue: fifo</code> is used. FIFO uses a plain channel with no background task.</p>
-<p><strong>Thread pool workers (N OS threads, if <code>executor: thread_pool</code>)</strong>
-One OS thread per <code>concurrency</code> unit. Each thread calls <code>queue.dequeue()</code> directly (via
-<code>block_on</code>), resolves the pending work, and runs it on that OS thread. Used to isolate
-CPU-bound or blocking work from the async scheduler. Not started unless <code>executor: thread_pool</code>
-is explicitly configured.</p>
-<p><strong>Remote pool HTTP server + heartbeat reaper (2 Tokio tasks, if <code>executor: remote_pool</code>)</strong>
-One task runs an axum HTTP server on the configured bind address (default <code>0.0.0.0:9001</code>).
-The <code>/work</code> endpoint calls <code>queue.dequeue()</code> directly when a remote worker long-polls. There
-is no intermediate feeder task. A second task scans in-progress jobs every
-<code>heartbeat_timeout / 2</code> seconds and evicts any worker that has stopped sending heartbeats.
-Started when <code>executor: remote_pool</code> is configured (or when <code>target::remote</code> is used, which
-implies it). When routes are added programmatically via <code>add_route()</code>, remote pools are
-registered during that call and the worker server listener is started automatically.</p>
-<p>For the wire protocol and worker implementation contract, see
-<a href="external-workers.html">External Workers</a>.</p>
-<h3 id="started-per-submitted-job"><a class="header" href="#started-per-submitted-job">Started per submitted job</a></h3>
-<p><strong>Job dispatch task (1 Tokio task per job)</strong>
-Runs the full pipeline for one job. If <code>bits.persist_after_ms</code> is configured, this task also
-handles the persistence threshold: it races the pipeline against a timer, and if the timer fires
-first it writes the durable job record before continuing to wait for the pipeline to complete.
-There is no separate timer task. The threshold logic lives inside this task via <code>tokio::select!</code>.</p>
-<h3 id="summary"><a class="header" href="#summary">Summary</a></h3>
+                        <h1 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h1>
+<p>Every error from the BITS library is typed and matchable. Callers can
+distinguish YAML syntax errors from missing config fields from persistence
+failures, programmatically and without string parsing.</p>
+<h2 id="error-hierarchy"><a class="header" href="#error-hierarchy">Error hierarchy</a></h2>
+<pre><code>BitsError
+├── Config(ConfigError)
+│   ├── Yaml(serde_yaml::Error)
+│   ├── Validation { path, reason }
+│   ├── MissingField { path }
+│   ├── FeatureDisabled { path, feature }
+│   ├── Decode { path, target, source }
+│   └── PersistenceInit { path, backend, reason }
+├── Routing(RoutingError)
+│   ├── InvalidRoute { route, reason }
+│   ├── InvalidAction { route, action, reason }
+│   └── MissingTarget { route }
+├── Persistence(DbError)
+│   ├── Conflict(String)
+│   └── Backend(String)
+├── Action(ActionError)
+│   ├── NetworkError(String)
+│   ├── QueueFull(String)
+│   ├── Timeout(String)
+│   ├── ConfigError(String)
+│   ├── AuthError(String)
+│   ├── ResourceError(String)
+│   ├── Cancelled
+│   └── ClientGone
+└── WorkerServer(WorkerServerError)
+    ├── Bind { address, reason }
+    └── PoolRegistration { name, reason }
+</code></pre>
+<p><code>BitsError</code>, <code>ConfigError</code>, <code>RoutingError</code>, and <code>WorkerServerError</code> are
+<code>#[non_exhaustive]</code>, so new variants can be added without breaking your match
+arms (as long as you have a wildcard). <code>ActionError</code> and <code>DbError</code> are not
+yet <code>#[non_exhaustive]</code> but may become so in a future release.</p>
+<h2 id="error-codes"><a class="header" href="#error-codes">Error codes</a></h2>
+<p>Every error has a stable machine-readable <code>code()</code> string. These codes are
+part of the public API contract and won’t change between releases:</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Background worker</th><th>Kind</th><th>Count</th><th>Started when</th></tr>
+<tr><th>Code</th><th>Variant</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td>Completed-job sweeper</td><td>OS thread</td><td>1 per <code>Bits</code> instance</td><td>Always, at startup</td></tr>
-<tr><td>Broker lease heartbeat</td><td>Tokio task</td><td>1 per <code>Bits</code> instance</td><td>At startup, if persistence configured</td></tr>
-<tr><td>Async pool scheduler</td><td>Tokio tasks</td><td>N per <code>async_pool</code> executor</td><td>At config parse, per dispatcher block</td></tr>
-<tr><td>Cost-weighted queue worker</td><td>Tokio task</td><td>1 per <code>cost_weighted</code> queue</td><td>At config parse, if <code>queue: cost_weighted</code></td></tr>
-<tr><td>Thread pool OS workers</td><td>OS threads</td><td>N per <code>thread_pool</code> executor</td><td>At config parse, if <code>executor: thread_pool</code></td></tr>
-<tr><td>Remote pool HTTP server</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
-<tr><td>Remote pool heartbeat reaper</td><td>Tokio task</td><td>1 per <code>remote_pool</code> executor</td><td>At config parse, or on first <code>add_route()</code> with remote pools</td></tr>
-<tr><td>Job dispatch + persist timer</td><td>Tokio task</td><td>1 per submitted job</td><td>Per <code>Bits::submit()</code></td></tr>
+<tr><td><code>CONFIG_YAML_SYNTAX</code></td><td><code>ConfigError::Yaml</code></td><td>Invalid YAML syntax.</td></tr>
+<tr><td><code>CONFIG_VALIDATION</code></td><td><code>ConfigError::Validation</code></td><td>Field value is invalid.</td></tr>
+<tr><td><code>CONFIG_MISSING_FIELD</code></td><td><code>ConfigError::MissingField</code></td><td>Required field is absent.</td></tr>
+<tr><td><code>CONFIG_FEATURE_DISABLED</code></td><td><code>ConfigError::FeatureDisabled</code></td><td>Persistence needs a feature flag.</td></tr>
+<tr><td><code>CONFIG_DECODE</code></td><td><code>ConfigError::Decode</code></td><td>Action config deserialization failed.</td></tr>
+<tr><td><code>CONFIG_PERSISTENCE_INIT</code></td><td><code>ConfigError::PersistenceInit</code></td><td>Can’t connect to NATS/TiKV.</td></tr>
+<tr><td><code>ROUTING_INVALID_ROUTE</code></td><td><code>RoutingError::InvalidRoute</code></td><td>Route definition is invalid.</td></tr>
+<tr><td><code>ROUTING_INVALID_ACTION</code></td><td><code>RoutingError::InvalidAction</code></td><td>Unknown action type or namespace.</td></tr>
+<tr><td><code>ROUTING_MISSING_TARGET</code></td><td><code>RoutingError::MissingTarget</code></td><td>Route doesn’t end with a target.</td></tr>
+<tr><td><code>PERSISTENCE_CONFLICT</code></td><td><code>DbError::Conflict</code></td><td>CAS contention during claim.</td></tr>
+<tr><td><code>PERSISTENCE_BACKEND</code></td><td><code>DbError::Backend</code></td><td>Persistence store error.</td></tr>
+<tr><td><code>ACTION_NETWORK</code></td><td><code>ActionError::NetworkError</code></td><td>Upstream call failed.</td></tr>
+<tr><td><code>ACTION_QUEUE_FULL</code></td><td><code>ActionError::QueueFull</code></td><td>Dispatcher queue at capacity.</td></tr>
+<tr><td><code>ACTION_TIMEOUT</code></td><td><code>ActionError::Timeout</code></td><td>Operation timed out.</td></tr>
+<tr><td><code>ACTION_CONFIG</code></td><td><code>ActionError::ConfigError</code></td><td>Action misconfigured.</td></tr>
+<tr><td><code>ACTION_AUTH</code></td><td><code>ActionError::AuthError</code></td><td>Missing credentials.</td></tr>
+<tr><td><code>ACTION_RESOURCE</code></td><td><code>ActionError::ResourceError</code></td><td>Resource unavailable.</td></tr>
+<tr><td><code>ACTION_CANCELLED</code></td><td><code>ActionError::Cancelled</code></td><td>Job was cancelled.</td></tr>
+<tr><td><code>ACTION_CLIENT_GONE</code></td><td><code>ActionError::ClientGone</code></td><td>Client disconnected.</td></tr>
+<tr><td><code>WORKER_BIND</code></td><td><code>WorkerServerError::Bind</code></td><td>Worker server port in use.</td></tr>
+<tr><td><code>WORKER_POOL</code></td><td><code>WorkerServerError::PoolRegistration</code></td><td>Pool registration failed.</td></tr>
 </tbody>
 </table>
 </div>
-<h2 id="multi-broker-cooperation"><a class="header" href="#multi-broker-cooperation">Multi-broker cooperation</a></h2>
-<p>In production, multiple broker instances run behind a load balancer. Each broker holds an
-in-memory shard of the dispatcher state and a broker lease record in durable storage.</p>
-<p>When a poll request arrives at a broker that does not own the job:</p>
-<ol>
-<li>The broker parses the owner from the job ID.</li>
-<li>It resolves the owner’s endpoint from broker lease records.</li>
-<li>It proxies the poll internally to the owner.</li>
-<li>If the owner lease is missing or expired, it may claim and recover the job from durable
-storage.</li>
-</ol>
-<p>For full details, see the <a href="persistence.html">Persistence</a> section.</p>
-<p>For implementation-level detail and design rationale, see <code>design.md</code> in the repository root.</p>
+<h2 id="retryability"><a class="header" href="#retryability">Retryability</a></h2>
+<p>Some errors are caused by temporary conditions, such as a network blip, a busy queue,
+two brokers racing to claim the same job. If you retry the same operation a
+moment later, it will likely succeed. These are <strong>retryable</strong>.</p>
+<p>Other errors are caused by something fundamentally wrong: invalid config, a
+misspelled action name, a cancelled job. No amount of retrying will fix them.
+The operator or developer needs to change something first. These are
+<strong>not retryable</strong>.</p>
+<p><code>is_retryable()</code> tells you which category an error falls into, so your code
+can decide automatically:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>match bits.poll(&amp;job_id, Some(Duration::from_secs(30))).await {
+    PollOutcome::Ready(result) =&gt; handle(result),
+    PollOutcome::Pending { .. } =&gt; { /* poll again */ }
+    PollOutcome::NotFound =&gt; { /* job gone, don't retry */ }
+}
+
+// For startup errors:
+match Bits::from_config(config) {
+    Ok(bits) =&gt; run(bits),
+    Err(e) if e.is_retryable() =&gt; {
+        // Transient - back off and retry.
+        // Examples: NATS connection timeout, CAS contention,
+        // upstream network error, queue at capacity.
+        eprintln!("Transient error [{}]: {e}, retrying...", e.code());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // retry...
+    }
+    Err(e) =&gt; {
+        // Permanent - retrying won't help, fix the cause.
+        // Examples: invalid YAML, missing config field,
+        // feature not compiled, bad credentials.
+        eprintln!("Fatal error [{}]: {e}", e.code());
+        std::process::exit(1);
+    }
+}
+<span class="boring">}</span></code></pre>
+<h3 id="which-errors-are-retryable"><a class="header" href="#which-errors-are-retryable">Which errors are retryable?</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Error</th><th>Retryable</th><th>Why</th></tr>
+</thead>
+<tbody>
+<tr><td><code>NetworkError</code></td><td>Yes</td><td>Upstream call failed - might succeed on retry.</td></tr>
+<tr><td><code>Timeout</code></td><td>Yes</td><td>Operation timed out - might complete with longer timeout.</td></tr>
+<tr><td><code>QueueFull</code></td><td>Yes</td><td>Dispatcher queue at capacity - space may free up.</td></tr>
+<tr><td><code>DbError::Conflict</code></td><td>Yes</td><td>CAS contention during claim - another broker won the race, try again.</td></tr>
+<tr><td><code>DbError::Backend</code></td><td>Yes</td><td>Persistence store error - typically connection issues.</td></tr>
+<tr><td><code>ConfigError::*</code></td><td>No</td><td>Config is broken - fix the YAML and restart.</td></tr>
+<tr><td><code>RoutingError::*</code></td><td>No</td><td>Route definition is wrong - fix the config.</td></tr>
+<tr><td><code>AuthError</code></td><td>No</td><td>Missing credentials - fix the user context.</td></tr>
+<tr><td><code>Cancelled</code></td><td>No</td><td>Job was explicitly cancelled - don’t retry cancelled work.</td></tr>
+<tr><td><code>ClientGone</code></td><td>No</td><td>Client disconnected - nobody to deliver the result to.</td></tr>
+<tr><td><code>WorkerServerError::*</code></td><td>No</td><td>Port binding failed - fix the config or free the port.</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="retryability-in-http-responses"><a class="header" href="#retryability-in-http-responses">Retryability in HTTP responses</a></h3>
+<p>When building an HTTP API on top of BITS, use <code>is_retryable()</code> to set the
+appropriate status code and headers:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>if err.is_retryable() {
+    // 503 Service Unavailable + Retry-After
+    (StatusCode::SERVICE_UNAVAILABLE, [("Retry-After", "1")])
+} else {
+    // 500, no retry
+    (StatusCode::INTERNAL_SERVER_ERROR, [])
+}
+<span class="boring">}</span></code></pre>
+<h2 id="matching-on-errors"><a class="header" href="#matching-on-errors">Matching on errors</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use bits::{Bits, BitsError, ConfigError, RoutingError};
+
+match Bits::from_config(config) {
+    Ok(bits) =&gt; { /* ready */ }
+
+    // YAML is broken
+    Err(BitsError::Config(ConfigError::Yaml(e))) =&gt; {
+        eprintln!("Fix your YAML syntax: {e}");
+    }
+
+    // Feature not compiled
+    Err(BitsError::Config(ConfigError::FeatureDisabled { feature, .. })) =&gt; {
+        eprintln!("Build with: cargo build --features {feature}");
+    }
+
+    // Can't connect to persistence store
+    Err(BitsError::Config(ConfigError::PersistenceInit { backend, reason, .. })) =&gt; {
+        eprintln!("{backend} is down: {reason}");
+    }
+
+    // Route validation failed
+    Err(BitsError::Routing(RoutingError::MissingTarget { route })) =&gt; {
+        eprintln!("Route '{route}' needs a target at the end");
+    }
+
+    // Anything else
+    Err(e) =&gt; {
+        eprintln!("Error [{}]: {e}", e.code());
+        eprintln!("Retryable: {}", e.is_retryable());
+    }
+}
+<span class="boring">}</span></code></pre>
+<h2 id="config-error-paths"><a class="header" href="#config-error-paths">Config error paths</a></h2>
+<p>Config errors include the YAML field path that caused the failure:</p>
+<pre><code>config: bits.persistence.broker_lease_ttl_secs: must be a finite number &gt;= 1.0
+config: bits.persistence.url: must not be empty
+config: bits.persistence.type: feature 'nats' not enabled
+config: bits.persistence: nats initialization failed: connection refused
+</code></pre>
+<p>This makes it easy to pinpoint the exact field without guessing.</p>
+<h2 id="error-propagation-for-library-users"><a class="header" href="#error-propagation-for-library-users">Error propagation for library users</a></h2>
+<p><code>BitsError</code> implements <code>std::error::Error</code>, so it works with <code>?</code> in any
+function that returns <code>Box&lt;dyn Error&gt;</code> or <code>anyhow::Result</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Works in anyhow context
+fn setup() -&gt; anyhow::Result&lt;Bits&gt; {
+    Ok(Bits::from_config(config)?)
+}
+
+// Works in Box&lt;dyn Error&gt; context
+fn setup() -&gt; Result&lt;Bits, Box&lt;dyn std::error::Error&gt;&gt; {
+    Ok(Bits::from_config(config)?)
+}
+
+// Best: use the typed error directly
+fn setup() -&gt; Result&lt;Bits, BitsError&gt; {
+    Bits::from_config(config)
+}
+<span class="boring">}</span></code></pre>
+<h2 id="forward-compatibility"><a class="header" href="#forward-compatibility">Forward compatibility</a></h2>
+<p>All error enums use <code>#[non_exhaustive]</code>. To handle this safely:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>match err {
+    BitsError::Config(_) =&gt; { /* handle config errors */ }
+    BitsError::Routing(_) =&gt; { /* handle routing errors */ }
+    _ =&gt; { /* catch-all for future variants */ }
+}
+<span class="boring">}</span></code></pre>
+<p>The <code>code()</code> strings are stable across releases. You can use them in
+monitoring dashboards, alerting rules, and log aggregation queries:</p>
+<pre><code>bits_errors_total{code="CONFIG_YAML_SYNTAX"}
+bits_errors_total{code="PERSISTENCE_BACKEND"}
+</code></pre>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="getting-started.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="data-flow.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="data-flow.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="configuration.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -344,11 +415,11 @@ storage.</li>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="getting-started.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="data-flow.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="data-flow.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="configuration.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

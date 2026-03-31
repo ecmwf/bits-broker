@@ -29,6 +29,7 @@
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/tabs-52f01167.css">
+        <link rel="stylesheet" href="theme/mermaid-7482e766.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -36,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-12718aac.js";
+            window.path_to_searchindex_js = "searchindex-84a6adaa.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4f4f24e7.js"></script>
+        <script src="toc-c190eb19.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -213,14 +214,14 @@ structured decision sequence to locate the result or recover the job.</p>
 <tr><th>Owner response</th><th>Caller receives</th></tr>
 </thead>
 <tbody>
-<tr><td><code>200 OK</code></td><td><code>Ready(Success)</code> — body streamed through</td></tr>
-<tr><td><code>303</code>/<code>307</code> with <code>Location</code> containing the job ID</td><td><code>Pending</code> — job is still in progress</td></tr>
-<tr><td><code>303</code>/<code>307</code> with <code>Location</code> not containing the job ID</td><td><code>Ready(Redirect)</code> — result is a redirect</td></tr>
+<tr><td><code>200 OK</code></td><td><code>Ready(Success)</code> - body streamed through</td></tr>
+<tr><td><code>303</code>/<code>307</code> with <code>Location</code> containing the job ID</td><td><code>Pending</code> - job is still in progress</td></tr>
+<tr><td><code>303</code>/<code>307</code> with <code>Location</code> not containing the job ID</td><td><code>Ready(Redirect)</code> - result is a redirect</td></tr>
 <tr><td><code>404 Not Found</code></td><td><code>NotFound</code></td></tr>
 <tr><td><code>400 Bad Request</code></td><td><code>Ready(Error)</code></td></tr>
 <tr><td><code>410 Gone</code></td><td><code>Ready(Cancelled)</code></td></tr>
-<tr><td><code>5xx</code></td><td><code>Pending</code> — owner is alive but errored; client should retry</td></tr>
-<tr><td>Network/timeout failure</td><td><code>Pending</code> — no ownership transfer while lease is active</td></tr>
+<tr><td><code>5xx</code></td><td><code>Pending</code> - owner is alive but errored; client should retry</td></tr>
+<tr><td>Network/timeout failure</td><td><code>Pending</code> - no ownership transfer while lease is active</td></tr>
 </tbody>
 </table>
 </div>
@@ -230,16 +231,16 @@ runs <code>claim_with_backoff</code>:</p>
 <ul>
 <li>Budget: <code>min(requested_timeout, 2 s)</code></li>
 <li>Backoff: starts at 100 ms, doubles each retry, capped at 1 s</li>
-<li>Uses an optimistic transaction in TiKV; up to 2 commit retries before returning <code>Conflict</code></li>
+<li>Uses backend-specific CAS: optimistic transaction in TiKV, revision-based update with retry in NATS</li>
 </ul>
 <p>On a successful claim, <code>Job::restore</code> reconstructs the job from the durable record:</p>
 <ul>
-<li><code>request</code> is reset to <code>original_request</code> — the pipeline re-runs from the beginning</li>
+<li><code>request</code> is reset to <code>original_request</code>. The pipeline re-runs from the beginning</li>
 <li><code>created_at</code> is preserved from the original submission timestamp</li>
 <li>All runtime state (cancelled flag, client-connected flag, etc.) starts fresh</li>
 </ul>
 <p>The job is submitted immediately and the polling request is attached to it, so the client
-receives <code>Pending</code> in response to the recovery poll — not an extra round-trip.</p>
+receives <code>Pending</code> in response to the recovery poll without an extra round-trip.</p>
 <h2 id="claim-outcomes"><a class="header" href="#claim-outcomes">Claim outcomes</a></h2>
 <div class="table-wrapper">
 <table>
@@ -313,6 +314,8 @@ the dispatch pipeline treats the connection as lost and stops work.</p>
 
         <!-- Custom JS scripts -->
         <script src="theme/tabs-0c8cb93b.js"></script>
+        <script src="mermaid-eefea253.min.js"></script>
+        <script src="mermaid-init-7431eaa7.js"></script>
 
 
 

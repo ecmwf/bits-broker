@@ -15,6 +15,8 @@ pub enum JobResult {
     Error { message: String },
     /// System-level failure (routing failed, network error, etc.).
     Failed { reason: String },
+    /// System is at capacity; the caller should retry later.
+    Overloaded { reason: String },
     /// Job was cancelled before reaching a target (explicit cancel).
     Cancelled,
     /// Job reached a target but the client was no longer present to receive the result.
@@ -32,6 +34,7 @@ impl std::fmt::Debug for JobResult {
             }
             JobResult::Error { message } => write!(f, "Error({})", message),
             JobResult::Failed { reason } => write!(f, "Failed({})", reason),
+            JobResult::Overloaded { reason } => write!(f, "Overloaded({})", reason),
             JobResult::Cancelled => write!(f, "Cancelled"),
             JobResult::ClientGone => write!(f, "ClientGone"),
         }

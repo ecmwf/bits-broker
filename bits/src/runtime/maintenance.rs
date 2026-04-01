@@ -75,6 +75,7 @@ pub(crate) fn start_sweeper(
     sweep_interval: Duration,
     job_store: Option<Arc<dyn PersistenceStore>>,
     shutdown: Arc<ShutdownSignal>,
+    job_count: Arc<AtomicUsize>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let runtime = job_store.as_ref().and_then(|_| {
@@ -124,6 +125,10 @@ pub(crate) fn start_sweeper(
                         .is_some()
                         && !job.client_present()
                 });
+                if removed.is_some() {
+                    let _ = job_count
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+                }
                 if let Some((_, job)) = removed
                     && job.persisted.load(Ordering::Acquire)
                     && let (Some(store), Some(rt)) = (&job_store, &runtime)

@@ -267,6 +267,7 @@ mod tests {
             }),
             None,
             None,
+            crate::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created");
@@ -362,6 +363,7 @@ mod tests {
             }),
             None,
             None,
+            crate::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created");

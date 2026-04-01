@@ -201,11 +201,12 @@ async fn handle_get_work(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .remove(&job.id);
-    let Some((guard, _work, reply_tx)) = item else {
+    let Some((guard, _work, reply_tx, permit)) = item else {
         // Caller cancelled before the work handler picked it up — skip.
         // Return 204 to tell the worker to poll again.
         return Err(StatusCode::NO_CONTENT);
     };
+    drop(permit);
 
     if reply_tx.is_closed() {
         // Caller cancelled — drop.

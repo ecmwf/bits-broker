@@ -10,8 +10,11 @@ use crate::Bits;
 use crate::actions::Action;
 use crate::actions::registry::create_action;
 use crate::actions::{TargetAction, TargetResult};
+use crate::bits::DEFAULT_MAX_JOBS;
 use crate::db::PersistenceStore;
-use crate::dispatcher::{Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig};
+use crate::dispatcher::{
+    DEFAULT_QUEUE_CAPACITY, Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig,
+};
 use crate::error::{BitsError, ConfigError, RoutingError, WorkerServerError};
 use crate::routing::{Route, switch::Switch};
 use crate::server::ServerConfig;
@@ -55,10 +58,20 @@ struct ParseContext {
     worker_server: Option<Arc<WorkerServer>>,
 }
 
-#[derive(Default)]
 struct DispatcherSettings {
     queue: Option<QueueKind>,
     executor: Option<ExecutorKind>,
+    queue_capacity: usize,
+}
+
+impl Default for DispatcherSettings {
+    fn default() -> Self {
+        Self {
+            queue: None,
+            executor: None,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +110,8 @@ struct BitsConfig {
     persistence: Option<PersistenceConfig>,
     #[serde(default)]
     worker_server: Option<WorkerServerConfig>,
+    #[serde(default)]
+    max_jobs: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +228,7 @@ pub(crate) struct RuntimeConfig {
     pub job_store: Option<Arc<dyn PersistenceStore>>,
     pub broker_lease_ttl: Duration,
     pub persist_after: Option<Duration>,
+    pub max_jobs: usize,
 }
 
 /// Parsed startup configuration split into broker runtime and HTTP server parts.
@@ -302,6 +318,10 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .map(|v| duration_secs("bits.persist_after_secs", v))
         .transpose()?;
 
+    if let Some(0) = bits_cfg.max_jobs {
+        return Err(ConfigError::validation("bits.max_jobs", "must be greater than zero").into());
+    }
+
     let server_value = raw.get("server").cloned();
     let had_server_section = server_value.is_some();
     let server_config: ServerConfig = server_value
@@ -317,6 +337,13 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
 
     let poll_timeout =
         positive_duration_secs("server.poll_timeout_secs", server_config.poll_timeout_secs)?;
+    if server_config.retry_after_secs == 0 {
+        return Err(ConfigError::validation(
+            "server.retry_after_secs",
+            "must be greater than zero",
+        )
+        .into());
+    }
 
     let internal_poll_endpoint = bits_cfg.internal_poll_endpoint.unwrap_or_else(|| {
         let is_wildcard_v4 = server_config.host == "0.0.0.0";
@@ -362,7 +389,10 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         Some(PersistenceConfig::Tikv {
             endpoints,
             broker_lease_ttl_secs,
+            #[cfg(feature = "tikv")]
             connect_timeout_secs,
+            #[cfg(not(feature = "tikv"))]
+                connect_timeout_secs: _,
         }) => {
             if endpoints.is_empty() {
                 return Err(ConfigError::validation(
@@ -381,12 +411,6 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                 )
                 .into());
             }
-            let connect_timeout = match connect_timeout_secs {
-                Some(secs) => {
-                    positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?
-                }
-                None => Duration::from_secs(10),
-            };
             #[cfg(not(feature = "tikv"))]
             {
                 return Err(ConfigError::FeatureDisabled {
@@ -397,6 +421,12 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             }
             #[cfg(feature = "tikv")]
             {
+                let connect_timeout = match connect_timeout_secs {
+                    Some(secs) => {
+                        positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?
+                    }
+                    None => Duration::from_secs(10),
+                };
                 (
                     Some(Arc::new(StoreFactory::new(endpoints, connect_timeout))
                         as Arc<dyn PersistenceStore>),
@@ -410,8 +440,14 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             leases_bucket,
             broker_lease_ttl_secs,
             num_replicas,
+            #[cfg(feature = "nats")]
             connect_timeout_secs,
+            #[cfg(not(feature = "nats"))]
+                connect_timeout_secs: _,
+            #[cfg(feature = "nats")]
             init_max_attempts,
+            #[cfg(not(feature = "nats"))]
+                init_max_attempts: _,
         }) => {
             if url.is_empty() {
                 return Err(
@@ -449,20 +485,6 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                 )
                 .into());
             }
-            let connect_timeout = match connect_timeout_secs {
-                Some(secs) => {
-                    positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?
-                }
-                None => Duration::from_secs(10),
-            };
-            let max_attempts = init_max_attempts.unwrap_or(6);
-            if max_attempts < 1 {
-                return Err(ConfigError::validation(
-                    "bits.persistence.init_max_attempts",
-                    "must be at least 1",
-                )
-                .into());
-            }
             #[cfg(not(feature = "nats"))]
             {
                 return Err(ConfigError::FeatureDisabled {
@@ -473,6 +495,20 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             }
             #[cfg(feature = "nats")]
             {
+                let connect_timeout = match connect_timeout_secs {
+                    Some(secs) => {
+                        positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?
+                    }
+                    None => Duration::from_secs(10),
+                };
+                let max_attempts = init_max_attempts.unwrap_or(6);
+                if max_attempts < 1 {
+                    return Err(ConfigError::validation(
+                        "bits.persistence.init_max_attempts",
+                        "must be at least 1",
+                    )
+                    .into());
+                }
                 let store = crate::db::nats::NatsStore::new(
                     url,
                     jobs_bucket,
@@ -619,6 +655,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             job_store,
             broker_lease_ttl,
             persist_after,
+            max_jobs: bits_cfg.max_jobs.unwrap_or(DEFAULT_MAX_JOBS),
         },
         server_config,
         had_server_section,
@@ -903,6 +940,24 @@ fn parse_dispatcher_fields(
                 })
             })
             .transpose()?;
+        if let Some(v) = map.get("queue_capacity") {
+            let cap = v.as_u64().ok_or_else(|| {
+                ConfigError::validation("dispatcher.queue_capacity", "must be a positive integer")
+            })?;
+            if cap == 0 {
+                return Err(ConfigError::validation(
+                    "dispatcher.queue_capacity",
+                    "must be greater than zero",
+                )
+                .into());
+            }
+            settings.queue_capacity = usize::try_from(cap).map_err(|_| {
+                ConfigError::validation(
+                    "dispatcher.queue_capacity",
+                    "value too large for this platform",
+                )
+            })?;
+        }
         if map.contains_key("concurrency") {
             return Err(ConfigError::validation(
                 "dispatcher.concurrency",
@@ -1019,6 +1074,7 @@ fn attach_dispatcher(
                 settings.executor.as_ref(),
                 None,
                 None,
+                settings.queue_capacity,
             )
             .map_err(|e| ConfigError::validation("dispatcher", e))?;
             Ok(Action::Check(check, dispatcher, silent))
@@ -1029,6 +1085,7 @@ fn attach_dispatcher(
                 settings.executor.as_ref(),
                 None,
                 None,
+                settings.queue_capacity,
             )
             .map_err(|e| ConfigError::validation("dispatcher", e))?;
             Ok(Action::Transform(transform, dispatcher, silent))
@@ -1044,6 +1101,7 @@ fn attach_dispatcher(
                 settings.executor.as_ref(),
                 pool_name,
                 ctx.worker_server.clone(),
+                settings.queue_capacity,
             )
             .map_err(|e| ConfigError::validation("dispatcher", e))?;
             Ok(Action::Target(target, dispatcher, silent))

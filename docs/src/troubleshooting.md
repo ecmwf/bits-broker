@@ -283,6 +283,21 @@ or backend-specific timeout messages.
 - The 10-second timeout covers initial connection and bucket setup; once
   connected, individual operations use the backend's own timeouts
 
+### Transaction rollback warnings
+
+If you see `transaction rollback failed`, the broker finished reading data
+from TiKV but TiKV did not confirm cleanup of that read operation.
+
+**Impact**: This does not mean a job or lookup failed. The broker already got
+the data it needed. An occasional warning is normal, but repeated warnings
+can mean TiKV is overloaded or intermittently unreachable. No restart is
+needed for isolated warnings.
+
+**Solutions**:
+- Check TiKV cluster health and PD endpoint reachability
+- Monitor the frequency of these warnings as a backend health signal
+- Investigate if warnings correlate with increased TiKV latency
+
 ### Broker lease expired while jobs running
 
 A broker crashed or lost network connectivity. Its lease expired, and peers
@@ -324,6 +339,29 @@ The worker closed its connection or crashed mid-processing.
 - Implement reliable worker supervision (systemd, Kubernetes, etc.)
 - Design jobs to be safely retryable
 - Use persistence so jobs can be reclaimed by other workers
+
+### Invalid response headers
+
+If you see `content-type header has invalid value` or
+`content-length header is not a valid number`, a worker or upstream service
+returned a malformed HTTP response header.
+
+**Impact**: The job still completes, but clients may receive the response with
+a fallback content type or without a usable content length. The body itself is
+still delivered; the risk is incorrect file type or size metadata. Usually
+non-critical unless clients depend on correct `Content-Type` or
+`Content-Length`.
+
+This warning only fires when a header is present but malformed. Missing
+headers use defaults silently, which is standard HTTP behavior.
+
+**Solutions**:
+- Check the actual response headers returned by the worker or service (for
+  example with access logs or `curl -v`)
+- Fix malformed `Content-Type` values and ensure `Content-Length` is a
+  decimal number
+- If a proxy sits in front of the service, check whether it is rewriting
+  headers incorrectly
 
 ### Malformed completion
 
@@ -394,6 +432,28 @@ smaller if queues drain quickly, larger if backlog clears more slowly.
 
 ---
 
+## Queue worker failures
+
+If you see `queue worker has exited`, the broker's queue manager crashed for
+a route that uses priority-based scheduling (`cost_weighted` or
+`age_priority`).
+
+**Impact**: The affected route stops making progress. New jobs for that route
+will not be processed, and existing queued jobs remain stuck. Clients
+submitting to the route will not receive errors, but their jobs will never
+complete. Other routes on the same broker are not affected.
+
+This warning fires once when the failure is first detected. The route stays
+broken until the broker is restarted.
+
+**Solutions**:
+- Restart the broker to restore the route
+- Check process logs and stderr around the same timestamp for the crash reason
+- If this repeats on the same route, compare that route's recent traffic and
+  scheduling settings against healthy routes
+
+---
+
 ## Performance issues
 
 ### High latency
@@ -442,6 +502,11 @@ A broker cannot proxy a poll to the job's owner broker.
 **Behavior**: The polling broker returns `Pending` rather than claiming the
 job, because the owner's lease is still valid.
 
+**Diagnostic**: If you see `proxy request to owner broker failed` at warn
+level, one broker tried to contact the job's owner broker and could not reach
+it (connection refused, DNS failure, etc.). Debug-level timeout messages by
+themselves are expected and usually do not require action.
+
 **Causes**:
 - Owner broker crashed but lease has not expired yet
 - Network partition between brokers
@@ -451,6 +516,7 @@ job, because the owner's lease is still valid.
 - Verify `internal_poll_endpoint` is reachable from peer brokers
 - Reduce `broker_lease_ttl_secs` for faster failover
 - Monitor inter-broker network health
+- Check the `error` field in the log message for the specific failure reason
 
 ### Split brain
 

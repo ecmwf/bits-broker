@@ -374,6 +374,27 @@ internal to your cluster:
 - Use network policies to restrict access
 - In Kubernetes, do not include port 9001 in the public service
 
+### Backpressure and load shedding
+
+BITS bounds queue depths and total in-flight jobs to prevent unbounded memory
+growth. These limits act as OOM protection; per-user rate limiting should be
+the primary mechanism for controlling load.
+
+| Setting | Scope | Default | Configurable via |
+|---------|-------|---------|-----------------|
+| Queue capacity | Per dispatcher | 500,000 | `dispatcher.queue_capacity` on each action entry |
+| Max jobs | Broker-wide | 500,000 | `bits.max_jobs` |
+| Retry-After header | HTTP response | 5s | `server.retry_after_secs` |
+
+When a limit is reached, the broker responds with HTTP 529 (Site Overloaded)
+and a `Retry-After` header. The response body includes `"code": "QUEUE_FULL"`
+and `"retryable": true`.
+
+Per-job memory is roughly 500 bytes of fixed overhead plus 2x the request
+body size (one copy in the job store, one clone in the dispatcher queue).
+At 500K jobs with 5 KB request bodies, expect approximately 5 GB of memory
+for job storage.
+
 ### Timeout defaults
 
 BITS applies default timeouts to all outbound I/O to prevent hung connections
@@ -436,6 +457,7 @@ server:
   host: "0.0.0.0"
   port: 8080
   poll_timeout_secs: 30.0
+  retry_after_secs: 5            # Retry-After header on 529 overload responses
 
 # =============================================================================
 # BITS broker identity and persistence
@@ -443,6 +465,10 @@ server:
 bits:
   # Stable prefix for this broker set. Each instance appends a UUID.
   broker_id_prefix: "bits-prod"
+
+  # Maximum total jobs tracked by this broker (queued + executing + completed).
+  # Default 500000. Acts as OOM protection, not load control.
+  max_jobs: 500000
 
   # URL at which peer brokers can reach this instance
   # (auto-derived from server.host/port when omitted)
@@ -498,6 +524,7 @@ targets:
     url: "http://backend-service:8080/api"
     dispatcher:
       queue: cost_weighted
+      queue_capacity: 500000     # per-dispatcher queue bound (default 500000)
       executor:
         type: async_pool
         concurrency: 16
@@ -507,6 +534,7 @@ targets:
     type: remote
     dispatcher:
       queue: fifo
+      queue_capacity: 500000
       executor:
         type: remote_pool
         heartbeat_timeout_secs: 60
@@ -539,5 +567,6 @@ Before deploying to production:
 - [ ] For NATS: `num_replicas` matches your cluster size (typically 3)
 - [ ] For TiKV: all PD endpoints are listed
 - [ ] Resource limits are configured appropriately
+- [ ] Backpressure limits (`max_jobs`, `queue_capacity`) are sized for your workload
 - [ ] Graceful shutdown is configured (termination grace period, preStop hook)
 

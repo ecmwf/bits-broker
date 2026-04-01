@@ -337,6 +337,47 @@ A worker submitted an invalid completion payload.
 
 ---
 
+## Overload responses (HTTP 529)
+
+The broker returns HTTP 529 (Site Overloaded) with a `Retry-After` header
+when either a dispatcher queue or the broker-wide job limit is reached.
+
+### Diagnostic
+
+The response body contains:
+```json
+{"code": "QUEUE_FULL", "message": "...", "retryable": true}
+```
+
+Check broker logs for `queue full` or `broker at capacity` warnings.
+
+### Dispatcher queue full
+
+The per-dispatcher queue reached its `queue_capacity` limit (default 500,000).
+This means one specific action is backed up.
+
+**Solutions**:
+- Increase `dispatcher.queue_capacity` for the affected target
+- Increase `concurrency` for the executor to drain the queue faster
+- Scale out the target service
+
+### Broker at capacity
+
+The total number of tracked jobs reached `bits.max_jobs` (default 500,000).
+This counts all jobs: queued, executing, and completed-but-not-yet-polled.
+
+**Solutions**:
+- Increase `bits.max_jobs`
+- Reduce `bits.sweep_interval_secs` to clean up completed jobs faster
+- Check for slow-polling clients that leave completed jobs in memory
+
+### Tuning Retry-After
+
+The `server.retry_after_secs` value (default 5) is sent as a hint to clients.
+Adjust based on how quickly your system recovers from load spikes.
+
+---
+
 ## Performance issues
 
 ### High latency
@@ -359,8 +400,10 @@ The dispatcher queue accumulates jobs faster than they complete.
 
 **Solutions**:
 - Scale out target capacity horizontally
-- Add circuit breakers to shed load during overload
+- Increase executor `concurrency` for the bottleneck target
 - Review for slow or stuck jobs blocking the queue
+- The broker will shed load automatically when `queue_capacity` is reached
+  (returns HTTP 529); adjust the limit if needed
 
 ### Too many concurrent jobs
 
@@ -369,6 +412,7 @@ Resource exhaustion from unbounded concurrency.
 **Solutions**:
 - Set explicit `concurrency` limits on all dispatchers
 - Use separate dispatchers for different SLA classes
+- Tune `bits.max_jobs` to cap total jobs across all dispatchers
 - Monitor memory usage per in-flight job
 
 ---

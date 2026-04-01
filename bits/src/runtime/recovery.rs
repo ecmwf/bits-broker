@@ -112,7 +112,7 @@ impl Bits {
         let timeout = timeout.unwrap_or(self.internal_poll_timeout);
         let base = lease.internal_poll_base_url.trim_end_matches('/');
         let url = format!("{base}/{id}");
-        let response = match self.internal_client.get(url).timeout(timeout).send().await {
+        let response = match self.internal_client.get(&url).timeout(timeout).send().await {
             Ok(resp) => resp,
             Err(err) if err.is_timeout() => {
                 // Timeouts are expected when the owner broker is still
@@ -129,7 +129,7 @@ impl Bits {
                 tracing::warn!(
                     job.id = %id,
                     owner_broker = %lease.broker_id,
-                    url = %base,
+                    url = %url,
                     error = %err,
                     "proxy request to owner broker failed"
                 );

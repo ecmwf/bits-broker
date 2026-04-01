@@ -21,26 +21,34 @@ const BROKER_PREFIX: &str = "brokers/";
 
 pub struct TiKvStore {
     endpoints: Vec<String>,
+    connect_timeout: Duration,
     client: OnceCell<tikv_client::TransactionClient>,
 }
 
 impl TiKvStore {
-    pub fn new(endpoints: Vec<String>) -> Self {
+    pub fn new(endpoints: Vec<String>, connect_timeout: Duration) -> Self {
         Self {
             endpoints,
+            connect_timeout,
             client: OnceCell::new(),
         }
     }
 
     async fn client(&self) -> Result<&tikv_client::TransactionClient, DbError> {
+        let timeout = self.connect_timeout;
         self.client
             .get_or_try_init(|| async {
                 tokio::time::timeout(
-                    Duration::from_secs(10),
+                    timeout,
                     tikv_client::TransactionClient::new(self.endpoints.clone()),
                 )
                 .await
-                .map_err(|_| DbError::Backend("TiKV connection timed out after 10s".into()))?
+                .map_err(|_| {
+                    DbError::Backend(format!(
+                        "TiKV connection timed out after {:.1}s",
+                        timeout.as_secs_f64()
+                    ))
+                })?
                 .map_err(|err| DbError::Backend(format!("failed to connect to TiKV: {err}")))
             })
             .await

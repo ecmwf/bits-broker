@@ -105,6 +105,8 @@ enum PersistenceConfig {
         endpoints: Vec<String>,
         #[serde(default = "default_broker_lease_ttl_secs")]
         broker_lease_ttl_secs: f64,
+        #[serde(default)]
+        connect_timeout_secs: Option<f64>,
     },
     #[cfg_attr(not(feature = "nats"), allow(dead_code))]
     Nats {
@@ -117,6 +119,10 @@ enum PersistenceConfig {
         broker_lease_ttl_secs: f64,
         #[serde(default = "default_nats_num_replicas")]
         num_replicas: usize,
+        #[serde(default)]
+        connect_timeout_secs: Option<f64>,
+        #[serde(default)]
+        init_max_attempts: Option<u32>,
     },
 }
 
@@ -349,6 +355,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         Some(PersistenceConfig::Tikv {
             endpoints,
             broker_lease_ttl_secs,
+            connect_timeout_secs,
         }) => {
             if endpoints.is_empty() {
                 return Err(ConfigError::validation(
@@ -367,6 +374,12 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                 )
                 .into());
             }
+            let connect_timeout = match connect_timeout_secs {
+                Some(secs) => {
+                    positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?
+                }
+                None => Duration::from_secs(10),
+            };
             #[cfg(not(feature = "tikv"))]
             {
                 return Err(ConfigError::FeatureDisabled {
@@ -378,7 +391,8 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             #[cfg(feature = "tikv")]
             {
                 (
-                    Some(Arc::new(StoreFactory::new(endpoints)) as Arc<dyn PersistenceStore>),
+                    Some(Arc::new(StoreFactory::new(endpoints, connect_timeout))
+                        as Arc<dyn PersistenceStore>),
                     ttl,
                 )
             }
@@ -389,6 +403,8 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             leases_bucket,
             broker_lease_ttl_secs,
             num_replicas,
+            connect_timeout_secs,
+            init_max_attempts,
         }) => {
             if url.is_empty() {
                 return Err(
@@ -426,6 +442,20 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                 )
                 .into());
             }
+            let connect_timeout = match connect_timeout_secs {
+                Some(secs) => {
+                    positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?
+                }
+                None => Duration::from_secs(10),
+            };
+            let max_attempts = init_max_attempts.unwrap_or(6);
+            if max_attempts < 1 {
+                return Err(ConfigError::validation(
+                    "bits.persistence.init_max_attempts",
+                    "must be at least 1",
+                )
+                .into());
+            }
             #[cfg(not(feature = "nats"))]
             {
                 return Err(ConfigError::FeatureDisabled {
@@ -442,6 +472,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                     leases_bucket,
                     ttl,
                     num_replicas,
+                    connect_timeout,
                 );
                 let handle = tokio::runtime::Handle::try_current().map_err(|_| {
                     ConfigError::validation(
@@ -453,10 +484,9 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                 // Retry NATS init with backoff. In Kubernetes the NATS cluster
                 // may not be ready when the broker pod starts; retrying here
                 // avoids CrashLoopBackOff delays from the kubelet.
-                const MAX_INIT_ATTEMPTS: u32 = 6;
                 let mut last_err: Option<String> = None;
                 let mut delay = Duration::from_secs(1);
-                for attempt in 1..=MAX_INIT_ATTEMPTS {
+                for attempt in 1..=max_attempts {
                     match tokio::task::block_in_place(|| handle.block_on(store.init())) {
                         Ok(()) => {
                             last_err = None;
@@ -464,10 +494,10 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                         }
                         Err(e) => {
                             last_err = Some(e.to_string());
-                            if attempt < MAX_INIT_ATTEMPTS {
+                            if attempt < max_attempts {
                                 tracing::warn!(
                                     attempt,
-                                    max_attempts = MAX_INIT_ATTEMPTS,
+                                    max_attempts,
                                     error = %last_err.as_deref().unwrap_or("unknown"),
                                     retry_in_secs = delay.as_secs(),
                                     "NATS init failed, retrying"

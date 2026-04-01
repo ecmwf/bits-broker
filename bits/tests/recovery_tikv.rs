@@ -40,7 +40,7 @@ fn tikv_endpoints() -> Option<Vec<String>> {
 
 async fn shared_store() -> Option<Arc<dyn PersistenceStore>> {
     let endpoints = tikv_endpoints()?;
-    Some(Arc::new(TiKvStore::new(endpoints)) as Arc<dyn PersistenceStore>)
+    Some(Arc::new(TiKvStore::new(endpoints, Duration::from_secs(10))) as Arc<dyn PersistenceStore>)
 }
 
 #[tokio::test]

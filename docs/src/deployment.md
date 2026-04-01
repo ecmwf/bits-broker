@@ -113,6 +113,8 @@ bits:
 | `jobs_bucket` | KV bucket name for job records (default: `bits-jobs`) |
 | `leases_bucket` | KV bucket name for broker leases (default: `bits-leases`) |
 | `broker_lease_ttl_secs` | Lease TTL in seconds (default: 30) |
+| `connect_timeout_secs` | Timeout per connection attempt in seconds (default: 10) |
+| `init_max_attempts` | Startup retry attempts with exponential backoff (default: 6) |
 
 ### TiKV
 
@@ -140,6 +142,7 @@ bits:
 |-------|-------------|
 | `endpoints` | List of PD (Placement Driver) endpoints |
 | `broker_lease_ttl_secs` | Lease TTL in seconds (default: 30) |
+| `connect_timeout_secs` | Timeout per connection attempt in seconds (default: 10) |
 
 ### Choosing a backend
 
@@ -376,24 +379,22 @@ internal to your cluster:
 BITS applies default timeouts to all outbound I/O to prevent hung connections
 from blocking the broker indefinitely:
 
-| Connection | Default timeout | Scope |
-|------------|----------------|-------|
-| HTTP targets (`target::http`) | 30s connect + 30s idle-read | Per-chunk; large streams are not capped |
-| Internal broker-to-broker proxy | 10s client-level, 2.5s per-request | Per-request `internal_poll_timeout_secs` overrides client default |
-| TiKV client initialization | 10s per attempt | First DB operation; retries automatically on next use |
-| NATS connect + bucket setup | 10s per attempt, 6 attempts | Startup only; exponential backoff 1/2/4/8/10/10s (~85s total budget) |
+| Connection | Default | Configurable via |
+|------------|---------|-----------------|
+| HTTP targets (`target::http`) | 30s connect + 30s idle-read | `connect_timeout_secs` / `read_timeout_secs` on the target action |
+| Internal broker-to-broker proxy | 10s client-level, 2.5s per-request | `internal_poll_timeout_secs` overrides client default |
+| TiKV client initialization | 10s per attempt | `connect_timeout_secs` under `bits.persistence` |
+| NATS connect + bucket setup | 10s per attempt, 6 attempts | `connect_timeout_secs` / `init_max_attempts` under `bits.persistence` |
 
 NATS initialization is retried at startup with exponential backoff so the
 broker tolerates dependency ordering in Kubernetes without entering
 CrashLoopBackOff. TiKV connections are lazy (first use, not startup) and
 retry automatically on each operation.
 
-These defaults are not yet configurable via YAML. HTTP targets enforce a 30s
-connect timeout and a 30s idle-read timeout (maximum gap between response
-chunks), but do not impose a hard cap on total request or stream duration.
-Long-lived streams are allowed as long as data continues flowing within the
-idle window; only connections that stall for more than 30 seconds will fail
-with a timeout. A future release will add per-target timeout configuration.
+HTTP targets enforce idle-read timeouts (maximum gap between response
+chunks), not a hard cap on total request or stream duration. Long-lived
+streams are allowed as long as data continues flowing within the idle window;
+only connections that stall for longer than the configured timeout will fail.
 
 ### `persist_after_secs` tuning
 

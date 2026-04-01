@@ -9,10 +9,7 @@ use crate::actions::{ActionError, TargetAction, TargetResult};
 use crate::job::Job;
 use crate::result::JobResult;
 
-/// Default connect and idle-read timeout for outbound HTTP target requests.
-/// `connect_timeout` caps TCP + TLS handshake. `read_timeout` caps the gap
-/// between consecutive body chunks, so large streams are not killed mid-transfer.
-const DEFAULT_TARGET_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_TARGET_TIMEOUT_SECS: f64 = 30.0;
 
 // ================================
 //   HttpTarget
@@ -28,25 +25,56 @@ const DEFAULT_TARGET_TIMEOUT: Duration = Duration::from_secs(30);
 ///   4xx → Reject             — remote considers the request invalid; reason from body
 ///   5xx / other → ActionError::NetworkError
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpTarget {
     pub url: String,
+    #[serde(
+        default = "default_target_timeout_secs",
+        deserialize_with = "deserialize_positive_secs"
+    )]
+    pub connect_timeout_secs: f64,
+    #[serde(
+        default = "default_target_timeout_secs",
+        deserialize_with = "deserialize_positive_secs"
+    )]
+    pub read_timeout_secs: f64,
     #[serde(skip)]
     client: OnceLock<reqwest::Client>,
+}
+
+fn deserialize_positive_secs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if !v.is_finite() || v <= 0.0 {
+        return Err(serde::de::Error::custom(
+            "must be a positive finite number of seconds",
+        ));
+    }
+    Ok(v)
+}
+
+fn default_target_timeout_secs() -> f64 {
+    DEFAULT_TARGET_TIMEOUT_SECS
 }
 
 impl HttpTarget {
     pub fn new(url: String) -> Self {
         Self {
             url,
+            connect_timeout_secs: DEFAULT_TARGET_TIMEOUT_SECS,
+            read_timeout_secs: DEFAULT_TARGET_TIMEOUT_SECS,
             client: OnceLock::new(),
         }
     }
 
     fn client(&self) -> &reqwest::Client {
         self.client.get_or_init(|| {
+            let connect = Duration::try_from_secs_f64(self.connect_timeout_secs)
+                .unwrap_or(Duration::from_secs(DEFAULT_TARGET_TIMEOUT_SECS as u64));
+            let read = Duration::try_from_secs_f64(self.read_timeout_secs)
+                .unwrap_or(Duration::from_secs(DEFAULT_TARGET_TIMEOUT_SECS as u64));
             reqwest::Client::builder()
-                .connect_timeout(DEFAULT_TARGET_TIMEOUT)
-                .read_timeout(DEFAULT_TARGET_TIMEOUT)
+                .connect_timeout(connect)
+                .read_timeout(read)
                 .build()
                 .expect("reqwest client with timeout")
         })

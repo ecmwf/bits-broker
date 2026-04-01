@@ -34,7 +34,9 @@ async fn sweeper_does_not_remove_job_during_reconnect_window() {
     let _ = common::TargetDummyDelay::new(0);
 
     let bits = Arc::new(Bits::from_config(fast_sweep_config()).unwrap());
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
 
     // The reconnect buffer is 5s. Sleep 300ms (6 sweep cycles at 50ms) —
     // the sweeper runs multiple times but client_present() stays true
@@ -55,7 +57,9 @@ async fn drop_completes_promptly_via_condvar_wakeup() {
     // Use a 30-second sweep interval. Without condvar wakeup, join()
     // would block for up to 30s. With condvar, it completes instantly.
     let bits = Bits::from_config(slow_sweep_config()).unwrap();
-    let _ = bits.submit(Job::new(serde_json::json!({})));
+    let _ = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -79,7 +83,9 @@ async fn concurrent_poll_and_sweep_do_not_deadlock() {
     for _ in 0..20 {
         let bits = bits.clone();
         handles.push(tokio::spawn(async move {
-            let h = bits.submit(Job::new(serde_json::json!({})));
+            let h = bits
+                .submit(Job::new(serde_json::json!({})))
+                .expect_accepted("submit should not be rejected");
             bits.poll(&h.id, Some(Duration::from_secs(5))).await
         }));
     }
@@ -111,7 +117,9 @@ routes:
           concurrency: 1
 "#;
     let bits = Arc::new(Bits::from_config(config).unwrap());
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
 
     // 100ms reconnect buffer + a few 50ms sweep cycles = well under 500ms.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -135,14 +143,18 @@ routes:
 "#;
     let bits = Arc::new(Bits::from_config(config).unwrap());
 
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
     let outcome = bits.poll(&handle.id, Some(Duration::from_secs(5))).await;
     assert!(
         matches!(outcome, PollOutcome::Ready(bits::JobResult::Failed { .. })),
         "panicking action should produce Failed, got {outcome:?}"
     );
 
-    let handle2 = bits.submit(Job::new(serde_json::json!({})));
+    let handle2 = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
     let outcome2 = bits.poll(&handle2.id, Some(Duration::from_secs(5))).await;
     assert!(
         matches!(outcome2, PollOutcome::Ready(bits::JobResult::Failed { .. })),

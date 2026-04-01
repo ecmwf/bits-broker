@@ -88,7 +88,9 @@ async fn worker_completes_job() {
     let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
-    let handle = bits.submit(Job::new(serde_json::json!({"class": "od"})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"class": "od"})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     // Long-poll until the job is available.
@@ -157,7 +159,9 @@ async fn worker_streams_binary_job_chunks() {
     let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
-    let handle = bits.submit(Job::new(serde_json::json!({"class": "od"})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"class": "od"})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let resp = client
@@ -214,7 +218,9 @@ async fn worker_rejects_job() {
     let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let resp = client
@@ -254,7 +260,9 @@ async fn worker_reports_error() {
     let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let resp = client
@@ -294,7 +302,9 @@ async fn worker_requests_redirect() {
     let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
-    let handle = bits.submit(Job::new(serde_json::json!({"dataset": "era5"})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"dataset": "era5"})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let resp = client
@@ -391,7 +401,9 @@ async fn heartbeat_timeout_evicts_job() {
     let bits = make_bits(port, 0.1);
     wait_for_server(port).await;
 
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     // Pick up the job but never heartbeat or complete it.
@@ -420,8 +432,12 @@ async fn multiple_workers_polling_get_distinct_jobs() {
     let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
-    let h1 = bits.submit(Job::new(serde_json::json!({"n": 1})));
-    let h2 = bits.submit(Job::new(serde_json::json!({"n": 2})));
+    let h1 = bits
+        .submit(Job::new(serde_json::json!({"n": 1})))
+        .expect_accepted("submit should not be rejected");
+    let h2 = bits
+        .submit(Job::new(serde_json::json!({"n": 2})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let (r1, r2) = tokio::join!(
@@ -471,7 +487,9 @@ async fn worker_cannot_complete_same_job_twice() {
     let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
-    let handle = bits.submit(Job::new(serde_json::json!({"class": "od"})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"class": "od"})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let resp = client
@@ -513,7 +531,9 @@ async fn heartbeat_after_completion_returns_404() {
     let bits = make_bits(port, 60.0);
     wait_for_server(port).await;
 
-    let handle = bits.submit(Job::new(serde_json::json!({"class": "od"})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"class": "od"})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let resp = client
@@ -553,7 +573,9 @@ async fn remote_pool_preserves_cost_weighted_ordering() {
     let bits = make_bits_with_queue(port, 60.0, "cost_weighted");
     wait_for_server(port).await;
 
-    let blocker = bits.submit(Job::new(serde_json::json!({"kind": "blocker", "cost": 0})));
+    let blocker = bits
+        .submit(Job::new(serde_json::json!({"kind": "blocker", "cost": 0})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let blocker_resp = client
@@ -568,11 +590,15 @@ async fn remote_pool_preserves_cost_weighted_ordering() {
 
     let mut expensive = Job::new(serde_json::json!({"label": "expensive"}));
     expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
-    let h_expensive = bits.submit(expensive);
+    let h_expensive = bits
+        .submit(expensive)
+        .expect_accepted("submit should not be rejected");
 
     let mut cheap = Job::new(serde_json::json!({"label": "cheap"}));
     cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
-    let h_cheap = bits.submit(cheap);
+    let h_cheap = bits
+        .submit(cheap)
+        .expect_accepted("submit should not be rejected");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -638,7 +664,9 @@ async fn remote_pool_preserves_age_priority_ordering() {
     let bits = make_bits_with_queue(port, 60.0, "age_priority");
     wait_for_server(port).await;
 
-    let blocker = bits.submit(Job::new(serde_json::json!({"kind": "blocker"})));
+    let blocker = bits
+        .submit(Job::new(serde_json::json!({"kind": "blocker"})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let blocker_resp = client
@@ -653,13 +681,17 @@ async fn remote_pool_preserves_age_priority_ordering() {
 
     let mut expensive = Job::new(serde_json::json!({"label": "expensive"}));
     expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
-    let h_expensive = bits.submit(expensive);
+    let h_expensive = bits
+        .submit(expensive)
+        .expect_accepted("submit should not be rejected");
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut cheap = Job::new(serde_json::json!({"label": "cheap"}));
     cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
-    let h_cheap = bits.submit(cheap);
+    let h_cheap = bits
+        .submit(cheap)
+        .expect_accepted("submit should not be rejected");
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -727,7 +759,9 @@ async fn remote_pool_skips_claimed_job_if_caller_dropped() {
 
     let client = Client::new();
 
-    let handle = bits.submit(Job::new(serde_json::json!({"n": 1})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"n": 1})))
+        .expect_accepted("submit should not be rejected");
     bits.cancel(&handle.id);
     let _ = bits.poll(&handle.id, Some(Duration::from_secs(5))).await;
 

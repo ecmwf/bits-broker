@@ -25,6 +25,7 @@ async fn thread_pool_runs_on_os_threads() {
         }),
         None,
         None,
+        bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
     )
     .expect("dispatcher config should not error")
     .expect("dispatcher should be created");
@@ -71,6 +72,7 @@ async fn thread_pool_executes_concurrently() {
         }),
         None,
         None,
+        bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
     )
     .expect("dispatcher config should not error")
     .expect("dispatcher should be created");
@@ -121,7 +123,9 @@ routes:
 "#;
 
     let bits = Bits::from_config(config).unwrap();
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
     let outcome = bits.poll(&handle.id, Some(Duration::from_secs(2))).await;
 
     assert!(
@@ -146,6 +150,7 @@ async fn check_dispatcher_cost_weighted_ordering() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -214,6 +219,7 @@ async fn target_dispatcher_cost_weighted_ordering() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -282,6 +288,7 @@ async fn target_dispatcher_age_priority_promotes_waiting_expensive_job() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),

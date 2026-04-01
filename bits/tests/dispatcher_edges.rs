@@ -25,6 +25,7 @@ async fn async_pool_respects_concurrency_limit() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -74,6 +75,7 @@ async fn thread_pool_respects_concurrency_limit() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -127,6 +129,7 @@ async fn async_pool_fifo_preserves_order() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -173,6 +176,7 @@ async fn thread_pool_fifo_preserves_order() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -222,6 +226,7 @@ async fn thread_pool_cost_weighted_ordering() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -284,6 +289,7 @@ async fn thread_pool_age_priority_ordering() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -345,8 +351,14 @@ async fn thread_pool_age_priority_ordering() {
 /// from_config returns None when no settings are provided.
 #[tokio::test]
 async fn dispatcher_from_config_none_when_no_settings() {
-    let result = Dispatcher::<CheckResult>::from_config(None, None, None, None)
-        .expect("from_config should not error when all settings are None");
+    let result = Dispatcher::<CheckResult>::from_config(
+        None,
+        None,
+        None,
+        None,
+        bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
+    )
+    .expect("from_config should not error when all settings are None");
     assert!(result.is_none(), "expected None when all settings are None");
 }
 
@@ -359,6 +371,7 @@ async fn dispatcher_default_executor_is_async_pool() {
         None, // default executor
         None,
         None,
+        bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
     )
     .expect("dispatcher config should not error")
     .expect("dispatcher should be created");
@@ -385,6 +398,7 @@ async fn dispatcher_default_queue_is_fifo() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -435,6 +449,7 @@ async fn async_pool_skips_work_if_caller_drops_before_dequeue() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),
@@ -504,6 +519,7 @@ async fn thread_pool_skips_work_if_caller_drops_before_dequeue() {
             }),
             None,
             None,
+            bits::dispatcher::DEFAULT_QUEUE_CAPACITY,
         )
         .expect("dispatcher config should not error")
         .expect("dispatcher should be created"),

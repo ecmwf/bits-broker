@@ -66,7 +66,10 @@ async fn fast_jobs_do_not_persist() {
     )
     .await;
 
-    let handle = broker.bits.submit(bits::Job::new(json!({"kind": "fast"})));
+    let handle = broker
+        .bits
+        .submit(bits::Job::new(json!({"kind": "fast"})))
+        .expect_accepted("submit should not be rejected");
     let result = wait_for_ready(&broker.bits, &handle.id, Duration::from_secs(2)).await;
     let (_content_type, body) = read_success_body(result).await;
     assert_eq!(body, b"fast");

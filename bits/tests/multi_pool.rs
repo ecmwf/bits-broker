@@ -126,7 +126,9 @@ async fn two_pools_jobs_are_isolated() {
     wait_for_pool(port, "pool_a").await;
     wait_for_pool(port, "pool_b").await;
 
-    let handle = bits.submit(Job::new(serde_json::json!({"class": "b", "k": 1})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"class": "b", "k": 1})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let empty_a = client
@@ -174,8 +176,12 @@ async fn both_pools_concurrent() {
     wait_for_pool(port, "pool_a").await;
     wait_for_pool(port, "pool_b").await;
 
-    let h_a = bits.submit(Job::new(serde_json::json!({"class": "a", "name": "ja"})));
-    let h_b = bits.submit(Job::new(serde_json::json!({"class": "b", "name": "jb"})));
+    let h_a = bits
+        .submit(Job::new(serde_json::json!({"class": "a", "name": "ja"})))
+        .expect_accepted("submit should not be rejected");
+    let h_b = bits
+        .submit(Job::new(serde_json::json!({"class": "b", "name": "jb"})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let (r_a, r_b) = tokio::join!(
@@ -243,19 +249,27 @@ async fn per_pool_queue_policy() {
 
     let mut a_expensive = Job::new(serde_json::json!({"class": "a", "label": "a_expensive"}));
     a_expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
-    let h_a_expensive = bits.submit(a_expensive);
+    let h_a_expensive = bits
+        .submit(a_expensive)
+        .expect_accepted("submit should not be rejected");
 
     let mut a_cheap = Job::new(serde_json::json!({"class": "a", "label": "a_cheap"}));
     a_cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
-    let h_a_cheap = bits.submit(a_cheap);
+    let h_a_cheap = bits
+        .submit(a_cheap)
+        .expect_accepted("submit should not be rejected");
 
     let mut b_expensive = Job::new(serde_json::json!({"class": "b", "label": "b_expensive"}));
     b_expensive.metadata_mut()["cost"] = serde_json::json!(100u64);
-    let h_b_expensive = bits.submit(b_expensive);
+    let h_b_expensive = bits
+        .submit(b_expensive)
+        .expect_accepted("submit should not be rejected");
 
     let mut b_cheap = Job::new(serde_json::json!({"class": "b", "label": "b_cheap"}));
     b_cheap.metadata_mut()["cost"] = serde_json::json!(1u64);
-    let h_b_cheap = bits.submit(b_cheap);
+    let h_b_cheap = bits
+        .submit(b_cheap)
+        .expect_accepted("submit should not be rejected");
 
     let client = Client::new();
 
@@ -337,10 +351,14 @@ async fn per_pool_heartbeat_timeout() {
     wait_for_pool(port, "pool_a").await;
     wait_for_pool(port, "pool_b").await;
 
-    let h_a = bits.submit(Job::new(
-        serde_json::json!({"class": "a", "job": "timeout"}),
-    ));
-    let h_b = bits.submit(Job::new(serde_json::json!({"class": "b", "job": "alive"})));
+    let h_a = bits
+        .submit(Job::new(
+            serde_json::json!({"class": "a", "job": "timeout"}),
+        ))
+        .expect_accepted("submit should not be rejected");
+    let h_b = bits
+        .submit(Job::new(serde_json::json!({"class": "b", "job": "alive"})))
+        .expect_accepted("submit should not be rejected");
     let client = Client::new();
 
     let w_a: serde_json::Value = client
@@ -425,7 +443,9 @@ async fn same_target_referenced_twice_creates_one_pool() {
     wait_for_pool(port, "pool_a").await;
 
     let client = Client::new();
-    let handle = bits.submit(Job::new(serde_json::json!({"class": "x"})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"class": "x"})))
+        .expect_accepted("submit should not be rejected");
 
     let work = client
         .get(format!(

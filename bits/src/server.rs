@@ -61,8 +61,9 @@ pub async fn shutdown_signal() {
     tracing::info!("shutdown signal received, draining");
 }
 
-const DEFAULT_POLL_TIMEOUT_SECS: f64 = 25.0;
-const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(25);
+const DEFAULT_POLL_TIMEOUT_SECS_RAW: u64 = 25;
+const DEFAULT_POLL_TIMEOUT_SECS: f64 = DEFAULT_POLL_TIMEOUT_SECS_RAW as f64;
+const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(DEFAULT_POLL_TIMEOUT_SECS_RAW);
 
 /// Configuration for the built-in HTTP server.
 #[derive(Debug, Clone, Deserialize)]

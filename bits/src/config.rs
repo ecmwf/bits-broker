@@ -509,10 +509,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             }
             (
                 None,
-                duration_secs(
-                    "bits.broker_lease_ttl_secs",
-                    default_broker_lease_ttl_secs(),
-                )?,
+                Duration::from_secs(default_broker_lease_ttl_secs() as u64),
             )
         }
     };

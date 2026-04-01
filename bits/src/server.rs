@@ -24,7 +24,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::net::TcpListener;
 
-use crate::{Bits, Job, JobResult, PollOutcome};
+use crate::{Bits, Job, JobResult, PollOutcome, SubmitOutcome};
 
 pub async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
@@ -81,6 +81,14 @@ pub struct ServerConfig {
     /// and reconnect polls.
     #[serde(default = "default_poll_timeout_secs")]
     pub poll_timeout_secs: f64,
+
+    /// Value for the Retry-After header on 529 overload responses.
+    #[serde(default = "default_retry_after_secs")]
+    pub retry_after_secs: u64,
+}
+
+fn default_retry_after_secs() -> u64 {
+    DEFAULT_RETRY_AFTER_SECS
 }
 
 fn default_server_host() -> String {
@@ -101,6 +109,7 @@ impl Default for ServerConfig {
             host: default_server_host(),
             port: default_server_port(),
             poll_timeout_secs: default_poll_timeout_secs(),
+            retry_after_secs: default_retry_after_secs(),
         }
     }
 }
@@ -125,6 +134,7 @@ pub const CODE_JOB_ERROR: &str = "JOB_ERROR";
 pub const CODE_JOB_FAILED: &str = "JOB_FAILED";
 pub const CODE_ACTION_CANCELLED: &str = "ACTION_CANCELLED";
 pub const CODE_ACTION_CLIENT_GONE: &str = "ACTION_CLIENT_GONE";
+pub const CODE_QUEUE_FULL: &str = "QUEUE_FULL";
 
 #[derive(serde::Serialize)]
 struct ErrorBody {
@@ -150,12 +160,32 @@ fn json_error(
         .into_response()
 }
 
+pub const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
+
+/// Returns an HTTP 529 (Site Overloaded) response with a Retry-After header.
+/// 529 is non-standard but widely recognized (Cloudflare, Anthropic API) for
+/// server-side overload distinct from 429 (per-client rate limiting).
+fn overloaded_response(reason: &str, retry_after_secs: u64) -> Response {
+    let status = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
+    (
+        status,
+        [(header::RETRY_AFTER, retry_after_secs.to_string())],
+        axum::Json(ErrorBody {
+            code: CODE_QUEUE_FULL,
+            message: reason.to_string(),
+            retryable: true,
+        }),
+    )
+        .into_response()
+}
+
 // ── Axum state ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct AppState {
     bits: Arc<Bits>,
     poll_timeout: Duration,
+    retry_after_secs: u64,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -164,8 +194,12 @@ struct AppState {
 ///
 /// Returns a fully wired router that can be passed directly to [`axum::serve`],
 /// or composed into a larger application.
-pub fn router(bits: Arc<Bits>, poll_timeout: Duration) -> Router {
-    let state = AppState { bits, poll_timeout };
+pub fn router(bits: Arc<Bits>, poll_timeout: Duration, retry_after_secs: u64) -> Router {
+    let state = AppState {
+        bits,
+        poll_timeout,
+        retry_after_secs,
+    };
     Router::new()
         .route("/job", post(submit_job))
         .route("/job/{id}", get(poll_job))
@@ -192,7 +226,7 @@ pub async fn serve_with_shutdown(
     let broker_id = bits.broker_id().to_string();
     let routes = bits.route_names().join(", ");
 
-    let app = router(bits, config.poll_timeout());
+    let app = router(bits, config.poll_timeout(), config.retry_after_secs);
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&bind_addr).await?;
@@ -214,8 +248,12 @@ pub async fn serve_with_shutdown(
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 async fn submit_job(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
-    let handle = state.bits.submit(Job::new(body));
-    poll_by_id(&handle.id, &state).await
+    match state.bits.submit(Job::new(body)) {
+        SubmitOutcome::Accepted(handle) => poll_by_id(&handle.id, &state).await,
+        SubmitOutcome::Overloaded => {
+            overloaded_response("broker at capacity", state.retry_after_secs)
+        }
+    }
 }
 
 async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Response {
@@ -224,7 +262,7 @@ async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Resp
 
 async fn poll_by_id(id: &str, state: &AppState) -> Response {
     match state.bits.poll(id, Some(state.poll_timeout)).await {
-        PollOutcome::Ready(result) => result_to_response(result),
+        PollOutcome::Ready(result) => result_to_response(result, state.retry_after_secs),
         PollOutcome::Pending { id } => (
             StatusCode::SEE_OTHER,
             [
@@ -248,7 +286,7 @@ async fn poll_by_id(id: &str, state: &AppState) -> Response {
     }
 }
 
-fn result_to_response(result: JobResult) -> Response {
+fn result_to_response(result: JobResult, retry_after_secs: u64) -> Response {
     match result {
         JobResult::Success {
             content_type,
@@ -271,6 +309,7 @@ fn result_to_response(result: JobResult) -> Response {
             "internal server error",
             false,
         ),
+        JobResult::Overloaded { reason } => overloaded_response(&reason, retry_after_secs),
         JobResult::Cancelled => json_error(
             StatusCode::GONE,
             CODE_ACTION_CANCELLED,

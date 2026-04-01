@@ -49,10 +49,11 @@ impl<T: Send + 'static> Executor<T> for ThreadPoolExecutor {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .remove(&job.id);
-                    let Some((_guard, work, reply_tx)) = item else {
+                    let Some((_guard, work, reply_tx, permit)) = item else {
                         // Caller cancelled before we dequeued — skip.
                         continue;
                     };
+                    drop(permit);
 
                     if reply_tx.is_closed() {
                         // Caller cancelled after we dequeued — drop the work.

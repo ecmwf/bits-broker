@@ -12,11 +12,13 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 use crate::actions::{ActionError, TargetResult};
 use crate::job::Job;
 use crate::worker_server::WorkerServer;
+
+pub const DEFAULT_QUEUE_CAPACITY: usize = 500_000;
 
 /// Selects the executor implementation to construct from config.
 ///
@@ -44,10 +46,14 @@ pub enum ExecutorKind {
 ///
 /// The queue only stores `Job` metadata for ordering. The actual async work
 /// and the channel to send its result back live here, keyed by `job.id`.
+///
+/// The optional semaphore permit is held while the job waits in the queue.
+/// When the executor removes this entry, the permit drops and frees the slot.
 pub type PendingItem<T> = (
     DispatchGuard,
     BoxFuture<'static, Result<T, ActionError>>,
     oneshot::Sender<Result<T, ActionError>>,
+    Option<OwnedSemaphorePermit>,
 );
 
 /// Maps `job.id` to the pending work and reply channel.
@@ -83,6 +89,7 @@ pub trait Executor<T: Send + 'static>: Send + Sync {
 pub struct Dispatcher<T: Send + 'static> {
     queue: Arc<dyn Queue>,
     pending: Arc<PendingMap<T>>,
+    admission: Arc<Semaphore>,
 }
 
 impl<T: Send + 'static> Clone for Dispatcher<T> {
@@ -90,6 +97,7 @@ impl<T: Send + 'static> Clone for Dispatcher<T> {
         Self {
             queue: Arc::clone(&self.queue),
             pending: Arc::clone(&self.pending),
+            admission: Arc::clone(&self.admission),
         }
     }
 }
@@ -112,6 +120,7 @@ impl<T: Send + 'static> Dispatcher<T> {
         executor: Option<&ExecutorKind>,
         pool_name: Option<&str>,
         worker_server: Option<Arc<WorkerServer>>,
+        queue_capacity: usize,
     ) -> Result<Option<Self>, String> {
         if queue.is_none() && executor.is_none() {
             return Ok(None);
@@ -171,15 +180,27 @@ impl<T: Send + 'static> Dispatcher<T> {
             QueueKind::CostWeighted => Arc::new(CostWeightedQueue::new()),
             QueueKind::AgePriority => Arc::new(AgePriorityQueue::new()),
         };
-        Ok(Some(Self::new(queue, executor)?))
+        Ok(Some(Self::new(queue, executor, queue_capacity)?))
     }
 
-    pub fn new(queue: Arc<dyn Queue>, executor: Arc<dyn Executor<T>>) -> Result<Self, String> {
+    pub fn new(
+        queue: Arc<dyn Queue>,
+        executor: Arc<dyn Executor<T>>,
+        queue_capacity: usize,
+    ) -> Result<Self, String> {
+        if queue_capacity == 0 {
+            return Err("queue_capacity must be greater than zero".to_string());
+        }
         let pending: Arc<PendingMap<T>> = Arc::new(Mutex::new(HashMap::new()));
+        let admission = Arc::new(Semaphore::new(queue_capacity));
 
         executor.start_scheduler(Arc::clone(&queue), Arc::clone(&pending))?;
 
-        Ok(Self { queue, pending })
+        Ok(Self {
+            queue,
+            pending,
+            admission,
+        })
     }
 
     pub fn dispatch(
@@ -191,11 +212,25 @@ impl<T: Send + 'static> Dispatcher<T> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let pending = Arc::clone(&self.pending);
         let queue = Arc::clone(&self.queue);
+        let admission = Arc::clone(&self.admission);
         let job_to_enqueue = job.clone();
         let cancelled = job.cancelled.clone();
         let pollers = job.active_pollers.clone();
         let deadline_nanos = job.reconnect_deadline_nanos.clone();
         Box::pin(async move {
+            let permit = match admission.try_acquire_owned() {
+                Ok(p) => p,
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    return Err(ActionError::QueueFull(
+                        "dispatcher queue is full".to_string(),
+                    ));
+                }
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    tracing::error!("dispatcher admission semaphore closed unexpectedly");
+                    return Err(ActionError::ResourceError("dispatcher closed".to_string()));
+                }
+            };
+
             let guarded_work: BoxFuture<'static, Result<T, ActionError>> = Box::pin(async move {
                 match guard {
                     DispatchGuard::None => {}
@@ -221,7 +256,7 @@ impl<T: Send + 'static> Dispatcher<T> {
             pending
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .insert(job_id, (guard, guarded_work, reply_tx));
+                .insert(job_id, (guard, guarded_work, reply_tx, Some(permit)));
             queue.enqueue(job_to_enqueue);
 
             reply_rx

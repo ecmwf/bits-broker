@@ -20,6 +20,8 @@ const DEFAULT_RECONNECT_BUFFER: Duration = Duration::from_secs(5);
 /// Default sweep interval for removing expired completed jobs.
 const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(180);
 
+pub const DEFAULT_MAX_JOBS: usize = 500_000;
+
 #[derive(Debug)]
 /// Result of polling a submitted job.
 pub enum PollOutcome {
@@ -39,6 +41,25 @@ pub struct JobHandle {
     pub id: String,
 }
 
+/// Outcome of a job submission attempt.
+pub enum SubmitOutcome {
+    /// Job was accepted and can be polled.
+    Accepted(JobHandle),
+    /// Broker is at capacity. The job was not accepted.
+    Overloaded,
+}
+
+impl SubmitOutcome {
+    /// Extracts the handle, panicking if the broker rejected the job.
+    /// Intended for tests and contexts where rejection is unexpected.
+    pub fn expect_accepted(self, msg: &str) -> JobHandle {
+        match self {
+            SubmitOutcome::Accepted(h) => h,
+            SubmitOutcome::Overloaded => panic!("{msg}"),
+        }
+    }
+}
+
 /// Main broker runtime used to submit, cancel, and poll jobs.
 pub struct Bits {
     pub(crate) router: Arc<Switch>,
@@ -55,6 +76,8 @@ pub struct Bits {
     pub(crate) shutdown: Arc<ShutdownSignal>,
     pub(crate) in_flight: Arc<AtomicUsize>,
     pub(crate) added_routes: Arc<std::sync::RwLock<Vec<RouteHandle>>>,
+    job_count: Arc<AtomicUsize>,
+    max_jobs: usize,
     sweeper_handle: Option<std::thread::JoinHandle<()>>,
     heartbeat_handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -72,6 +95,7 @@ impl Bits {
         broker_lease_ttl: Duration,
     ) -> Self {
         let shutdown = Arc::new(ShutdownSignal::new());
+        let job_count = Arc::new(AtomicUsize::new(0));
         let mut bits = Bits {
             router: Arc::new(router),
             route_factory: RouteFactory::default(),
@@ -90,6 +114,8 @@ impl Bits {
             shutdown: shutdown.clone(),
             in_flight: Arc::new(AtomicUsize::new(0)),
             added_routes: Arc::new(std::sync::RwLock::new(vec![])),
+            job_count: job_count.clone(),
+            max_jobs: DEFAULT_MAX_JOBS,
             sweeper_handle: None,
             heartbeat_handle: None,
         };
@@ -98,6 +124,7 @@ impl Bits {
             DEFAULT_SWEEP_INTERVAL,
             bits.job_store.clone(),
             shutdown,
+            job_count,
         ));
         bits.heartbeat_handle = bits.start_broker_lease_heartbeat(broker_lease_ttl);
         bits
@@ -124,6 +151,7 @@ impl Bits {
         let sweep_interval = parsed.sweep_interval.unwrap_or(DEFAULT_SWEEP_INTERVAL);
         let instance_id = format!("{}-{}", parsed.broker_id_prefix, uuid::Uuid::new_v4());
         let shutdown = Arc::new(ShutdownSignal::new());
+        let job_count = Arc::new(AtomicUsize::new(0));
         let mut bits = Bits {
             router: Arc::new(parsed.router),
             route_factory: parsed.route_factory,
@@ -142,6 +170,8 @@ impl Bits {
             shutdown: shutdown.clone(),
             in_flight: Arc::new(AtomicUsize::new(0)),
             added_routes: Arc::new(std::sync::RwLock::new(vec![])),
+            job_count: job_count.clone(),
+            max_jobs: parsed.max_jobs,
             sweeper_handle: None,
             heartbeat_handle: None,
         };
@@ -151,6 +181,7 @@ impl Bits {
             sweep_interval,
             bits.job_store.clone(),
             shutdown,
+            job_count,
         ));
         bits.heartbeat_handle = bits.start_broker_lease_heartbeat(parsed.broker_lease_ttl);
 
@@ -242,15 +273,46 @@ impl Bits {
     ///
     /// Must be called from within a Tokio runtime (`#[tokio::main]` or `#[tokio::test]`).
     /// Panics if no runtime is available.
-    pub fn submit(&self, job: Job) -> JobHandle {
+    pub fn submit(&self, job: Job) -> SubmitOutcome {
         self.submit_with_state(job, false)
     }
 
-    fn submit_with_state(&self, mut job: Job, already_persisted: bool) -> JobHandle {
+    fn submit_with_state(&self, mut job: Job, already_persisted: bool) -> SubmitOutcome {
         if owner_from_job_id(&job.id).is_none() {
             job.id = self.new_job_id();
         }
         let job_id = job.id.clone();
+
+        if already_persisted {
+            // Recovery submits bypass the limit but still count so that
+            // remove_job decrements stay balanced.
+            self.job_count.fetch_add(1, Ordering::Relaxed);
+        } else {
+            // CAS loop: reserve a job slot before inserting into the map.
+            loop {
+                let current = self.job_count.load(Ordering::Relaxed);
+                if current >= self.max_jobs {
+                    tracing::warn!(
+                        max_jobs = self.max_jobs,
+                        current = current,
+                        "broker at capacity, rejecting job"
+                    );
+                    return SubmitOutcome::Overloaded;
+                }
+                if self
+                    .job_count
+                    .compare_exchange_weak(
+                        current,
+                        current + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        }
 
         job.set_reconnect_deadline(Instant::now() + self.reconnect_buffer);
 
@@ -267,7 +329,7 @@ impl Bits {
             self.in_flight.clone(),
         );
 
-        JobHandle { id: job_id }
+        SubmitOutcome::Accepted(JobHandle { id: job_id })
     }
 
     /// Requests cancellation for a previously submitted job.
@@ -386,7 +448,7 @@ impl Bits {
         // DashMap operation here would invert that order and risk deadlock.
         let taken = job.result.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(result) = taken {
-            self.jobs.remove(id);
+            self.remove_job(id);
             self.schedule_durable_cleanup(id, &job);
             return Some(PollOutcome::Ready(result));
         }
@@ -397,7 +459,7 @@ impl Bits {
                     let taken = job.result.lock().unwrap_or_else(|p| p.into_inner()).take();
                     match taken {
                         Some(result) => {
-                            self.jobs.remove(id);
+                            self.remove_job(id);
                             self.schedule_durable_cleanup(id, &job);
                             PollOutcome::Ready(result)
                         }
@@ -411,7 +473,7 @@ impl Bits {
                 let taken = job.result.lock().unwrap_or_else(|p| p.into_inner()).take();
                 match taken {
                     Some(result) => {
-                        self.jobs.remove(id);
+                        self.remove_job(id);
                         self.schedule_durable_cleanup(id, &job);
                         PollOutcome::Ready(result)
                     }
@@ -421,6 +483,16 @@ impl Bits {
         };
 
         Some(outcome)
+    }
+
+    fn remove_job(&self, id: &str) {
+        if self.jobs.remove(id).is_some() {
+            // Saturating decrement: RouteHandle submits bypass the counter,
+            // so their removal must not underflow.
+            let _ = self
+                .job_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+        }
     }
 
     fn new_job_id(&self) -> String {

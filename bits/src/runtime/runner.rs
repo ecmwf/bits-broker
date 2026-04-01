@@ -90,6 +90,7 @@ pub(crate) fn spawn_job(
                 JobResult::Redirect { .. } => tracing::info!(duration_ms = ms, "job redirected"),
                 JobResult::Error { message } => tracing::warn!(duration_ms = ms, error = %message, "job error"),
                 JobResult::Failed { reason } => tracing::error!(duration_ms = ms, reason = %reason, "job failed"),
+                JobResult::Overloaded { reason } => tracing::warn!(duration_ms = ms, reason = %reason, "job rejected: overloaded"),
                 JobResult::Cancelled => tracing::info!(duration_ms = ms, "job cancelled"),
                 JobResult::ClientGone => tracing::info!(duration_ms = ms, "job abandoned: client gone"),
             }
@@ -121,6 +122,10 @@ async fn dispatch(router: &Switch, job: Job) -> JobResult {
         Ok(TargetResult::Reject { reason, .. }) => JobResult::Error { message: reason },
         Err(crate::actions::ActionError::Cancelled) => JobResult::Cancelled,
         Err(crate::actions::ActionError::ClientGone) => JobResult::ClientGone,
+        Err(crate::actions::ActionError::QueueFull(reason)) => {
+            tracing::warn!(error = %reason, "dispatch rejected: queue full");
+            JobResult::Overloaded { reason }
+        }
         Err(err) => {
             tracing::error!(error = %err, "dispatch failed");
             JobResult::Failed {

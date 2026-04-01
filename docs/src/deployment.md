@@ -397,6 +397,11 @@ reached first. For example, with three targets at 100K capacity each and
 `max_jobs` at 200K, the broker rejects at 200K total even if no single
 dispatcher is full.
 
+`queue_capacity` bounds jobs waiting in the queue, not jobs being executed.
+The effective per-route maximum is `queue_capacity` + executor `concurrency`
+(queued plus executing). `max_jobs` counts all jobs across all routes:
+queued, executing, and completed-but-not-yet-polled.
+
 Per-job memory is roughly 500 bytes of fixed overhead plus 2x the request
 body size (one copy in the job store, one clone in the dispatcher queue).
 At 500K jobs with 5 KB request bodies, expect approximately 5 GB of memory
@@ -501,6 +506,8 @@ bits:
     leases_bucket: "bits-leases"
     broker_lease_ttl_secs: 30
     num_replicas: 3
+    connect_timeout_secs: 10     # per-attempt connection timeout (default 10)
+    init_max_attempts: 6         # startup retry attempts with backoff (default 6)
 
   # Worker server for remote pools (internal only)
   worker_server:

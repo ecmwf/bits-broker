@@ -349,6 +349,10 @@ The response body contains:
 {"code": "QUEUE_FULL", "message": "...", "retryable": true}
 ```
 
+The `message` field identifies which limit was hit:
+- `"dispatcher queue is full"` -- a specific action route's queue is saturated
+- `"broker at capacity"` -- the broker-wide `max_jobs` limit was reached
+
 Check broker logs for `queue full` or `broker at capacity` warnings.
 
 ### Dispatcher queue full

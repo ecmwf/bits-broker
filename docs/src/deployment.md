@@ -451,8 +451,8 @@ bits:
   # How long to wait for internal proxy polls (seconds)
   internal_poll_timeout_secs: 2.5
 
-  # How often to sweep completed jobs from memory (seconds)
-  sweep_interval_secs: 5.0
+  # How often to sweep completed jobs from memory (seconds, default 180)
+  sweep_interval_secs: 180.0
 
   # Persist jobs still in-flight after 25 seconds
   persist_after_secs: 25.0

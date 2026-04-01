@@ -376,13 +376,13 @@ internal to your cluster:
 
 ### Backpressure and load shedding
 
-BITS bounds queue depths and total in-flight jobs to prevent unbounded memory
-growth. These limits act as OOM protection; per-user rate limiting should be
-the primary mechanism for controlling load.
+BITS limits how many jobs it keeps in memory so traffic spikes do not turn into
+unbounded memory growth. Treat these settings as safety rails for broker memory;
+use per-user or per-client rate limiting as the primary way to control load.
 
 | Setting | Scope | Default | Configurable via |
 |---------|-------|---------|-----------------|
-| Queue capacity | Per dispatcher | 500,000 | `dispatcher.queue_capacity` on each action entry |
+| Queue capacity | Per action route | 500,000 | `dispatcher.queue_capacity` on each action entry |
 | Max jobs | Broker-wide | 500,000 | `bits.max_jobs` |
 | Retry-After header | HTTP response | 5s | `server.retry_after_secs` |
 
@@ -390,22 +390,35 @@ When a limit is reached, the broker responds with HTTP 529 (Site Overloaded)
 and a `Retry-After` header. The response body includes `"code": "QUEUE_FULL"`
 and `"retryable": true`.
 
-The two limits layer independently. Each action route has its own dispatcher
-with its own `queue_capacity` semaphore. A job can be rejected by either
-the per-dispatcher limit or the broker-wide `max_jobs` limit, whichever is
-reached first. For example, with three targets at 100K capacity each and
-`max_jobs` at 200K, the broker rejects at 200K total even if no single
-dispatcher is full.
+Two limits apply to every submission:
 
-`queue_capacity` bounds jobs waiting in the queue, not jobs being executed.
-The effective per-route maximum is `queue_capacity` + executor `concurrency`
-(queued plus executing). `max_jobs` counts all jobs across all routes:
-queued, executing, and completed-but-not-yet-polled.
+- **Per-route queue limit**: each action route has its own waiting queue, capped
+  by `dispatcher.queue_capacity`.
+- **Broker-wide limit**: the broker also caps the total number of jobs it tracks
+  across all routes with `bits.max_jobs`.
 
-Per-job memory is roughly 500 bytes of fixed overhead plus 2x the request
-body size (one copy in the job store, one clone in the dispatcher queue).
-At 500K jobs with 5 KB request bodies, expect approximately 5 GB of memory
-for job storage.
+A new job is accepted only if **both** limits have room. If either limit is
+full, the broker rejects the request.
+
+For example, suppose you have three action routes, each with
+`queue_capacity: 100000`, and `bits.max_jobs: 200000`. The broker starts
+rejecting new jobs once it is tracking 200,000 jobs in total across all routes,
+even if no single route has reached 100,000 jobs yet. If you want multiple
+routes to use their full queue capacity at the same time, size `bits.max_jobs`
+with that combined load in mind.
+
+`dispatcher.queue_capacity` counts only jobs **waiting** to start for one route.
+It does **not** count jobs that are already running. For example, if a route has
+`queue_capacity: 1000` and executor `concurrency: 50`, that route can have up
+to 1,050 jobs associated with it at once: 1,000 waiting and 50 running.
+
+`bits.max_jobs` is broader. It counts **all** jobs the broker is still tracking
+across **all** routes: waiting jobs, running jobs, and completed jobs that have
+not yet been polled by clients.
+
+For memory planning, use this rough rule of thumb: each tracked job uses about
+500 bytes of broker overhead plus about 2x the request body size. At 500,000
+jobs with 5 KB request bodies, plan for roughly 5 GB of memory.
 
 ### Timeout defaults
 

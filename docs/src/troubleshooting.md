@@ -339,46 +339,58 @@ A worker submitted an invalid completion payload.
 
 ## Overload responses (HTTP 529)
 
-The broker returns HTTP 529 (Site Overloaded) with a `Retry-After` header
-when either a dispatcher queue or the broker-wide job limit is reached.
+The broker returns HTTP 529 (Site Overloaded) with a `Retry-After` header when
+either an action route queue is full or the broker-wide job limit is reached.
 
 ### Diagnostic
 
 The response body contains:
+
 ```json
 {"code": "QUEUE_FULL", "message": "...", "retryable": true}
 ```
 
-The `message` field identifies which limit was hit:
-- `"dispatcher queue is full"` -- a specific action route's queue is saturated
-- `"broker at capacity"` -- the broker-wide `max_jobs` limit was reached
+The `message` field tells you which limit rejected the request:
 
-Check broker logs for `queue full` or `broker at capacity` warnings.
+- `"dispatcher queue is full"` - one action route has filled its own waiting queue
+- `"broker at capacity"` - the broker has reached `bits.max_jobs` across all routes
 
-### Dispatcher queue full
+Check broker logs for matching `queue full` or `broker at capacity` warnings.
 
-The per-dispatcher queue reached its `queue_capacity` limit (default 500,000).
-This means one specific action is backed up.
+### Action route queue full
 
-**Solutions**:
-- Increase `dispatcher.queue_capacity` for the affected target
-- Increase `concurrency` for the executor to drain the queue faster
-- Scale out the target service
+One action route reached its `dispatcher.queue_capacity` limit (default
+500,000). This means that route is receiving jobs faster than it can start
+them.
+
+This limit covers jobs **waiting** for that route. Jobs already running do not
+count against `queue_capacity`, so a route can still have up to
+`queue_capacity + concurrency` jobs associated with it at once.
+
+**What to do**:
+- Increase `dispatcher.queue_capacity` for the affected action route if the broker has memory headroom
+- Increase executor `concurrency` for that route if the downstream system can handle more parallel work
+- Scale out the target service or workers behind that route
 
 ### Broker at capacity
 
-The total number of tracked jobs reached `bits.max_jobs` (default 500,000).
-This counts all jobs: queued, executing, and completed-but-not-yet-polled.
+The broker reached `bits.max_jobs` (default 500,000). This is a **global** cap
+across all routes and counts every job the broker is still tracking: waiting,
+running, and completed jobs that clients have not polled yet.
 
-**Solutions**:
-- Increase `bits.max_jobs`
-- Reduce `bits.sweep_interval_secs` to clean up completed jobs faster
-- Check for slow-polling clients that leave completed jobs in memory
+Because this is a broker-wide limit, one busy route can consume the available
+capacity and cause 529 responses for other routes too.
+
+**What to do**:
+- Increase `bits.max_jobs` if the broker has memory headroom
+- Lower `bits.sweep_interval_secs` so completed jobs are cleaned up sooner
+- Check for slow-polling or non-polling clients that leave completed jobs tracked longer than expected
 
 ### Tuning Retry-After
 
-The `server.retry_after_secs` value (default 5) is sent as a hint to clients.
-Adjust based on how quickly your system recovers from load spikes.
+`server.retry_after_secs` (default 5) is a retry hint for clients. Set it to
+roughly match how long your system usually needs to recover from a short burst:
+smaller if queues drain quickly, larger if backlog clears more slowly.
 
 ---
 

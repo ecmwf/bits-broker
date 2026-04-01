@@ -22,7 +22,9 @@ routes:
 "#;
 
     let bits = Arc::new(Bits::from_config(config).unwrap());
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
 
     // Fire the cancel mid-check, while poll() is already waiting for the result.
     let bits_cancel = bits.clone();
@@ -49,7 +51,9 @@ routes:
 "#;
 
     let bits = Arc::new(Bits::from_config(config).unwrap());
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
 
     let outcome = bits.poll(&handle.id, Some(Duration::from_secs(2))).await;
     assert!(matches!(
@@ -84,7 +88,9 @@ routes:
 "#;
 
     let bits = Arc::new(Bits::from_config(config).unwrap());
-    let handle = bits.submit(Job::new(serde_json::json!({})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
 
     bits.cancel(&handle.id);
     bits.cancel(&handle.id);

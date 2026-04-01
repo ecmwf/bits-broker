@@ -30,7 +30,9 @@ routes:
 "#;
 
     let bits = Bits::from_config(config).expect("config should be valid");
-    let handle = bits.submit(Job::new(serde_json::json!({"type": "fc"})));
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"type": "fc"})))
+        .expect_accepted("submit should not be rejected");
     let outcome = bits.poll(&handle.id, Some(Duration::from_secs(5))).await;
 
     // Route A's transform set cost=999, then the check rejected.

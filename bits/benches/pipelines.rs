@@ -137,7 +137,9 @@ fn bench_latency(c: &mut Criterion) {
         let bits = make_bits(config_fn());
         group.bench_function(BenchmarkId::new("submit_poll", name), |b| {
             b.to_async(&rt).iter(|| async {
-                let handle = bits.submit(Job::new(serde_json::json!({})));
+                let handle = bits
+                    .submit(Job::new(serde_json::json!({})))
+                    .expect_accepted("submit should not be rejected");
                 bits.poll(&handle.id, None).await
             });
         });
@@ -168,7 +170,9 @@ fn bench_latency_large(c: &mut Criterion) {
         let bits = make_bits(config_fn());
         group.bench_function(BenchmarkId::new("submit_poll", name), |b| {
             b.to_async(&rt).iter(|| async {
-                let handle = bits.submit(Job::new(large_request()));
+                let handle = bits
+                    .submit(Job::new(large_request()))
+                    .expect_accepted("submit should not be rejected");
                 bits.poll(&handle.id, None).await
             });
         });
@@ -193,7 +197,9 @@ fn bench_throughput(c: &mut Criterion) {
                         .map(|_| {
                             let bits = bits.clone();
                             async move {
-                                let handle = bits.submit(Job::new(serde_json::json!({})));
+                                let handle = bits
+                                    .submit(Job::new(serde_json::json!({})))
+                                    .expect_accepted("submit should not be rejected");
                                 bits.poll(&handle.id, None).await
                             }
                         })
@@ -222,7 +228,9 @@ fn bench_throughput_large(c: &mut Criterion) {
                     .map(|_| {
                         let bits = bits.clone();
                         async move {
-                            let handle = bits.submit(Job::new(large_request()));
+                            let handle = bits
+                                .submit(Job::new(large_request()))
+                                .expect_accepted("submit should not be rejected");
                             bits.poll(&handle.id, None).await
                         }
                     })

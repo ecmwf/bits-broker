@@ -708,8 +708,12 @@ impl BitsPy {
             pythonize::depythonize(&request).map_err(to_value_error)?;
         let inner = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handle = inner.submit(Job::new(request_value));
-            Ok(handle.id)
+            match inner.submit(Job::new(request_value)) {
+                bits::SubmitOutcome::Accepted(handle) => Ok(handle.id),
+                bits::SubmitOutcome::Overloaded => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "broker at capacity",
+                )),
+            }
         })
     }
 
@@ -809,6 +813,12 @@ async fn job_result_to_py(result: JobResult) -> PyResult<Py<PyAny>> {
         JobResult::Failed { reason } => Python::attach(|py| {
             let payload = PyDict::new(py);
             payload.set_item("status", "failed")?;
+            payload.set_item("reason", reason)?;
+            Ok(payload.into_any().unbind())
+        }),
+        JobResult::Overloaded { reason } => Python::attach(|py| {
+            let payload = PyDict::new(py);
+            payload.set_item("status", "overloaded")?;
             payload.set_item("reason", reason)?;
             Ok(payload.into_any().unbind())
         }),

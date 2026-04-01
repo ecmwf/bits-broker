@@ -303,7 +303,9 @@ async fn threshold_persistence_and_cleanup() {
         Some(Arc::clone(&store)),
     );
 
-    let handle = bits.submit(Job::new(json!({"kind": "cleanup"})));
+    let handle = bits
+        .submit(Job::new(json!({"kind": "cleanup"})))
+        .expect_accepted("submit should not be rejected");
     wait_for_owner(&store, &handle.id, "cleanup-broker", 300).await;
 
     let _ = bits.poll(&handle.id, Some(Duration::from_secs(1))).await;
@@ -323,7 +325,9 @@ async fn fast_jobs_do_not_persist() {
         Some(Arc::clone(&store)),
     );
 
-    let handle = bits.submit(Job::new(json!({"kind": "fast"})));
+    let handle = bits
+        .submit(Job::new(json!({"kind": "fast"})))
+        .expect_accepted("submit should not be rejected");
     let _ = bits.poll(&handle.id, Some(Duration::from_secs(1))).await;
 
     tokio::time::sleep(Duration::from_millis(120)).await;
@@ -519,7 +523,9 @@ async fn upsert_failure_does_not_set_persisted_flag() {
         Duration::from_secs(5),
     );
 
-    let handle = bits.submit(Job::new(json!({"kind": "upsert-failure"})));
+    let handle = bits
+        .submit(Job::new(json!({"kind": "upsert-failure"})))
+        .expect_accepted("submit should not be rejected");
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(matches!(
         bits.poll(&handle.id, Some(Duration::from_millis(20))).await,
@@ -547,7 +553,9 @@ async fn delete_failure_leaves_record_for_reclaim() {
         Duration::from_secs(5),
     );
 
-    let handle = bits.submit(Job::new(json!({"kind": "delete-failure"})));
+    let handle = bits
+        .submit(Job::new(json!({"kind": "delete-failure"})))
+        .expect_accepted("submit should not be rejected");
     wait_for_owner(&inner, &handle.id, "delete-failing", 300).await;
     tokio::time::sleep(Duration::from_millis(120)).await;
     let _ = bits.poll(&handle.id, Some(Duration::from_secs(1))).await;
@@ -592,7 +600,9 @@ async fn durable_record_survives_until_poll_consumes_result() {
         Some(Arc::clone(&store)),
     );
 
-    let handle = bits.submit(Job::new(json!({"kind": "durable-until-consume"})));
+    let handle = bits
+        .submit(Job::new(json!({"kind": "durable-until-consume"})))
+        .expect_accepted("submit should not be rejected");
     wait_for_owner(&store, &handle.id, "poll-consume-cleanup", 300).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(

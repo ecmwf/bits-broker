@@ -86,7 +86,9 @@ async fn main() -> Result<(), bits::BitsError> {
 
     for request in jobs {
         print!("{} -> ", request);
-        let handle = bits.submit(Job::new(request));
+        let handle = bits
+            .submit(Job::new(request))
+            .expect_accepted("submit should succeed");
         let result = match bits.poll(&handle.id, None).await {
             bits::PollOutcome::Ready(r) => r,
             _ => unreachable!(),
@@ -105,6 +107,9 @@ async fn main() -> Result<(), bits::BitsError> {
             }
             JobResult::Failed { reason } => {
                 println!("failed: {}", reason);
+            }
+            JobResult::Overloaded { reason } => {
+                println!("overloaded: {}", reason);
             }
             JobResult::Cancelled | JobResult::ClientGone => {
                 println!("cancelled");

@@ -150,7 +150,11 @@ pub async fn start_broker_server(
         store,
         broker_lease_ttl,
     ));
-    let app = bits::server::router(Arc::clone(&bits), poll_timeout);
+    let app = bits::server::router(
+        Arc::clone(&bits),
+        poll_timeout,
+        bits::server::DEFAULT_RETRY_AFTER_SECS,
+    );
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     BrokerServer {
         bits,

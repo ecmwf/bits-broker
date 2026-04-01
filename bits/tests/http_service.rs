@@ -59,7 +59,11 @@ async fn start_server(config: &str, poll_timeout: Duration) -> TestServer {
 async fn start_server_with_bits(bits: Arc<Bits>, poll_timeout: Duration) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let app = bits::server::router(bits.clone(), poll_timeout);
+    let app = bits::server::router(
+        bits.clone(),
+        poll_timeout,
+        bits::server::DEFAULT_RETRY_AFTER_SECS,
+    );
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     TestServer { port, bits }
 }
@@ -350,7 +354,10 @@ routes:
     let port = server.port;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let handle = server.bits.submit(Job::new(serde_json::json!({})));
+    let handle = server
+        .bits
+        .submit(Job::new(serde_json::json!({})))
+        .expect_accepted("submit should not be rejected");
     server.bits.cancel(&handle.id);
 
     let client = reqwest::Client::builder()

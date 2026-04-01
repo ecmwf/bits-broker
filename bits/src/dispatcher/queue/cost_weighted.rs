@@ -1,6 +1,6 @@
 use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
@@ -18,6 +18,7 @@ use crate::job::Job;
 pub struct CostWeightedQueue {
     tx: mpsc::UnboundedSender<WorkerCmd>,
     seq: Arc<AtomicU64>,
+    dead: AtomicBool,
 }
 
 impl std::fmt::Debug for CostWeightedQueue {
@@ -63,6 +64,7 @@ impl CostWeightedQueue {
         Self {
             tx,
             seq: Arc::new(AtomicU64::new(0)),
+            dead: AtomicBool::new(false),
         }
     }
 }
@@ -125,14 +127,59 @@ impl Queue for CostWeightedQueue {
                 job: Box::new(job),
             })
             .is_err()
+            && self
+                .dead
+                .compare_exchange(
+                    false,
+                    true,
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                )
+                .is_ok()
         {
-            tracing::debug!("cost_weighted queue closed; job dropped");
+            tracing::warn!("cost_weighted queue worker has exited; jobs will be dropped");
         }
     }
 
     async fn dequeue(&self) -> Option<Job> {
+        if self.dead.load(AtomicOrdering::Relaxed) {
+            return None;
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(WorkerCmd::Dequeue(reply_tx)).ok()?;
-        reply_rx.await.ok()
+        if self.tx.send(WorkerCmd::Dequeue(reply_tx)).is_err() {
+            if self
+                .dead
+                .compare_exchange(
+                    false,
+                    true,
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                )
+                .is_ok()
+            {
+                tracing::warn!(
+                    "cost_weighted queue worker has exited; dequeue disabled for this route"
+                );
+            }
+            return None;
+        }
+        match reply_rx.await {
+            Ok(job) => Some(job),
+            Err(_) => {
+                if self
+                    .dead
+                    .compare_exchange(
+                        false,
+                        true,
+                        AtomicOrdering::Relaxed,
+                        AtomicOrdering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    tracing::warn!("cost_weighted queue worker dropped dequeue reply");
+                }
+                None
+            }
+        }
     }
 }

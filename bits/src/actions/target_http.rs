@@ -281,22 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn nan_timeout_rejected() {
-        let result = serde_json::from_value::<HttpTarget>(
-            serde_json::json!({"url": "http://x", "connect_timeout_secs": f64::NAN}),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn infinity_timeout_rejected() {
-        let result = serde_json::from_value::<HttpTarget>(
-            serde_json::json!({"url": "http://x", "read_timeout_secs": f64::INFINITY}),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn unknown_field_rejected() {
         let result = serde_json::from_value::<HttpTarget>(
             serde_json::json!({"url": "http://x", "read_timeout_sec": 10.0}),

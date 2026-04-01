@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use crate::job::Job;
 pub struct AgePriorityQueue {
     tx: mpsc::Sender<WorkerCmd>,
     seq: Arc<AtomicU64>,
+    dead: AtomicBool,
 }
 
 impl std::fmt::Debug for AgePriorityQueue {
@@ -46,6 +47,7 @@ impl AgePriorityQueue {
         Self {
             tx,
             seq: Arc::new(AtomicU64::new(0)),
+            dead: AtomicBool::new(false),
         }
     }
 }
@@ -168,14 +170,59 @@ impl Queue for AgePriorityQueue {
                 job,
             })))
             .is_err()
+            && self
+                .dead
+                .compare_exchange(
+                    false,
+                    true,
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                )
+                .is_ok()
         {
-            tracing::debug!("age_priority queue closed; job dropped");
+            tracing::warn!("age_priority queue worker has exited; jobs will be dropped");
         }
     }
 
     async fn dequeue(&self) -> Option<Job> {
+        if self.dead.load(AtomicOrdering::Relaxed) {
+            return None;
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(WorkerCmd::Dequeue(reply_tx)).ok()?;
-        reply_rx.await.ok()
+        if self.tx.send(WorkerCmd::Dequeue(reply_tx)).is_err() {
+            if self
+                .dead
+                .compare_exchange(
+                    false,
+                    true,
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                )
+                .is_ok()
+            {
+                tracing::warn!(
+                    "age_priority queue worker has exited; dequeue disabled for this route"
+                );
+            }
+            return None;
+        }
+        match reply_rx.await {
+            Ok(job) => Some(job),
+            Err(_) => {
+                if self
+                    .dead
+                    .compare_exchange(
+                        false,
+                        true,
+                        AtomicOrdering::Relaxed,
+                        AtomicOrdering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    tracing::warn!("age_priority queue worker dropped dequeue reply");
+                }
+                None
+            }
+        }
     }
 }

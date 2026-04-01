@@ -270,7 +270,7 @@ The broker cannot connect to the NATS server.
 ### NATS or TiKV connection timeout
 
 The broker cannot establish a connection to the persistence backend within
-the 10-second connection timeout.
+the configured connection timeout (default 10s).
 
 **Diagnostic**: Look for `PERSISTENCE_BACKEND` errors with `timed out after`
 or backend-specific timeout messages.

@@ -49,6 +49,9 @@ fn deserialize_positive_secs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f
             "must be a positive finite number of seconds",
         ));
     }
+    Duration::try_from_secs_f64(v).map_err(|_| {
+        serde::de::Error::custom("value overflows Duration; use a smaller number of seconds")
+    })?;
     Ok(v)
 }
 

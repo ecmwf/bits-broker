@@ -91,18 +91,24 @@ impl TiKvStore {
                 .await
                 .map_err(|err| DbError::Backend(format!("get failed: {err}")))?;
             let Some(current) = current else {
-                let _ = txn.rollback().await;
+                if let Err(err) = txn.rollback().await {
+                    tracing::warn!(job.id = %job_id, error = %err, "transaction rollback failed");
+                }
                 return Ok(ClaimResult::NotFound);
             };
 
             let mut record: PersistentJobRecord = Self::deserialize(current)?;
             if record.broker_id == claimant_broker_id {
-                let _ = txn.rollback().await;
+                if let Err(err) = txn.rollback().await {
+                    tracing::warn!(job.id = %job_id, error = %err, "transaction rollback failed");
+                }
                 return Ok(ClaimResult::Claimed(record));
             }
 
             if record.broker_id != expected_owner_broker_id {
-                let _ = txn.rollback().await;
+                if let Err(err) = txn.rollback().await {
+                    tracing::warn!(job.id = %job_id, error = %err, "transaction rollback failed");
+                }
                 return Ok(ClaimResult::Active {
                     owner_broker_id: record.broker_id.clone(),
                 });
@@ -219,7 +225,9 @@ impl BrokerLeaseStore for TiKvStore {
             .get(key)
             .await
             .map_err(|err| DbError::Backend(format!("get failed: {err}")))?;
-        let _ = txn.rollback().await;
+        if let Err(err) = txn.rollback().await {
+            tracing::warn!(broker_id = %broker_id, error = %err, "transaction rollback failed");
+        }
         value.map(Self::deserialize).transpose()
     }
 

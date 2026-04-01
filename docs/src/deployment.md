@@ -390,6 +390,13 @@ When a limit is reached, the broker responds with HTTP 529 (Site Overloaded)
 and a `Retry-After` header. The response body includes `"code": "QUEUE_FULL"`
 and `"retryable": true`.
 
+The two limits layer independently. Each action route has its own dispatcher
+with its own `queue_capacity` semaphore. A job can be rejected by either
+the per-dispatcher limit or the broker-wide `max_jobs` limit, whichever is
+reached first. For example, with three targets at 100K capacity each and
+`max_jobs` at 200K, the broker rejects at 200K total even if no single
+dispatcher is full.
+
 Per-job memory is roughly 500 bytes of fixed overhead plus 2x the request
 body size (one copy in the job store, one clone in the dispatcher queue).
 At 500K jobs with 5 KB request bodies, expect approximately 5 GB of memory

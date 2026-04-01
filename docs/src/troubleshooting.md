@@ -342,11 +342,11 @@ The worker closed its connection or crashed mid-processing.
 
 ### Invalid response headers
 
-If you see `content-type header has invalid value`,
-`content-length header has invalid value`,
-`content-length header is not a valid number`, or
-`content-length header is negative`, a worker or upstream service returned a
-malformed HTTP response header.
+If you see `content-type header has invalid value; using default`,
+`content-length header has invalid value; using default`,
+`content-length header is not a valid number; using default`, or
+`content-length header is negative; using default`, an HTTP target, upstream
+service, or internal proxy returned a malformed response header.
 
 **Impact**: The job still completes, but clients may receive the response with
 a fallback content type or without a usable content length. The body itself is

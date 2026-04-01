@@ -174,7 +174,7 @@ impl Queue for CostWeightedQueue {
                     )
                     .is_ok()
                 {
-                    tracing::warn!("cost_weighted queue worker dropped dequeue reply");
+                    tracing::warn!("cost_weighted queue worker has exited; dropped dequeue reply");
                 }
                 None
             }

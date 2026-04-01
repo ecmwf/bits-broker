@@ -17,6 +17,7 @@ pub struct NatsStore {
     leases_bucket: String,
     lease_ttl: Duration,
     num_replicas: usize,
+    connect_timeout: Duration,
     stores: OnceCell<(kv::Store, kv::Store)>,
 }
 
@@ -27,6 +28,7 @@ impl NatsStore {
         leases_bucket: String,
         lease_ttl: Duration,
         num_replicas: usize,
+        connect_timeout: Duration,
     ) -> Self {
         Self {
             url,
@@ -34,14 +36,16 @@ impl NatsStore {
             leases_bucket,
             lease_ttl,
             num_replicas,
+            connect_timeout,
             stores: OnceCell::new(),
         }
     }
 
     async fn stores(&self) -> Result<&(kv::Store, kv::Store), DbError> {
+        let timeout = self.connect_timeout;
         self.stores
             .get_or_try_init(|| async {
-                tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::time::timeout(timeout, async {
                     let client = async_nats::connect(&self.url)
                         .await
                         .map_err(|e| DbError::Backend(format!("NATS connect failed: {e}")))?;
@@ -76,7 +80,12 @@ impl NatsStore {
                     Ok((jobs, leases))
                 })
                 .await
-                .map_err(|_| DbError::Backend("NATS connection timed out after 10s".into()))?
+                .map_err(|_| {
+                    DbError::Backend(format!(
+                        "NATS init timed out after {:.1}s",
+                        timeout.as_secs_f64()
+                    ))
+                })?
             })
             .await
     }

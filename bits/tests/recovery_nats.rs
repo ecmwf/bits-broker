@@ -32,6 +32,7 @@ async fn shared_store() -> Option<Arc<dyn PersistenceStore>> {
         format!("bits-leases-{id}"),
         Duration::from_secs(10),
         1,
+        Duration::from_secs(10),
     );
     store.init().await.expect("NATS store init failed");
     Some(Arc::new(store) as Arc<dyn PersistenceStore>)

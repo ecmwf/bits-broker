@@ -319,18 +319,45 @@ async fn handle_complete_data(
 ) -> StatusCode {
     match state.in_progress.remove(&job_id) {
         Some((_, entry)) => {
-            let content_type = request
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("application/octet-stream")
-                .to_string();
-            let size = request
-                .headers()
-                .get(header::CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<i64>().ok())
-                .unwrap_or(-1);
+            let content_type = match request.headers().get(header::CONTENT_TYPE) {
+                Some(value) => match value.to_str() {
+                    Ok(s) => s.to_string(),
+                    Err(err) => {
+                        tracing::warn!(
+                            job.id = %job_id,
+                            error = %err,
+                            "content-type header has invalid value; using default"
+                        );
+                        "application/octet-stream".to_string()
+                    }
+                },
+                None => "application/octet-stream".to_string(),
+            };
+            let size = match request.headers().get(header::CONTENT_LENGTH) {
+                Some(value) => match value.to_str() {
+                    Ok(s) => match s.parse::<i64>() {
+                        Ok(n) => n,
+                        Err(err) => {
+                            tracing::warn!(
+                                job.id = %job_id,
+                                raw_value = %s,
+                                error = %err,
+                                "content-length header is not a valid number; using default"
+                            );
+                            -1
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!(
+                            job.id = %job_id,
+                            error = %err,
+                            "content-length header has invalid value; using default"
+                        );
+                        -1
+                    }
+                },
+                None => -1,
+            };
 
             let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
             let mut body = request.into_body().into_data_stream();

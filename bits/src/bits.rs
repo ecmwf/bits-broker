@@ -18,7 +18,7 @@ use crate::runtime::runner::spawn_job;
 /// Buffer added on top of the poll timeout to allow for the reconnect round-trip.
 pub(crate) const RECONNECT_BUFFER: Duration = Duration::from_secs(5);
 /// Default sweep interval for removing expired completed jobs.
-const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(180);
 
 #[derive(Debug)]
 /// Result of polling a submitted job.

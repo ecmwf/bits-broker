@@ -96,6 +96,28 @@ async fn concurrent_poll_and_sweep_do_not_deadlock() {
 }
 
 #[tokio::test]
+async fn sweeper_removes_completed_job_after_reconnect_window() {
+    let _ = common::TargetDummyDelay::new(0);
+
+    let bits = Arc::new(Bits::from_config(fast_sweep_config()).unwrap());
+    let handle = bits.submit(Job::new(serde_json::json!({})));
+
+    // Wait long enough for the job to complete (~instant with duration_ms 0)
+    // *and* for the 5-second reconnect buffer to expire, plus a comfortable
+    // margin for at least several sweep cycles to run.
+    tokio::time::sleep(Duration::from_millis(6_500)).await;
+
+    // The sweeper should have removed the completed job by now because no
+    // client ever polled (active_pollers stayed at 0) and the reconnect
+    // deadline is well past.
+    let outcome = bits.poll(&handle.id, None).await;
+    assert!(
+        matches!(outcome, PollOutcome::NotFound),
+        "expected NotFound after sweep, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
 async fn panicking_action_produces_failed_result_and_broker_continues() {
     let _ = common::TargetPanicking;
     let _ = common::TargetDummyDelay::new(0);

@@ -112,22 +112,44 @@ impl Bits {
         let timeout = timeout.unwrap_or(self.internal_poll_timeout);
         let base = lease.internal_poll_base_url.trim_end_matches('/');
         let url = format!("{base}/{id}");
-        let response = self
-            .internal_client
-            .get(url)
-            .timeout(timeout)
-            .send()
-            .await
-            .ok()?;
+        let response = match self.internal_client.get(url).timeout(timeout).send().await {
+            Ok(resp) => resp,
+            Err(err) if err.is_timeout() => {
+                // Timeouts are expected when the owner broker is still
+                // long-polling and the caller's poll budget expires first.
+                tracing::debug!(
+                    job.id = %id,
+                    error = %err,
+                    "proxy request to owner broker timed out"
+                );
+                return None;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    job.id = %id,
+                    error = %err,
+                    "proxy request to owner broker failed"
+                );
+                return None;
+            }
+        };
 
         let status = response.status();
         if status == reqwest::StatusCode::OK {
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/octet-stream")
-                .to_string();
+            let content_type = match response.headers().get(reqwest::header::CONTENT_TYPE) {
+                Some(value) => match value.to_str() {
+                    Ok(s) => s.to_string(),
+                    Err(err) => {
+                        tracing::warn!(
+                            job.id = %id,
+                            error = %err,
+                            "content-type header has invalid value; using default"
+                        );
+                        "application/octet-stream".to_string()
+                    }
+                },
+                None => "application/octet-stream".to_string(),
+            };
             let size = response.content_length().map(|n| n as i64).unwrap_or(-1);
             let stream = Box::new(
                 response

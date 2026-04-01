@@ -110,12 +110,19 @@ async fn execute(
     let status = response.status();
 
     if status.is_success() {
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_string();
+        let content_type = match response.headers().get(reqwest::header::CONTENT_TYPE) {
+            Some(value) => match value.to_str() {
+                Ok(s) => s.to_string(),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "content-type header has invalid value; using default"
+                    );
+                    "application/octet-stream".to_string()
+                }
+            },
+            None => "application/octet-stream".to_string(),
+        };
 
         let size = response.content_length().map(|n| n as i64).unwrap_or(-1);
 

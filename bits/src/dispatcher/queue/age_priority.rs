@@ -217,7 +217,7 @@ impl Queue for AgePriorityQueue {
                     )
                     .is_ok()
                 {
-                    tracing::warn!("age_priority queue worker dropped dequeue reply");
+                    tracing::warn!("age_priority queue worker has exited; dropped dequeue reply");
                 }
                 None
             }

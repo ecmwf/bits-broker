@@ -99,17 +99,23 @@ async fn concurrent_poll_and_sweep_do_not_deadlock() {
 async fn sweeper_removes_completed_job_after_reconnect_window() {
     let _ = common::TargetDummyDelay::new(0);
 
-    let bits = Arc::new(Bits::from_config(fast_sweep_config()).unwrap());
+    // Short reconnect buffer (100ms) + fast sweep (50ms) keeps the test fast.
+    let config = r#"
+bits:
+  sweep_interval_secs: 0.05
+  reconnect_buffer_secs: 0.1
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 0
+          concurrency: 1
+"#;
+    let bits = Arc::new(Bits::from_config(config).unwrap());
     let handle = bits.submit(Job::new(serde_json::json!({})));
 
-    // Wait long enough for the job to complete (~instant with duration_ms 0)
-    // *and* for the 5-second reconnect buffer to expire, plus a comfortable
-    // margin for at least several sweep cycles to run.
-    tokio::time::sleep(Duration::from_millis(6_500)).await;
+    // 100ms reconnect buffer + a few 50ms sweep cycles = well under 500ms.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // The sweeper should have removed the completed job by now because no
-    // client ever polled (active_pollers stayed at 0) and the reconnect
-    // deadline is well past.
     let outcome = bits.poll(&handle.id, None).await;
     assert!(
         matches!(outcome, PollOutcome::NotFound),

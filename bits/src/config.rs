@@ -90,6 +90,8 @@ struct BitsConfig {
     #[serde(default)]
     sweep_interval_secs: Option<f64>,
     #[serde(default)]
+    reconnect_buffer_secs: Option<f64>,
+    #[serde(default)]
     persist_after_secs: Option<f64>,
     #[serde(default)]
     persistence: Option<PersistenceConfig>,
@@ -204,6 +206,7 @@ pub(crate) struct RuntimeConfig {
     pub router: Switch,
     pub route_factory: RouteFactory,
     pub sweep_interval: Option<Duration>,
+    pub reconnect_buffer: Duration,
     pub broker_id_prefix: String,
     pub internal_poll_endpoint: String,
     pub internal_poll_timeout: Duration,
@@ -290,6 +293,10 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .sweep_interval_secs
         .map(|v| positive_duration_secs("bits.sweep_interval_secs", v))
         .transpose()?;
+    let reconnect_buffer = positive_duration_secs(
+        "bits.reconnect_buffer_secs",
+        bits_cfg.reconnect_buffer_secs.unwrap_or(5.0),
+    )?;
     let mut persist_after = bits_cfg
         .persist_after_secs
         .map(|v| duration_secs("bits.persist_after_secs", v))
@@ -605,6 +612,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             router,
             route_factory,
             sweep_interval,
+            reconnect_buffer,
             broker_id_prefix: broker_id,
             internal_poll_endpoint,
             internal_poll_timeout,

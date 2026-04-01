@@ -12,6 +12,7 @@ All options live under the `bits:` key in your YAML config file.
 | `internal_poll_endpoint` | string | auto-derived from `server.host`/`port` | URL at which **peer brokers** can reach this instance's poll endpoint. When not set, BITS derives this from `server.host` and `server.port`. If `server.host` is a wildcard bind (`0.0.0.0` or `::`), it falls back to a loopback address and emits a warning; set this explicitly for multi-broker deployments. |
 | `internal_poll_timeout_secs` | float (secs) | `2.5` | Timeout for outbound proxy poll requests to peer brokers. |
 | `sweep_interval_secs` | float (secs) | `180.0` | How often the sweeper thread evicts completed, unpolled jobs from memory. |
+| `reconnect_buffer_secs` | float (secs) | `5.0` | Grace period after a client disconnects before the job is eligible for sweep. Lower values suit non-long-polling APIs. |
 | `persist_after_secs` | float (secs) | *(none)* | Threshold before a job is written to durable storage. Omitting this key disables persistence. |
 
 ### Persistence options (`bits.persistence`)

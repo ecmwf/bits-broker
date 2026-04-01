@@ -115,6 +115,7 @@ async fn execute(
                 Ok(s) => s.to_string(),
                 Err(err) => {
                     tracing::warn!(
+                        target_url = %url,
                         error = %err,
                         "content-type header has invalid value; using default"
                     );

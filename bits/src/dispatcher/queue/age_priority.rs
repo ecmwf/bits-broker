@@ -180,7 +180,7 @@ impl Queue for AgePriorityQueue {
                 )
                 .is_ok()
         {
-            tracing::warn!("age_priority queue worker has exited; jobs will be dropped");
+            tracing::warn!("age_priority queue worker has exited; new jobs will not be processed");
         }
     }
 

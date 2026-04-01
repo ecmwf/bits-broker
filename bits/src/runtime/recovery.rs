@@ -119,6 +119,7 @@ impl Bits {
                 // long-polling and the caller's poll budget expires first.
                 tracing::debug!(
                     job.id = %id,
+                    owner_broker = %lease.broker_id,
                     error = %err,
                     "proxy request to owner broker timed out"
                 );
@@ -127,6 +128,8 @@ impl Bits {
             Err(err) => {
                 tracing::warn!(
                     job.id = %id,
+                    owner_broker = %lease.broker_id,
+                    url = %base,
                     error = %err,
                     "proxy request to owner broker failed"
                 );

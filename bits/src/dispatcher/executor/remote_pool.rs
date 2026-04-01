@@ -336,7 +336,15 @@ async fn handle_complete_data(
             let size = match request.headers().get(header::CONTENT_LENGTH) {
                 Some(value) => match value.to_str() {
                     Ok(s) => match s.parse::<i64>() {
-                        Ok(n) => n,
+                        Ok(n) if n >= 0 => n,
+                        Ok(n) => {
+                            tracing::warn!(
+                                job.id = %job_id,
+                                raw_value = n,
+                                "content-length header is negative; using default"
+                            );
+                            -1
+                        }
                         Err(err) => {
                             tracing::warn!(
                                 job.id = %job_id,

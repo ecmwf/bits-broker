@@ -78,7 +78,7 @@ receives `Pending` in response to the recovery poll without an extra round-trip.
 
 ## Client reconnect window
 
-After each `poll_local` call returns, the broker extends a 5-second reconnect deadline. A job
+After each `poll_local` call returns, the broker extends the reconnect deadline by `bits.reconnect_buffer_secs` (default 5 seconds). A job
 considers the client "present" while `client_connected` is set **or** while the reconnect
-deadline has not yet elapsed. This gives the client 5 seconds to reconnect between polls before
+deadline has not yet elapsed. This gives the client that many seconds to reconnect between polls before
 the dispatch pipeline treats the connection as lost and stops work.

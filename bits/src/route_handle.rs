@@ -1,10 +1,10 @@
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::bits::{JobHandle, RECONNECT_BUFFER};
+use crate::bits::JobHandle;
 use crate::db::PersistenceStore;
 use crate::job::Job;
 use crate::routing::switch::Switch;
@@ -19,6 +19,7 @@ pub struct RouteHandle {
     pub(crate) broker_id: String,
     pub(crate) job_store: Option<Arc<dyn PersistenceStore>>,
     pub(crate) persist_after: Option<Duration>,
+    pub(crate) reconnect_buffer: Duration,
     pub(crate) in_flight: Arc<AtomicUsize>,
 }
 
@@ -29,7 +30,7 @@ impl RouteHandle {
             job.id = self.new_job_id();
         }
         let job_id = job.id.clone();
-        job.set_reconnect_deadline(Instant::now() + RECONNECT_BUFFER);
+        job.set_reconnect_deadline(Instant::now() + self.reconnect_buffer);
         let job = Arc::new(job);
         self.jobs.insert(job_id.clone(), job.clone());
 

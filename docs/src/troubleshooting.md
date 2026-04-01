@@ -89,7 +89,7 @@ return `NotFound`.
 
 **Sweeper cleaned up the job**
 
-Jobs have a limited reconnect window (5 seconds between polls). If the client
+Jobs have a limited reconnect window (`bits.reconnect_buffer_secs`, default 5 seconds). If the client
 disconnects for longer than the deadline, the sweeper marks the job for
 cleanup.
 

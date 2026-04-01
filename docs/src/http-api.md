@@ -115,7 +115,7 @@ sequenceDiagram
     end
 ```
 
-Between polls, BITS keeps the job alive for 5 seconds (the reconnect window).
+Between polls, BITS keeps the job alive for `bits.reconnect_buffer_secs` (default 5 seconds).
 If the client doesn't come back within that window, the job is eligible for
 cleanup by the sweeper. If the client disconnects mid-poll (e.g. network
 drop), the reconnect window is extended automatically.

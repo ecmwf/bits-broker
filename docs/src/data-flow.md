@@ -233,7 +233,7 @@ job is rebuilt from `original_request` and transforms run again.
 
 ## The reconnect window
 
-Between polls, a 5-second reconnect window keeps the job alive:
+Between polls, the reconnect window (`bits.reconnect_buffer_secs`, default 5 s) keeps the job alive:
 
 ```mermaid
 sequenceDiagram

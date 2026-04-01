@@ -15,8 +15,8 @@ use crate::runtime::maintenance::{ConnectedGuard, ShutdownSignal, start_sweeper}
 use crate::runtime::recovery::{LeaseLookup, owner_from_job_id};
 use crate::runtime::runner::spawn_job;
 
-/// Buffer added on top of the poll timeout to allow for the reconnect round-trip.
-pub(crate) const RECONNECT_BUFFER: Duration = Duration::from_secs(5);
+/// Default reconnect buffer added on top of the poll timeout.
+const DEFAULT_RECONNECT_BUFFER: Duration = Duration::from_secs(5);
 /// Default sweep interval for removing expired completed jobs.
 const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(180);
 
@@ -51,6 +51,7 @@ pub struct Bits {
     pub(crate) persist_after: Option<Duration>,
     pub(crate) job_store: Option<Arc<dyn PersistenceStore>>,
     pub(crate) internal_client: reqwest::Client,
+    pub(crate) reconnect_buffer: Duration,
     pub(crate) shutdown: Arc<ShutdownSignal>,
     pub(crate) in_flight: Arc<AtomicUsize>,
     pub(crate) added_routes: Arc<std::sync::RwLock<Vec<RouteHandle>>>,
@@ -84,6 +85,7 @@ impl Bits {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to build reqwest client"),
+            reconnect_buffer: DEFAULT_RECONNECT_BUFFER,
             shutdown: shutdown.clone(),
             in_flight: Arc::new(AtomicUsize::new(0)),
             added_routes: Arc::new(std::sync::RwLock::new(vec![])),
@@ -134,6 +136,7 @@ impl Bits {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| ConfigError::validation("internal_client", e.to_string()))?,
+            reconnect_buffer: parsed.reconnect_buffer,
             shutdown: shutdown.clone(),
             in_flight: Arc::new(AtomicUsize::new(0)),
             added_routes: Arc::new(std::sync::RwLock::new(vec![])),
@@ -216,6 +219,7 @@ impl Bits {
             broker_id: self.broker_id.clone(),
             job_store: self.job_store.clone(),
             persist_after: self.persist_after,
+            reconnect_buffer: self.reconnect_buffer,
             in_flight: self.in_flight.clone(),
         };
 
@@ -246,7 +250,7 @@ impl Bits {
         }
         let job_id = job.id.clone();
 
-        job.set_reconnect_deadline(Instant::now() + RECONNECT_BUFFER);
+        job.set_reconnect_deadline(Instant::now() + self.reconnect_buffer);
 
         let job = Arc::new(job);
         self.jobs.insert(job_id.clone(), job.clone());
@@ -367,7 +371,7 @@ impl Bits {
         let _guard = ConnectedGuard::new(
             job.active_pollers.clone(),
             job.reconnect_deadline_nanos.clone(),
-            RECONNECT_BUFFER,
+            self.reconnect_buffer,
         );
 
         let notified = job.notify.notified();

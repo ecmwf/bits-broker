@@ -98,7 +98,7 @@ are not counted in the items below.
 ### Started at `Bits::from_config()` - always
 
 **Completed-job sweeper (1 OS thread)**
-A single `std::thread::spawn` thread that wakes every 5 seconds (configurable via
+A single `std::thread::spawn` thread that wakes every 180 seconds (configurable via
 `bits.sweep_interval_secs`) and removes finished jobs from the in-memory map once no client
 is polling them. A real blocking OS thread is used deliberately so it cannot interfere with the
 Tokio scheduler even if it is saturated.

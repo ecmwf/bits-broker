@@ -429,6 +429,9 @@ bits:
   # How often to sweep completed jobs from memory (seconds, default 180)
   sweep_interval_secs: 180.0
 
+  # Grace period after client disconnect before sweep eligibility (seconds, default 5)
+  reconnect_buffer_secs: 5.0
+
   # Persist jobs still in-flight after 25 seconds
   persist_after_secs: 25.0
 

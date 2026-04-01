@@ -342,7 +342,8 @@ The worker closed its connection or crashed mid-processing.
 
 ### Invalid response headers
 
-If you see `content-type header has invalid value` or
+If you see `content-type header has invalid value`,
+`content-length header has invalid value`, or
 `content-length header is not a valid number`, a worker or upstream service
 returned a malformed HTTP response header.
 
@@ -434,9 +435,9 @@ smaller if queues drain quickly, larger if backlog clears more slowly.
 
 ## Queue worker failures
 
-If you see `queue worker has exited`, the broker's queue manager crashed for
-a route that uses priority-based scheduling (`cost_weighted` or
-`age_priority`).
+If you see `cost_weighted queue worker has exited` or
+`age_priority queue worker has exited` in the logs, the broker's queue
+manager crashed for a route that uses priority-based scheduling.
 
 **Impact**: The affected route stops making progress. New jobs for that route
 will not be processed, and existing queued jobs remain stuck. Clients

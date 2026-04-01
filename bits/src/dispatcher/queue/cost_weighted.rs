@@ -137,7 +137,7 @@ impl Queue for CostWeightedQueue {
                 )
                 .is_ok()
         {
-            tracing::warn!("cost_weighted queue worker has exited; jobs will be dropped");
+            tracing::warn!("cost_weighted queue worker has exited; new jobs will not be processed");
         }
     }
 

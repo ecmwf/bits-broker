@@ -200,9 +200,7 @@ impl Queue for AgePriorityQueue {
                 )
                 .is_ok()
             {
-                tracing::warn!(
-                    "age_priority queue worker has exited; dequeue disabled for this route"
-                );
+                tracing::warn!("age_priority queue worker has exited; dequeue disabled");
             }
             return None;
         }

@@ -343,9 +343,10 @@ The worker closed its connection or crashed mid-processing.
 ### Invalid response headers
 
 If you see `content-type header has invalid value`,
-`content-length header has invalid value`, or
-`content-length header is not a valid number`, a worker or upstream service
-returned a malformed HTTP response header.
+`content-length header has invalid value`,
+`content-length header is not a valid number`, or
+`content-length header is negative`, a worker or upstream service returned a
+malformed HTTP response header.
 
 **Impact**: The job still completes, but clients may receive the response with
 a fallback content type or without a usable content length. The body itself is
@@ -439,13 +440,14 @@ If you see `cost_weighted queue worker has exited` or
 `age_priority queue worker has exited` in the logs, the broker's queue
 manager crashed for a route that uses priority-based scheduling.
 
-**Impact**: The affected route stops making progress. New jobs for that route
-will not be processed, and existing queued jobs remain stuck. Clients
-submitting to the route will not receive errors, but their jobs will never
-complete. Other routes on the same broker are not affected.
+**Impact**: All routes that share the affected queue worker stop making
+progress. If multiple routes use the same named target, they share one
+dispatcher and are all affected. Existing queued jobs remain stuck and new
+submissions stay in Pending indefinitely. Once queue capacity fills up,
+further submissions are rejected with an overload error (HTTP 529).
 
-This warning fires once when the failure is first detected. The route stays
-broken until the broker is restarted.
+This warning fires once when the failure is first detected. The affected
+queue stays broken until the broker is restarted.
 
 **Solutions**:
 - Restart the broker to restore the route

@@ -157,9 +157,7 @@ impl Queue for CostWeightedQueue {
                 )
                 .is_ok()
             {
-                tracing::warn!(
-                    "cost_weighted queue worker has exited; dequeue disabled for this route"
-                );
+                tracing::warn!("cost_weighted queue worker has exited; dequeue disabled");
             }
             return None;
         }

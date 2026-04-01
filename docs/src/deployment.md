@@ -388,9 +388,12 @@ broker tolerates dependency ordering in Kubernetes without entering
 CrashLoopBackOff. TiKV connections are lazy (first use, not startup) and
 retry automatically on each operation.
 
-These defaults are not yet configurable via YAML. If a target endpoint
-routinely takes longer than 30 seconds, the request will fail with a timeout
-error. A future release will add per-target timeout configuration.
+These defaults are not yet configurable via YAML. HTTP targets enforce a 30s
+connect timeout and a 30s idle-read timeout (maximum gap between response
+chunks), but do not impose a hard cap on total request or stream duration.
+Long-lived streams are allowed as long as data continues flowing within the
+idle window; only connections that stall for more than 30 seconds will fail
+with a timeout. A future release will add per-target timeout configuration.
 
 ### `persist_after_secs` tuning
 

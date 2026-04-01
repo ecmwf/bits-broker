@@ -9,7 +9,8 @@ use crate::actions::{ActionError, TargetAction, TargetResult};
 use crate::job::Job;
 use crate::result::JobResult;
 
-const DEFAULT_TARGET_TIMEOUT_SECS: f64 = 30.0;
+const DEFAULT_TARGET_TIMEOUT_SECS_RAW: u64 = 30;
+const DEFAULT_TARGET_TIMEOUT_SECS: f64 = DEFAULT_TARGET_TIMEOUT_SECS_RAW as f64;
 
 // ================================
 //   HttpTarget
@@ -71,10 +72,8 @@ impl HttpTarget {
 
     fn client(&self) -> &reqwest::Client {
         self.client.get_or_init(|| {
-            let connect = Duration::try_from_secs_f64(self.connect_timeout_secs)
-                .unwrap_or(Duration::from_secs(DEFAULT_TARGET_TIMEOUT_SECS as u64));
-            let read = Duration::try_from_secs_f64(self.read_timeout_secs)
-                .unwrap_or(Duration::from_secs(DEFAULT_TARGET_TIMEOUT_SECS as u64));
+            let connect = Duration::from_secs_f64(self.connect_timeout_secs);
+            let read = Duration::from_secs_f64(self.read_timeout_secs);
             reqwest::Client::builder()
                 .connect_timeout(connect)
                 .read_timeout(read)
@@ -243,5 +242,65 @@ mod tests {
         let result = target.dispatch(&job).await;
 
         assert!(matches!(result, Err(ActionError::NetworkError(_))));
+    }
+
+    #[test]
+    fn defaults_applied_when_timeout_fields_omitted() {
+        let target: HttpTarget =
+            serde_json::from_value(serde_json::json!({"url": "http://x"})).unwrap();
+        assert_eq!(target.connect_timeout_secs, DEFAULT_TARGET_TIMEOUT_SECS);
+        assert_eq!(target.read_timeout_secs, DEFAULT_TARGET_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn custom_timeout_values_accepted() {
+        let target: HttpTarget = serde_json::from_value(serde_json::json!({
+            "url": "http://x",
+            "connect_timeout_secs": 5.0,
+            "read_timeout_secs": 120.0
+        }))
+        .unwrap();
+        assert_eq!(target.connect_timeout_secs, 5.0);
+        assert_eq!(target.read_timeout_secs, 120.0);
+    }
+
+    #[test]
+    fn negative_timeout_rejected() {
+        let result = serde_json::from_value::<HttpTarget>(
+            serde_json::json!({"url": "http://x", "connect_timeout_secs": -1.0}),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zero_timeout_rejected() {
+        let result = serde_json::from_value::<HttpTarget>(
+            serde_json::json!({"url": "http://x", "read_timeout_secs": 0.0}),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn nan_timeout_rejected() {
+        let result = serde_json::from_value::<HttpTarget>(
+            serde_json::json!({"url": "http://x", "connect_timeout_secs": f64::NAN}),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn infinity_timeout_rejected() {
+        let result = serde_json::from_value::<HttpTarget>(
+            serde_json::json!({"url": "http://x", "read_timeout_secs": f64::INFINITY}),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_field_rejected() {
+        let result = serde_json::from_value::<HttpTarget>(
+            serde_json::json!({"url": "http://x", "read_timeout_sec": 10.0}),
+        );
+        assert!(result.is_err());
     }
 }

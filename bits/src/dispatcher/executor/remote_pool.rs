@@ -547,22 +547,39 @@ impl Executor<TargetResult> for RemotePoolExecutor {
         // Heartbeat reaper task.
         let heartbeat_timeout = self.heartbeat_timeout;
         let reaper_state = Arc::clone(&state);
+        let mut shutdown_rx = self.worker_server.shutdown_rx();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(heartbeat_timeout / 2);
             loop {
-                interval.tick().await;
-                let now = Instant::now();
-                reaper_state.in_progress.retain(|job_id, entry| {
-                    let alive =
-                        now.duration_since(entry.last_heartbeat) < reaper_state.heartbeat_timeout;
-                    if !alive {
-                        tracing::warn!(
-                            job_id,
-                            "remote_pool: evicting job due to heartbeat timeout"
-                        );
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let now = Instant::now();
+                        reaper_state.in_progress.retain(|job_id, entry| {
+                            let alive =
+                                now.duration_since(entry.last_heartbeat) < reaper_state.heartbeat_timeout;
+                            if !alive {
+                                tracing::warn!(
+                                    job_id,
+                                    "remote_pool: evicting job due to heartbeat timeout"
+                                );
+                            }
+                            alive
+                        });
                     }
-                    alive
-                });
+                    _ = shutdown_rx.wait_for(|&v| v) => {
+                        // Drain in-progress jobs so waiting callers resolve
+                        // instead of hanging until the heartbeat timeout.
+                        let ids: Vec<String> = reaper_state
+                            .in_progress
+                            .iter()
+                            .map(|e| e.key().clone())
+                            .collect();
+                        for id in ids {
+                            reaper_state.in_progress.remove(&id);
+                        }
+                        break;
+                    }
+                }
             }
         });
         Ok(())

@@ -546,6 +546,61 @@ A dead broker's lease remains visible until it expires.
 
 ---
 
+## Shutdown behavior
+
+When a broker receives a termination signal (SIGTERM, Ctrl-C), it runs a
+multi-step graceful shutdown sequence before exiting.
+
+### Shutdown sequence
+
+1. **Queue close** -- all dispatcher queues are closed. Executor tasks that
+   are waiting for the next job exit immediately. Jobs already running
+   continue to completion.
+2. **Worker server stop** -- the remote pool heartbeat reaper stops and
+   drains any in-progress remote jobs. The worker server HTTP listener
+   begins graceful shutdown (finishes active requests, rejects new ones).
+3. **Sync thread signal** -- the sweeper and heartbeat threads are woken
+   and begin their exit paths.
+4. **Durable cleanup flush** -- the cleanup worker processes any remaining
+   persistence deletes (removing durable records for jobs whose results
+   were already delivered to clients). The broker waits for all pending
+   deletes to finish before continuing.
+5. **Sweeper join** -- the sweeper thread exits.
+6. **In-flight drain and lease deletion** -- the heartbeat thread waits up
+   to `broker_lease_ttl` (default 30 seconds) for in-flight jobs to
+   finish, then deletes the broker lease from the persistence store.
+
+### `broker_lease_ttl` as drain timeout
+
+The `broker_lease_ttl` setting controls two things:
+
+- How often peer brokers consider this broker alive (heartbeat interval is
+  half the TTL).
+- How long the broker waits for running jobs to finish during shutdown.
+
+If a job takes longer than `broker_lease_ttl` to complete, the broker
+gives up waiting, deletes its lease, and exits. Peer brokers may then see
+the expired lease and attempt to reclaim the still-running job from the
+durable store, causing duplicate execution.
+
+**Recommendation**: set `broker_lease_ttl` higher than the longest
+expected job duration. For example, if your slowest target takes up to 60
+seconds, set `broker_lease_ttl_secs: 120` to allow a comfortable margin.
+
+### What happens to in-flight jobs after shutdown
+
+- **Jobs still queued** -- dropped. They were never started and have no
+  durable record unless they crossed the `persist_after` threshold while
+  waiting. If persisted, a peer broker can reclaim and re-execute them.
+- **Jobs actively running** -- allowed to finish up to the drain timeout.
+  If they finish in time, their results are delivered normally. If not,
+  results are lost and persisted jobs may be reclaimed by peers.
+- **Remote pool jobs** -- the reaper drain fails outstanding jobs so
+  callers see an error instead of hanging. Workers that have not completed
+  receive a closed connection from the worker server.
+
+---
+
 ## Getting help
 
 If issues persist after following this guide:

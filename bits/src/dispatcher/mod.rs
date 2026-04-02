@@ -110,6 +110,26 @@ pub enum DispatchGuard {
 }
 
 impl<T: Send + 'static> Dispatcher<T> {
+    /// Shut this dispatcher down: close the queue (causing executor tasks to
+    /// exit), close the admission semaphore (rejecting new dispatches), and
+    /// fail any callers still waiting for a queued result.
+    pub fn close(&self) {
+        self.admission.close();
+        self.queue.close();
+        let stranded: Vec<oneshot::Sender<Result<T, ActionError>>> = self
+            .pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain()
+            .map(|(_, (_guard, _work, reply_tx, _permit))| reply_tx)
+            .collect();
+        for reply_tx in stranded {
+            let _ = reply_tx.send(Err(ActionError::ResourceError(
+                "dispatcher closed".to_string(),
+            )));
+        }
+    }
+
     /// Build a `Dispatcher` from config values, returning `Ok(None)` if neither
     /// queue nor executor is specified (no scheduling needed).
     ///
@@ -226,7 +246,6 @@ impl<T: Send + 'static> Dispatcher<T> {
                     ));
                 }
                 Err(tokio::sync::TryAcquireError::Closed) => {
-                    tracing::error!("dispatcher admission semaphore closed unexpectedly");
                     return Err(ActionError::ResourceError("dispatcher closed".to_string()));
                 }
             };

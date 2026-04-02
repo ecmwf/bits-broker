@@ -16,7 +16,7 @@ use crate::job::Job;
 /// A background task maintains the priority heap and re-orders it as new
 /// items arrive. It never pops items on its own — only `dequeue` does that.
 pub struct CostWeightedQueue {
-    tx: mpsc::UnboundedSender<WorkerCmd>,
+    tx: std::sync::Mutex<Option<mpsc::UnboundedSender<WorkerCmd>>>,
     seq: Arc<AtomicU64>,
     dead: AtomicBool,
 }
@@ -62,7 +62,7 @@ impl CostWeightedQueue {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(worker(rx));
         Self {
-            tx,
+            tx: std::sync::Mutex::new(Some(tx)),
             seq: Arc::new(AtomicU64::new(0)),
             dead: AtomicBool::new(false),
         }
@@ -119,14 +119,20 @@ impl Queue for CostWeightedQueue {
     fn enqueue(&self, job: Job) {
         let cost = job.metadata["cost"].as_u64().unwrap_or(0);
         let seq = self.seq.fetch_add(1, AtomicOrdering::Relaxed);
-        if self
-            .tx
-            .send(WorkerCmd::Enqueue {
-                cost,
-                seq,
-                job: Box::new(job),
-            })
-            .is_err()
+        let send_failed = {
+            let guard = self.tx.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.as_ref() {
+                Some(tx) => tx
+                    .send(WorkerCmd::Enqueue {
+                        cost,
+                        seq,
+                        job: Box::new(job),
+                    })
+                    .is_err(),
+                None => true,
+            }
+        };
+        if send_failed
             && self
                 .dead
                 .compare_exchange(
@@ -146,7 +152,14 @@ impl Queue for CostWeightedQueue {
             return None;
         }
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send(WorkerCmd::Dequeue(reply_tx)).is_err() {
+        let send_failed = {
+            let guard = self.tx.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.as_ref() {
+                Some(tx) => tx.send(WorkerCmd::Dequeue(reply_tx)).is_err(),
+                None => true,
+            }
+        };
+        if send_failed {
             if self
                 .dead
                 .compare_exchange(
@@ -179,5 +192,10 @@ impl Queue for CostWeightedQueue {
                 None
             }
         }
+    }
+
+    fn close(&self) {
+        self.dead.store(true, AtomicOrdering::Relaxed);
+        self.tx.lock().unwrap_or_else(|p| p.into_inner()).take();
     }
 }

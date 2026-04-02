@@ -98,6 +98,16 @@ pub enum Action {
 }
 
 impl Action {
+    pub(crate) fn close(&self) {
+        match self {
+            Action::Check(_, Some(d), _) => d.close(),
+            Action::Transform(_, Some(d), _) => d.close(),
+            Action::Target(_, Some(d), _) => d.close(),
+            Action::Switch(switch) => switch.close_all(),
+            _ => {}
+        }
+    }
+
     /// Returns true when this action ends a route.
     pub fn is_terminal(&self) -> bool {
         matches!(self, Action::Target(..) | Action::Switch(..))

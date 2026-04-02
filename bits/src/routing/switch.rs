@@ -48,6 +48,14 @@ impl Switch {
         out
     }
 
+    pub(crate) fn close_all(&self) {
+        for route in &self.routes {
+            for action in &route.actions {
+                action.close();
+            }
+        }
+    }
+
     pub fn validate(&self) -> Result<(), crate::error::RoutingError> {
         for route in &self.routes {
             validate_route(route)?;

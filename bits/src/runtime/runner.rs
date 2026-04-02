@@ -126,6 +126,10 @@ async fn dispatch(router: &Switch, job: Job) -> JobResult {
             tracing::warn!(error = %reason, "dispatch rejected: queue full");
             JobResult::Overloaded { reason }
         }
+        Err(crate::actions::ActionError::CircuitOpen(reason)) => {
+            tracing::warn!(error = %reason, "dispatch rejected: circuit open");
+            JobResult::Overloaded { reason }
+        }
         Err(err) => {
             tracing::error!(error = %err, "dispatch failed");
             JobResult::Failed {

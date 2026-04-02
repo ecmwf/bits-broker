@@ -48,6 +48,7 @@ fn test_bits(
             Arc::new(SleepTarget { ms: sleep_ms }),
             None,
             None,
+            None,
         )],
     )]);
     Bits::from_router_for_tests(
@@ -511,6 +512,7 @@ async fn upsert_failure_does_not_set_persisted_flag() {
             Arc::new(SleepTarget { ms: 200 }),
             None,
             None,
+            None,
         )],
     )]);
     let bits = Bits::from_router_for_tests(
@@ -541,7 +543,12 @@ async fn delete_failure_leaves_record_for_reclaim() {
     let failing = Arc::new(DeleteFailingStore::new(Arc::clone(&inner)));
     let router = Switch::new(vec![Route::new(
         "default".into(),
-        vec![Action::Target(Arc::new(SleepTarget { ms: 80 }), None, None)],
+        vec![Action::Target(
+            Arc::new(SleepTarget { ms: 80 }),
+            None,
+            None,
+            None,
+        )],
     )]);
     let bits = Bits::from_router_for_tests(
         router,

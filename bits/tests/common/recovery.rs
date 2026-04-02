@@ -110,6 +110,7 @@ pub fn single_target_switch(behavior: TargetBehavior) -> Switch {
             Arc::new(ScriptedTarget::new(behavior)),
             None,
             None,
+            None,
         )],
     )])
 }

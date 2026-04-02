@@ -529,6 +529,7 @@ async fn job_lost_returns_json_error_body() {
             Arc::new(common::TargetDummyDelay::new(0)),
             None,
             None,
+            None,
         )],
     )]);
     let bits = Arc::new(Bits::from_router_for_tests(

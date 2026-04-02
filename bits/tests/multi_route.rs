@@ -68,11 +68,11 @@ targets:
         .expect("parse route_b");
 
     let target_a = match routes_a[0].actions.first() {
-        Some(Action::Target(t, _, _)) => Arc::clone(t),
+        Some(Action::Target(t, _, _, _)) => Arc::clone(t),
         _ => panic!("expected Target action in route_a"),
     };
     let target_b = match routes_b[0].actions.first() {
-        Some(Action::Target(t, _, _)) => Arc::clone(t),
+        Some(Action::Target(t, _, _, _)) => Arc::clone(t),
         _ => panic!("expected Target action in route_b"),
     };
 

@@ -664,7 +664,7 @@ fn register_action(py: Python<'_>, name: String, cls: Bound<'_, PyAny>) -> PyRes
                     Action::Transform(Arc::new(PyTransformAdapter { instance }), None, None)
                 }
                 ActionKind::Target => {
-                    Action::Target(Arc::new(PyTargetAdapter { instance }), None, None)
+                    Action::Target(Arc::new(PyTargetAdapter { instance }), None, None, None)
                 }
             })
         })

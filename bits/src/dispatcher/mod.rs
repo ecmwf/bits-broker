@@ -281,10 +281,13 @@ impl<T: Send + 'static> Dispatcher<T> {
             });
 
             let job_id = job_to_enqueue.id.clone();
-            pending
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(job_id, (guard, guarded_work, reply_tx, Some(permit)));
+            {
+                let mut map = pending.lock().unwrap_or_else(|p| p.into_inner());
+                if closing.load(Ordering::Acquire) {
+                    return Err(ActionError::ResourceError("dispatcher closed".to_string()));
+                }
+                map.insert(job_id, (guard, guarded_work, reply_tx, Some(permit)));
+            }
             queue.enqueue(job_to_enqueue);
 
             reply_rx

@@ -24,10 +24,17 @@ pub enum QueueKind {
 ///
 /// Weighted implementations spawn internal threads to maintain their storage
 /// ordering. Those threads never pop items — only `dequeue` does that.
+///
+/// Calling `close` shuts the queue down: blocked `dequeue` calls return
+/// `None` and future `enqueue` calls are silently dropped.
 #[async_trait]
 pub trait Queue: Send + Sync {
     fn enqueue(&self, job: Job);
     async fn dequeue(&self) -> Option<Job>;
+
+    /// Shut the queue down so that all current and future `dequeue` calls
+    /// return `None`. The default implementation is a no-op.
+    fn close(&self) {}
 }
 
 #[cfg(test)]

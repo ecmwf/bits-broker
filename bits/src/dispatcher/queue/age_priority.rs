@@ -12,7 +12,7 @@ use super::Queue;
 use crate::job::Job;
 
 pub struct AgePriorityQueue {
-    tx: mpsc::Sender<WorkerCmd>,
+    tx: std::sync::Mutex<Option<mpsc::Sender<WorkerCmd>>>,
     seq: Arc<AtomicU64>,
     dead: AtomicBool,
 }
@@ -45,7 +45,7 @@ impl AgePriorityQueue {
             .spawn(move || worker(rx))
             .expect("failed to spawn age-priority queue thread");
         Self {
-            tx,
+            tx: std::sync::Mutex::new(Some(tx)),
             seq: Arc::new(AtomicU64::new(0)),
             dead: AtomicBool::new(false),
         }
@@ -161,15 +161,21 @@ impl Queue for AgePriorityQueue {
     fn enqueue(&self, job: Job) {
         let cost = job.metadata["cost"].as_u64().unwrap_or(1);
         let seq = self.seq.fetch_add(1, AtomicOrdering::Relaxed);
-        if self
-            .tx
-            .send(WorkerCmd::Enqueue(Box::new(Entry {
-                cost,
-                seq,
-                enqueued_at: Instant::now(),
-                job,
-            })))
-            .is_err()
+        let send_failed = {
+            let guard = self.tx.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.as_ref() {
+                Some(tx) => tx
+                    .send(WorkerCmd::Enqueue(Box::new(Entry {
+                        cost,
+                        seq,
+                        enqueued_at: Instant::now(),
+                        job,
+                    })))
+                    .is_err(),
+                None => true,
+            }
+        };
+        if send_failed
             && self
                 .dead
                 .compare_exchange(
@@ -189,7 +195,14 @@ impl Queue for AgePriorityQueue {
             return None;
         }
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send(WorkerCmd::Dequeue(reply_tx)).is_err() {
+        let send_failed = {
+            let guard = self.tx.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.as_ref() {
+                Some(tx) => tx.send(WorkerCmd::Dequeue(reply_tx)).is_err(),
+                None => true,
+            }
+        };
+        if send_failed {
             if self
                 .dead
                 .compare_exchange(
@@ -222,5 +235,10 @@ impl Queue for AgePriorityQueue {
                 None
             }
         }
+    }
+
+    fn close(&self) {
+        self.dead.store(true, AtomicOrdering::Relaxed);
+        self.tx.lock().unwrap_or_else(|p| p.into_inner()).take();
     }
 }

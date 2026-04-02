@@ -560,7 +560,7 @@ mod tests {
 
         let config = crate::circuit_breaker::CircuitBreakerConfig {
             failure_threshold: 1,
-            open_timeout_secs: 0.001,
+            open_timeout_secs: 0.05,
         };
         let breaker = Arc::new(crate::circuit_breaker::CircuitBreaker::new(
             &config,
@@ -587,7 +587,7 @@ mod tests {
         assert!(switch.dispatch(&job).await.is_err());
 
         succeed.store(true, Ordering::Relaxed);
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         assert!(
             switch.dispatch(&job).await.is_ok(),

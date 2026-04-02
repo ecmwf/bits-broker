@@ -1077,7 +1077,7 @@ fn attach_dispatcher(
 ) -> Result<Action, BitsError> {
     if cb_config.is_some() && !matches!(action, Action::Target(..)) {
         return Err(ConfigError::validation(
-            format!("{entry_name}.circuit_breaker"),
+            format!("{action_name}.{entry_name}.circuit_breaker"),
             "only valid on target actions",
         )
         .into());

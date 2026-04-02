@@ -8,7 +8,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -90,6 +90,7 @@ pub struct Dispatcher<T: Send + 'static> {
     queue: Arc<dyn Queue>,
     pending: Arc<PendingMap<T>>,
     admission: Arc<Semaphore>,
+    closing: Arc<AtomicBool>,
 }
 
 impl<T: Send + 'static> Clone for Dispatcher<T> {
@@ -98,6 +99,7 @@ impl<T: Send + 'static> Clone for Dispatcher<T> {
             queue: Arc::clone(&self.queue),
             pending: Arc::clone(&self.pending),
             admission: Arc::clone(&self.admission),
+            closing: Arc::clone(&self.closing),
         }
     }
 }
@@ -114,6 +116,7 @@ impl<T: Send + 'static> Dispatcher<T> {
     /// exit), close the admission semaphore (rejecting new dispatches), and
     /// fail any callers still waiting for a queued result.
     pub fn close(&self) {
+        self.closing.store(true, Ordering::Release);
         self.admission.close();
         self.queue.close();
         let stranded: Vec<oneshot::Sender<Result<T, ActionError>>> = self
@@ -220,6 +223,7 @@ impl<T: Send + 'static> Dispatcher<T> {
             queue,
             pending,
             admission,
+            closing: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -233,6 +237,7 @@ impl<T: Send + 'static> Dispatcher<T> {
         let pending = Arc::clone(&self.pending);
         let queue = Arc::clone(&self.queue);
         let admission = Arc::clone(&self.admission);
+        let closing = Arc::clone(&self.closing);
         let job_to_enqueue = job.clone();
         let cancelled = job.cancelled.clone();
         let pollers = job.active_pollers.clone();
@@ -249,6 +254,10 @@ impl<T: Send + 'static> Dispatcher<T> {
                     return Err(ActionError::ResourceError("dispatcher closed".to_string()));
                 }
             };
+
+            if closing.load(Ordering::Acquire) {
+                return Err(ActionError::ResourceError("dispatcher closed".to_string()));
+            }
 
             let guarded_work: BoxFuture<'static, Result<T, ActionError>> = Box::pin(async move {
                 match guard {

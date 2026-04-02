@@ -567,25 +567,26 @@ multi-step graceful shutdown sequence before exiting.
    deletes to finish before continuing.
 5. **Sweeper join** -- the sweeper thread exits.
 6. **In-flight drain and lease deletion** -- the heartbeat thread waits up
-   to `broker_lease_ttl` (default 30 seconds) for in-flight jobs to
+   to `broker_lease_ttl_secs` (default 30 seconds) for in-flight jobs to
    finish, then deletes the broker lease from the persistence store.
 
-### `broker_lease_ttl` as drain timeout
+### `broker_lease_ttl_secs` as drain timeout
 
-The `broker_lease_ttl` setting controls two things:
+The `broker_lease_ttl_secs` setting controls two things:
 
 - How often peer brokers consider this broker alive (heartbeat interval is
   half the TTL).
 - How long the broker waits for running jobs to finish during shutdown.
 
-If a job takes longer than `broker_lease_ttl` to complete, the broker
+If a job takes longer than `broker_lease_ttl_secs` to complete, the broker
 gives up waiting, deletes its lease, and exits. Peer brokers may then see
 the expired lease and attempt to reclaim the still-running job from the
 durable store, causing duplicate execution.
 
-**Recommendation**: set `broker_lease_ttl` higher than the longest
+**Recommendation**: set `broker_lease_ttl_secs` higher than the longest
 expected job duration. For example, if your slowest target takes up to 60
-seconds, set `broker_lease_ttl_secs: 120` to allow a comfortable margin.
+seconds, set `bits.persistence.broker_lease_ttl_secs: 120` to allow a
+comfortable margin.
 
 ### What happens to in-flight jobs after shutdown
 

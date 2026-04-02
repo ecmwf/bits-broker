@@ -24,6 +24,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use axum::Router;
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use tokio::sync::watch;
 
 fn validate_pool_name(name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if name.is_empty() {
@@ -55,20 +56,31 @@ pub struct WorkerServer {
     port: u16,
     pools: Arc<RwLock<HashMap<String, Router>>>,
     started: OnceLock<()>,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl WorkerServer {
     pub fn new(host: &str, port: u16) -> Self {
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             host: host.to_string(),
             port,
             pools: Arc::new(RwLock::new(HashMap::new())),
             started: OnceLock::new(),
+            shutdown_tx,
         }
     }
 
     pub fn address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    pub(crate) fn shutdown_rx(&self) -> watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
     }
 
     pub fn register_pool(
@@ -109,12 +121,19 @@ impl WorkerServer {
             async move { dispatch_to_pool(pools, req).await }
         });
 
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
             match local_addr {
                 Ok(addr) => tracing::info!(address = %addr, "worker server listening"),
                 Err(_) => tracing::info!(address = %bind_addr, "worker server listening"),
             }
-            if let Err(e) = axum::serve(listener, app).await {
+            let graceful = async move {
+                let _ = shutdown_rx.wait_for(|&v| v).await;
+            };
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(graceful)
+                .await
+            {
                 tracing::error!(error = %e, "worker server exited with error");
             }
         });

@@ -215,6 +215,12 @@ impl RouteFactory {
         }
         Ok(())
     }
+
+    pub(crate) fn shutdown_worker_server(&self) {
+        if let Some(ws) = &self.worker_server {
+            ws.shutdown();
+        }
+    }
 }
 
 pub(crate) struct RuntimeConfig {

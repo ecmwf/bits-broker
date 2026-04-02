@@ -437,7 +437,7 @@ impl Bits {
             && let Some(tx) = &self.cleanup_tx
             && tx.send(id.to_string()).is_err()
         {
-            tracing::debug!("durable cleanup channel closed");
+            tracing::warn!("durable cleanup channel closed");
         }
     }
 

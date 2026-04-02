@@ -80,6 +80,8 @@ pub struct Bits {
     max_jobs: usize,
     sweeper_handle: Option<std::thread::JoinHandle<()>>,
     heartbeat_handle: Option<std::thread::JoinHandle<()>>,
+    cleanup_tx: Option<std::sync::mpsc::Sender<String>>,
+    cleanup_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Bits {
@@ -118,7 +120,14 @@ impl Bits {
             max_jobs: DEFAULT_MAX_JOBS,
             sweeper_handle: None,
             heartbeat_handle: None,
+            cleanup_tx: None,
+            cleanup_handle: None,
         };
+        if let Some(store) = &bits.job_store {
+            let (tx, handle) = start_cleanup_worker(Arc::clone(store));
+            bits.cleanup_tx = Some(tx);
+            bits.cleanup_handle = Some(handle);
+        }
         bits.sweeper_handle = Some(start_sweeper(
             bits.jobs.clone(),
             DEFAULT_SWEEP_INTERVAL,
@@ -174,7 +183,15 @@ impl Bits {
             max_jobs: parsed.max_jobs,
             sweeper_handle: None,
             heartbeat_handle: None,
+            cleanup_tx: None,
+            cleanup_handle: None,
         };
+
+        if let Some(store) = &bits.job_store {
+            let (tx, handle) = start_cleanup_worker(Arc::clone(store));
+            bits.cleanup_tx = Some(tx);
+            bits.cleanup_handle = Some(handle);
+        }
 
         bits.sweeper_handle = Some(start_sweeper(
             bits.jobs.clone(),
@@ -417,15 +434,10 @@ impl Bits {
 
     fn schedule_durable_cleanup(&self, id: &str, job: &crate::job::Job) {
         if job.persisted.load(Ordering::Acquire)
-            && let Some(store) = &self.job_store
+            && let Some(tx) = &self.cleanup_tx
+            && tx.send(id.to_string()).is_err()
         {
-            let store = store.clone();
-            let job_id = id.to_string();
-            tokio::spawn(async move {
-                if let Err(err) = store.delete_job(&job_id).await {
-                    tracing::warn!(job.id = %job_id, error = %err, "durable record cleanup failed");
-                }
-            });
+            tracing::debug!("durable cleanup channel closed");
         }
     }
 
@@ -500,18 +512,68 @@ impl Bits {
     }
 }
 
+fn start_cleanup_worker(
+    store: Arc<dyn PersistenceStore>,
+) -> (std::sync::mpsc::Sender<String>, std::thread::JoinHandle<()>) {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let handle = std::thread::Builder::new()
+        .name("bits-cleanup-worker".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(err) => {
+                    tracing::error!(error = %err, "cleanup worker: failed to build runtime");
+                    return;
+                }
+            };
+            while let Ok(job_id) = rx.recv() {
+                if let Err(err) = runtime.block_on(store.delete_job(&job_id)) {
+                    tracing::warn!(job.id = %job_id, error = %err, "durable record cleanup failed");
+                }
+            }
+        })
+        .expect("failed to spawn cleanup worker thread");
+    (tx, handle)
+}
+
 impl Drop for Bits {
     fn drop(&mut self) {
-        // ShutdownSignal uses a condvar, so threads wake within microseconds.
-        // The only path where join could block longer is if a thread is mid-
-        // persistence I/O (e.g. TiKV); that should be bounded by the backend's
-        // own client timeout, not ours.
+        // 1. Close all queues/dispatchers so executor tasks exit cleanly.
+        self.router.close_all();
+        for handle in self
+            .added_routes
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+        {
+            handle.router.close_all();
+        }
+
+        // 2. Stop remote pool reapers and worker server HTTP listener.
+        self.route_factory.shutdown_worker_server();
+
+        // 3. Signal sync threads (sweeper, heartbeat) to stop.
         self.shutdown.stop();
+
+        // 4. Close cleanup channel and join cleanup worker.
+        self.cleanup_tx.take();
+        if let Some(handle) = self.cleanup_handle.take()
+            && let Err(panic) = handle.join()
+        {
+            tracing::error!("cleanup worker panicked during shutdown: {panic:?}");
+        }
+
+        // 5. Join sweeper thread.
         if let Some(handle) = self.sweeper_handle.take()
             && let Err(panic) = handle.join()
         {
             tracing::error!("sweeper thread panicked during shutdown: {panic:?}");
         }
+
+        // 6. Join heartbeat thread (includes in-flight drain).
         if let Some(handle) = self.heartbeat_handle.take()
             && let Err(panic) = handle.join()
         {

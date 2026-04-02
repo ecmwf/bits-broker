@@ -1076,9 +1076,11 @@ fn attach_dispatcher(
     ctx: &ParseContext,
 ) -> Result<Action, BitsError> {
     if cb_config.is_some() && !matches!(action, Action::Target(..)) {
-        return Err(
-            ConfigError::validation("circuit_breaker", "only valid on target actions").into(),
-        );
+        return Err(ConfigError::validation(
+            format!("{entry_name}.circuit_breaker"),
+            "only valid on target actions",
+        )
+        .into());
     }
 
     let is_remote_action = action_name == "remote";

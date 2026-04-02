@@ -173,12 +173,12 @@ impl TargetAction for Switch {
                         }
                     }
                     Action::Target(target, dispatcher, silent_override, breaker) => {
-                        let breaker_gen = match breaker {
-                            Some(cb) => Some(cb.allow_request()?),
-                            None => None,
-                        };
                         let result = match dispatcher {
                             Some(d) => {
+                                let breaker_gen = match breaker {
+                                    Some(cb) => Some(cb.allow_request()?),
+                                    None => None,
+                                };
                                 let t = Arc::clone(target);
                                 let j = (*current_job).clone();
                                 let work: BoxFuture<'static, Result<TargetResult, ActionError>> =
@@ -202,6 +202,10 @@ impl TargetAction for Switch {
                                 if !current_job.client_present() {
                                     return Err(ActionError::ClientGone);
                                 }
+                                let breaker_gen = match breaker {
+                                    Some(cb) => Some(cb.allow_request()?),
+                                    None => None,
+                                };
                                 let r = target.dispatch(&current_job).await;
                                 if let (Some(cb), Some(g)) = (breaker, breaker_gen) {
                                     cb.record_outcome(g, &r);

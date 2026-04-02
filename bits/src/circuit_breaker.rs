@@ -6,6 +6,7 @@ use crate::actions::{ActionError, TargetResult};
 
 const DEFAULT_FAILURE_THRESHOLD: u32 = 5;
 const DEFAULT_OPEN_TIMEOUT_SECS: f64 = 30.0;
+const DEFAULT_OPEN_TIMEOUT_SECS_RAW: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
@@ -71,7 +72,8 @@ impl CircuitBreaker {
                 generation: 0,
             }),
             failure_threshold: config.failure_threshold,
-            open_timeout: Duration::from_secs_f64(config.open_timeout_secs),
+            open_timeout: Duration::try_from_secs_f64(config.open_timeout_secs)
+                .unwrap_or(Duration::from_secs(DEFAULT_OPEN_TIMEOUT_SECS_RAW)),
             target_name,
         }
     }
@@ -257,26 +259,26 @@ mod tests {
 
     #[test]
     fn open_transitions_to_half_open_after_timeout() {
-        let cb = breaker(1, 0.0);
+        let cb = breaker(1, 0.001);
         record(&cb, &network_error());
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
         assert!(cb.allow_request().is_ok());
     }
 
     #[test]
     fn half_open_rejects_concurrent_requests() {
-        let cb = breaker(1, 0.0);
+        let cb = breaker(1, 0.001);
         record(&cb, &network_error());
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
         assert!(cb.allow_request().is_ok());
         assert!(cb.allow_request().is_err());
     }
 
     #[test]
     fn half_open_probe_success_closes() {
-        let cb = breaker(1, 0.0);
+        let cb = breaker(1, 0.001);
         record(&cb, &network_error());
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
         let g = cb.allow_request().unwrap();
         cb.record_outcome(g, &success());
         assert!(cb.allow_request().is_ok());
@@ -306,10 +308,10 @@ mod tests {
 
     #[test]
     fn stale_success_during_half_open_is_ignored() {
-        let cb = breaker(1, 0.0);
+        let cb = breaker(1, 0.001);
         let closed_g = cb.allow_request().unwrap();
         record(&cb, &network_error());
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
         let probe_g = cb.allow_request().unwrap();
         assert_ne!(closed_g, probe_g);
         cb.record_outcome(closed_g, &success());
@@ -323,10 +325,10 @@ mod tests {
 
     #[test]
     fn stale_failure_during_half_open_is_ignored() {
-        let cb = breaker(1, 0.0);
+        let cb = breaker(1, 0.001);
         let closed_g = cb.allow_request().unwrap();
         record(&cb, &network_error());
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
         let probe_g = cb.allow_request().unwrap();
         cb.record_outcome(closed_g, &network_error());
         cb.record_outcome(probe_g, &success());

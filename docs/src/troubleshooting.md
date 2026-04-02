@@ -602,6 +602,79 @@ comfortable margin.
 
 ---
 
+## Circuit breaker
+
+A circuit breaker can be attached to any target to stop sending requests
+when the downstream endpoint is consistently failing. Without it, every
+request to a broken target waits for a timeout before failing, which
+slows down the entire broker.
+
+### Configuration
+
+Add a `circuit_breaker` section to any target definition:
+
+```yaml
+targets:
+  my_target:
+    type: http
+    url: http://example.com
+    circuit_breaker:
+      failure_threshold: 5        # consecutive failures to trip (default 5)
+      open_timeout_secs: 30       # seconds before allowing a probe (default 30)
+```
+
+Both fields are optional and have the defaults shown above. Omit the
+`circuit_breaker` section entirely to disable it for a given target.
+
+### States
+
+- **Closed** -- requests flow normally. The breaker counts consecutive
+  failures (connection errors, timeouts, HTTP 5xx). A single success
+  resets the counter. When failures reach `failure_threshold`, the
+  circuit opens.
+- **Open** -- all requests are immediately rejected with HTTP 529
+  (overloaded). After `open_timeout_secs`, the breaker transitions to
+  half-open.
+- **Half-open** -- one probe request is allowed through. If it succeeds,
+  the circuit closes. If it fails, the circuit re-opens for another
+  timeout period. All other requests are rejected while the probe is in
+  flight.
+
+### What counts as a failure
+
+Only transport-level problems trip the circuit:
+
+- Connection refused, DNS failure, TLS error
+- Request timeout (connect or read)
+- HTTP 5xx responses
+
+These do **not** trip the circuit:
+
+- HTTP 4xx responses (target is alive, request was rejected)
+- Client cancellation or disconnect
+- Queue full or dispatcher errors
+- Internal resource errors
+
+### Log messages
+
+Look for these log lines (all at WARN level):
+
+- `circuit breaker opened` -- breaker tripped, includes failure count and
+  timeout
+- `circuit breaker half-open; allowing probe request` -- timeout elapsed,
+  one request will test the target
+- `circuit breaker closed; probe succeeded` -- target recovered
+- `circuit breaker re-opened; probe failed` -- target still failing
+
+### Shared state across routes
+
+If multiple routes reference the same named target, they share one
+circuit breaker instance. When the circuit opens, all routes using that
+target are affected. This is intentional: if the downstream endpoint is
+down, sending requests from any route will fail.
+
+---
+
 ## Getting help
 
 If issues persist after following this guide:

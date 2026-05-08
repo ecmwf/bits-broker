@@ -8,11 +8,11 @@ use std::time::Duration;
 use bits::db::{PersistenceStore, tikv::TiKvStore};
 use bits::server::CODE_JOB_ERROR;
 use common::recovery::{
-    TargetBehavior, insert_job_record, observed_owner, poll_until_terminal, read_success_body,
-    single_target_switch, start_broker_server, start_error_owner_stub, start_gone_owner_stub,
-    start_not_found_owner_stub, start_pending_owner_stub, start_redirect_owner_stub,
-    start_server_error_owner_stub, start_success_owner_stub, test_client, wait_for_no_owner,
-    wait_for_ready,
+    TargetBehavior, broker_identity, insert_job_record, new_recovery_job_id, observed_owner,
+    poll_until_terminal, read_success_body, single_target_switch, start_broker_server,
+    start_error_owner_stub, start_gone_owner_stub, start_not_found_owner_stub,
+    start_pending_owner_stub, start_redirect_owner_stub, start_server_error_owner_stub,
+    start_success_owner_stub, test_client, wait_for_no_owner, wait_for_ready,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -53,7 +53,7 @@ async fn fast_jobs_do_not_persist() {
     };
 
     let broker = start_broker_server(
-        "fast-broker-tikv",
+        "tst-tik-12",
         single_target_switch(TargetBehavior::Success {
             delay: Duration::from_millis(5),
             content_type: "text/plain".into(),
@@ -68,7 +68,10 @@ async fn fast_jobs_do_not_persist() {
 
     let handle = broker
         .bits
-        .submit(bits::Job::new(json!({"kind": "fast"})))
+        .submit(bits::Job::new_with_id(
+            new_recovery_job_id("tst", "tik", 31),
+            json!({"kind": "fast"}),
+        ))
         .expect_accepted("submit should not be rejected");
     let result = wait_for_ready(&broker.bits, &handle.id, Duration::from_secs(2)).await;
     let (_content_type, body) = read_success_body(result).await;
@@ -85,8 +88,8 @@ async fn active_lease_proxies_success_result() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-success-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 1);
+    let job_id = new_recovery_job_id("tst", "tik", 1);
     let owner_url = start_success_owner_stub("text/plain", b"proxied-body".to_vec()).await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "success"})).await;
     store
@@ -117,8 +120,8 @@ async fn active_lease_proxies_redirect_result() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-redirect-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 2);
+    let job_id = new_recovery_job_id("tst", "tik", 2);
     let owner_url = start_redirect_owner_stub("https://example.test/final").await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "redirect"})).await;
     store
@@ -151,8 +154,8 @@ async fn active_lease_proxies_error_result() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-error-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 3);
+    let job_id = new_recovery_job_id("tst", "tik", 3);
     let owner_url = start_error_owner_stub("bad request").await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "error"})).await;
     store
@@ -187,8 +190,8 @@ async fn active_lease_proxies_gone_as_cancelled() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-gone-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 4);
+    let job_id = new_recovery_job_id("tst", "tik", 4);
     let owner_url = start_gone_owner_stub().await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "gone"})).await;
     store
@@ -219,8 +222,8 @@ async fn active_lease_proxies_not_found() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-not-found-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 5);
+    let job_id = new_recovery_job_id("tst", "tik", 5);
     let owner_url = start_not_found_owner_stub().await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "missing"})).await;
     store
@@ -257,8 +260,8 @@ async fn owner_404_without_durable_record_is_not_found() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-not-found-missing-record-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 6);
+    let job_id = new_recovery_job_id("tst", "tik", 6);
     let owner_url = start_not_found_owner_stub().await;
     store
         .upsert_broker_lease(owner_id, &owner_url, Duration::from_secs(2))
@@ -292,8 +295,8 @@ async fn active_lease_proxy_pending_when_location_points_back_to_job() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-pending-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 7);
+    let job_id = new_recovery_job_id("tst", "tik", 7);
     let owner_url = start_pending_owner_stub(&job_id).await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "pending"})).await;
     store
@@ -328,8 +331,8 @@ async fn active_lease_prevents_reclaim_when_proxy_fails() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-live-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 8);
+    let job_id = new_recovery_job_id("tst", "tik", 8);
     let owner_url = start_server_error_owner_stub().await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "server-error"})).await;
     store
@@ -368,8 +371,8 @@ async fn expired_lease_enables_reclaim_and_completion() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-expired-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 9);
+    let job_id = new_recovery_job_id("tst", "tik", 9);
     insert_job_record(&store, &job_id, owner_id, json!({"job": "reclaim"})).await;
     store
         .upsert_broker_lease(
@@ -407,8 +410,8 @@ async fn recently_expired_lease_stays_pending_within_clock_skew_buffer() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-skew-buffer-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 10);
+    let job_id = new_recovery_job_id("tst", "tik", 10);
     insert_job_record(&store, &job_id, owner_id, json!({"job": "skew-buffer"})).await;
     store
         .upsert_broker_lease(owner_id, "http://127.0.0.1:1/job", Duration::from_secs(1))
@@ -447,7 +450,7 @@ async fn expired_lease_without_record_is_job_lost() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-missing-tikv";
+    let owner_id = broker_identity("tst", "tik", 13);
     store
         .upsert_broker_lease(
             owner_id,
@@ -468,7 +471,7 @@ async fn expired_lease_without_record_is_job_lost() {
     )
     .await;
 
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let job_id = new_recovery_job_id("tst", "tik", 13);
     assert!(matches!(
         claimant
             .bits
@@ -486,8 +489,8 @@ async fn competing_claimants_only_one_wins() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-race-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 11);
+    let job_id = new_recovery_job_id("tst", "tik", 11);
     insert_job_record(&store, &job_id, owner_id, json!({"job": "race"})).await;
     store
         .upsert_broker_lease(
@@ -585,7 +588,7 @@ async fn wrong_broker_reconnect_proxies_success_result() {
         return;
     };
     let owner = start_broker_server(
-        "broker-a-success-tikv",
+        broker_identity("tst", "tik", 20),
         single_target_switch(TargetBehavior::Success {
             delay: Duration::from_millis(120),
             content_type: "application/json".into(),
@@ -598,7 +601,7 @@ async fn wrong_broker_reconnect_proxies_success_result() {
     )
     .await;
     let standby = start_broker_server(
-        "broker-b-success-tikv",
+        broker_identity("tst", "tik", 21),
         single_target_switch(TargetBehavior::Never),
         None,
         Some(Arc::clone(&store)),
@@ -637,7 +640,7 @@ async fn wrong_broker_reconnect_proxies_redirect_result() {
         return;
     };
     let owner = start_broker_server(
-        "broker-a-redirect-tikv",
+        broker_identity("tst", "tik", 22),
         single_target_switch(TargetBehavior::Redirect {
             delay: Duration::from_millis(120),
             location: "https://example.test/download".into(),
@@ -650,7 +653,7 @@ async fn wrong_broker_reconnect_proxies_redirect_result() {
     )
     .await;
     let standby = start_broker_server(
-        "broker-b-redirect-tikv",
+        broker_identity("tst", "tik", 23),
         single_target_switch(TargetBehavior::Never),
         None,
         Some(Arc::clone(&store)),
@@ -692,7 +695,7 @@ async fn sticky_session_failure_returns_gone_when_no_durable_record_exists() {
         return;
     };
     let standby = start_broker_server(
-        "broker-b-gone-tikv",
+        broker_identity("tst", "tik", 24),
         single_target_switch(TargetBehavior::Never),
         None,
         Some(Arc::clone(&store)),
@@ -701,8 +704,8 @@ async fn sticky_session_failure_returns_gone_when_no_durable_record_exists() {
     )
     .await;
 
-    let owner_id = "broker-a-missing-tikv";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "tik", 12);
+    let job_id = new_recovery_job_id("tst", "tik", 12);
     insert_job_record(&store, &job_id, owner_id, json!({"kind": "lost"})).await;
     store.delete_job(&job_id).await.unwrap();
     store

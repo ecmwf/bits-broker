@@ -38,6 +38,8 @@ fn make_bits(port: u16, heartbeat_timeout_secs: f64) -> Bits {
     let config = format!(
         r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: {port}
@@ -60,6 +62,8 @@ fn make_bits_with_queue(port: u16, heartbeat_timeout_secs: f64, queue: &str) -> 
     let config = format!(
         r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: {port}

@@ -12,6 +12,7 @@ use bits::server::{
     CODE_JOB_NOT_FOUND,
 };
 use bits::{Bits, Job, JobResult};
+use common::recovery::{broker_identity, new_recovery_job_id};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
@@ -52,7 +53,8 @@ bits::register_action!(
 );
 
 async fn start_server(config: &str, poll_timeout: Duration) -> TestServer {
-    let bits = Arc::new(Bits::from_config(config).unwrap());
+    let config = format!("bits:\n  site: tst\n  env: hsv\n{config}");
+    let bits = Arc::new(Bits::from_config(&config).unwrap());
     start_server_with_bits(bits, poll_timeout).await
 }
 
@@ -73,6 +75,9 @@ async fn post_job_returns_result() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -104,6 +109,9 @@ async fn poll_redirect_resolves_to_final_result() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -159,6 +167,9 @@ async fn post_malformed_json_returns_error() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -190,6 +201,9 @@ async fn get_nonexistent_job_returns_not_found() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -218,6 +232,9 @@ async fn post_empty_object_is_valid() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -251,6 +268,9 @@ async fn concurrent_submits_all_resolve() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -296,6 +316,9 @@ async fn pending_redirect_includes_location_and_retry_after_headers() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -342,6 +365,9 @@ async fn cancelled_job_returns_gone_via_http() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - check::dummy_delay:
@@ -356,7 +382,10 @@ routes:
 
     let handle = server
         .bits
-        .submit(Job::new(serde_json::json!({})))
+        .submit(Job::new_with_id(
+            new_recovery_job_id("tst", "hsv", 30),
+            serde_json::json!({}),
+        ))
         .expect_accepted("submit should not be rejected");
     server.bits.cancel(&handle.id);
 
@@ -400,6 +429,9 @@ async fn not_found_returns_json_error_body() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -441,6 +473,9 @@ async fn check_reject_returns_json_error_body() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - check::always_reject:
@@ -483,6 +518,9 @@ async fn panicking_target_returns_json_error_body() {
     let _ = common::TargetPanicking;
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - panicking:
       - target::panicking: ~
@@ -521,7 +559,7 @@ routes:
 #[tokio::test]
 async fn job_lost_returns_json_error_body() {
     let store = Arc::new(MemoryStore::new());
-    let owner_id = "owner-missing-http";
+    let owner_id = broker_identity("tst", "hsv", 1);
 
     let router = Switch::new(vec![Route::new(
         "default".to_string(),
@@ -533,7 +571,7 @@ async fn job_lost_returns_json_error_body() {
     )]);
     let bits = Arc::new(Bits::from_router_for_tests(
         router,
-        "claimant-http".to_string(),
+        "tst-tst-23".to_string(),
         "http://127.0.0.1:9/job".to_string(),
         Duration::from_millis(30),
         None,
@@ -555,7 +593,7 @@ async fn job_lost_returns_json_error_body() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
 
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let job_id = new_recovery_job_id("tst", "hsv", 1);
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -594,6 +632,9 @@ async fn client_gone_returns_json_error_body() {
     };
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::client_gone_after_delay:

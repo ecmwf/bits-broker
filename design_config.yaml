@@ -19,6 +19,8 @@
 #                   (only valid with target::remote)
 
 bits:
+  site: bol
+  env: dev
   worker_server:
     host: "0.0.0.0"
     port: 9001

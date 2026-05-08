@@ -66,6 +66,8 @@ fn remote_pool_config_accepts_heartbeat_timeout() {
 async fn named_remote_target_without_executor_injects_default_remote_pool() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: 0
@@ -88,6 +90,8 @@ routes:
 async fn named_remote_target_with_worker_server_parses() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: 0
@@ -111,6 +115,8 @@ routes:
 fn inline_remote_target_is_rejected() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: 0
@@ -125,6 +131,9 @@ routes:
 #[test]
 fn remote_target_without_worker_server_is_rejected() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 targets:
   mars:
     type: remote
@@ -139,6 +148,9 @@ routes:
 #[test]
 fn remote_pool_rejected_for_non_remote_target() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::http:
@@ -159,6 +171,8 @@ routes:
 async fn remote_pool_rejects_zero_heartbeat_timeout() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: 0
@@ -184,6 +198,8 @@ routes:
 async fn remote_pool_rejects_negative_heartbeat_timeout() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: 0
@@ -209,6 +225,8 @@ routes:
 fn remote_target_rejected_with_non_remote_executor() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: 0
@@ -233,6 +251,9 @@ routes:
 #[test]
 fn concurrency_at_dispatcher_level_is_rejected() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::http:
@@ -251,6 +272,9 @@ routes:
 #[test]
 fn empty_route_is_rejected() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default: []
 "#;
@@ -264,6 +288,9 @@ fn route_must_end_in_terminal_action() {
     let _ = common::CheckDummyDelay::new(1);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - check::dummy_delay:
@@ -280,6 +307,9 @@ routes:
 #[test]
 fn action_after_target_is_rejected() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::http:
@@ -298,6 +328,9 @@ routes:
 #[test]
 fn action_after_switch_is_rejected() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - switch:
@@ -320,6 +353,9 @@ fn nested_switch_routes_are_validated_recursively() {
     let _ = common::CheckDummyDelay::new(1);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - switch:
@@ -349,6 +385,8 @@ fn non_mapping_yaml_is_rejected() {
 fn missing_routes_section_is_rejected() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   sweep_interval_secs: 0.1
 "#;
     let bits = Bits::from_config(config);
@@ -362,6 +400,9 @@ bits:
 #[test]
 fn unknown_action_namespace_is_rejected() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - banana::something: ~
@@ -376,6 +417,9 @@ routes:
 #[test]
 fn unknown_action_name_is_rejected() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::this_target_does_not_exist: ~
@@ -390,6 +434,9 @@ routes:
 #[test]
 fn routes_must_be_array() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   default:
     - target::http:
@@ -403,6 +450,8 @@ routes:
 fn legacy_bits_tikv_key_is_rejected() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   tikv:
     endpoints:
       - 127.0.0.1:2379
@@ -420,6 +469,8 @@ routes:
 fn legacy_bits_nats_key_is_rejected() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   nats:
     url: "nats://localhost:4222"
 routes:
@@ -436,6 +487,8 @@ routes:
 fn persistence_missing_type_is_rejected() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   persistence:
     url: "nats://localhost:4222"
 routes:
@@ -452,6 +505,8 @@ routes:
 fn persistence_invalid_type_is_rejected() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   persistence:
     type: redis
 routes:

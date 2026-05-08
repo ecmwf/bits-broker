@@ -9,6 +9,9 @@ async fn multi_route_submit_and_poll() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 targets:
   fast_target:
     type: dummy_dispatch
@@ -48,6 +51,9 @@ async fn multi_route_shared_target_arc() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 targets:
   shared_target:
     type: dummy_dispatch
@@ -87,6 +93,9 @@ async fn added_route_names_returns_collection_names() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 targets:
   my_target:
     type: dummy_dispatch
@@ -110,6 +119,9 @@ async fn add_route_unknown_target_returns_error() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 targets:
   my_target:
     type: dummy_dispatch

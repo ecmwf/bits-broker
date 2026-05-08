@@ -117,6 +117,9 @@ fn default_queue_capacity_is_500k() {
 #[test]
 fn config_accepts_custom_queue_capacity() {
     let yaml = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::http:
@@ -131,6 +134,9 @@ routes:
 #[test]
 fn config_rejects_zero_queue_capacity() {
     let yaml = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::http:
@@ -153,6 +159,8 @@ routes:
 fn config_accepts_custom_max_jobs() {
     let yaml = r#"
 bits:
+  site: tst
+  env: dev
   max_jobs: 42
 routes:
   - default:
@@ -167,6 +175,8 @@ routes:
 fn config_rejects_zero_max_jobs() {
     let yaml = r#"
 bits:
+  site: tst
+  env: dev
   max_jobs: 0
 routes:
   - default:
@@ -187,6 +197,9 @@ routes:
 #[test]
 fn config_accepts_custom_retry_after() {
     let yaml = r#"
+bits:
+  site: tst
+  env: dev
 server:
   retry_after_secs: 9
 routes:
@@ -201,6 +214,9 @@ routes:
 #[test]
 fn config_rejects_zero_retry_after() {
     let yaml = r#"
+bits:
+  site: tst
+  env: dev
 server:
   retry_after_secs: 0
 routes:
@@ -231,6 +247,8 @@ async fn submit_returns_overloaded_at_max_jobs() {
     let _ = common::TargetDummyDelay::new(500);
     let config = r#"
 bits:
+  site: tst
+  env: dev
   max_jobs: 1
 routes:
   - default:
@@ -255,6 +273,8 @@ async fn max_jobs_counter_recovers_after_completion() {
     let _ = common::TargetDummyDelay::new(0);
     let config = r#"
 bits:
+  site: tst
+  env: dev
   max_jobs: 1
 routes:
   - default:
@@ -337,6 +357,8 @@ async fn overloaded_result_maps_to_http_529_with_retry_after() {
 
     let config = r#"
 bits:
+  site: tst
+  env: dev
   max_jobs: 1
 server:
   retry_after_secs: 7

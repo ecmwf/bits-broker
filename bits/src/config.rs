@@ -33,6 +33,43 @@ fn positive_duration_secs(field: &str, secs: f64) -> Result<Duration, BitsError>
     Ok(d)
 }
 
+fn require_site_env_tag(
+    field: &str,
+    value: Option<&serde_json::Value>,
+) -> Result<String, BitsError> {
+    let value = value.ok_or_else(|| ConfigError::missing(field))?;
+    let tag = match value {
+        serde_json::Value::String(tag) => tag.clone(),
+        serde_json::Value::Number(number) if number.is_u64() => number.to_string(),
+        _ => {
+            return Err(
+                ConfigError::validation(field, "must be a string or unsigned integer tag").into(),
+            );
+        }
+    };
+    crate::polytope_id::pack_tag(&tag)
+        .map(|_| tag)
+        .map_err(|err| ConfigError::validation(field, err.to_string()).into())
+}
+
+fn allocate_startup_broker_slot(
+    store: Arc<dyn PersistenceStore>,
+    site: String,
+    env: String,
+) -> Result<u16, BitsError> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| ConfigError::validation("bits.persistence", err.to_string()))?;
+        runtime
+            .block_on(store.allocate_broker_slot(&site, &env))
+            .map_err(BitsError::from)
+    })
+    .join()
+    .map_err(|_| ConfigError::validation("bits.persistence", "broker slot allocator panicked"))?
+}
+
 #[derive(Default)]
 struct Registries {
     checks: HashMap<String, serde_json::Value>,
@@ -96,6 +133,10 @@ fn default_worker_server_port() -> u16 {
 struct BitsConfig {
     #[serde(default)]
     broker_id_prefix: Option<String>,
+    #[serde(default)]
+    site: Option<serde_json::Value>,
+    #[serde(default)]
+    env: Option<serde_json::Value>,
     #[serde(default)]
     internal_poll_endpoint: Option<String>,
     #[serde(default)]
@@ -228,7 +269,9 @@ pub(crate) struct RuntimeConfig {
     pub route_factory: RouteFactory,
     pub sweep_interval: Option<Duration>,
     pub reconnect_buffer: Duration,
-    pub broker_id_prefix: String,
+    pub site: String,
+    pub env: String,
+    pub broker_slot: u16,
     pub internal_poll_endpoint: String,
     pub internal_poll_timeout: Duration,
     pub job_store: Option<Arc<dyn PersistenceStore>>,
@@ -302,9 +345,13 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .as_ref()
         .map(|ws_cfg| Arc::new(WorkerServer::new(&ws_cfg.host, ws_cfg.port)));
 
-    let broker_id = bits_cfg
-        .broker_id_prefix
-        .unwrap_or_else(|| format!("broker-{}", uuid::Uuid::new_v4()));
+    if bits_cfg.broker_id_prefix.is_some() {
+        tracing::warn!(
+            "bits.broker_id_prefix is deprecated and ignored; broker identity is bits.site-bits.env-allocated_slot"
+        );
+    }
+    let site = require_site_env_tag("bits.site", bits_cfg.site.as_ref())?;
+    let env = require_site_env_tag("bits.env", bits_cfg.env.as_ref())?;
     let has_explicit_endpoint = bits_cfg.internal_poll_endpoint.is_some();
     let has_explicit_poll_timeout = bits_cfg.internal_poll_timeout_secs.is_some();
     let internal_poll_timeout = positive_duration_secs(
@@ -391,116 +438,105 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .into());
     }
 
-    let (job_store, broker_lease_ttl) = match bits_cfg.persistence {
-        Some(PersistenceConfig::Tikv {
-            endpoints,
-            broker_lease_ttl_secs,
-            #[cfg(feature = "tikv")]
-            connect_timeout_secs,
-            #[cfg(not(feature = "tikv"))]
-                connect_timeout_secs: _,
-        }) => {
-            if endpoints.is_empty() {
-                return Err(ConfigError::validation(
-                    "bits.persistence.endpoints",
-                    "must not be empty",
-                )
-                .into());
-            }
-            let ttl = Duration::try_from_secs_f64(broker_lease_ttl_secs).map_err(|e| {
-                ConfigError::validation("bits.persistence.broker_lease_ttl_secs", e.to_string())
-            })?;
-            if ttl < Duration::from_secs(1) {
-                return Err(ConfigError::validation(
-                    "bits.persistence.broker_lease_ttl_secs",
-                    "must be at least 1 second",
-                )
-                .into());
-            }
-            #[cfg(not(feature = "tikv"))]
-            {
-                return Err(ConfigError::FeatureDisabled {
-                    path: "bits.persistence.type".into(),
-                    feature: "tikv".into(),
+    let (job_store, broker_lease_ttl): (Option<Arc<dyn PersistenceStore>>, Duration) =
+        match bits_cfg.persistence {
+            Some(PersistenceConfig::Tikv {
+                endpoints,
+                broker_lease_ttl_secs,
+                connect_timeout_secs,
+            }) => {
+                if endpoints.is_empty() {
+                    return Err(ConfigError::validation(
+                        "bits.persistence.endpoints",
+                        "must not be empty",
+                    )
+                    .into());
                 }
-                .into());
-            }
-            #[cfg(feature = "tikv")]
-            {
+                let ttl = Duration::try_from_secs_f64(broker_lease_ttl_secs).map_err(|e| {
+                    ConfigError::validation("bits.persistence.broker_lease_ttl_secs", e.to_string())
+                })?;
+                if ttl < Duration::from_secs(1) {
+                    return Err(ConfigError::validation(
+                        "bits.persistence.broker_lease_ttl_secs",
+                        "must be at least 1 second",
+                    )
+                    .into());
+                }
+                #[cfg(feature = "tikv")]
                 let connect_timeout = match connect_timeout_secs {
                     Some(secs) => {
                         positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?
                     }
                     None => Duration::from_secs(10),
                 };
-                (
-                    Some(Arc::new(StoreFactory::new(endpoints, connect_timeout))
-                        as Arc<dyn PersistenceStore>),
-                    ttl,
-                )
-            }
-        }
-        Some(PersistenceConfig::Nats {
-            url,
-            jobs_bucket,
-            leases_bucket,
-            broker_lease_ttl_secs,
-            num_replicas,
-            #[cfg(feature = "nats")]
-            connect_timeout_secs,
-            #[cfg(not(feature = "nats"))]
-                connect_timeout_secs: _,
-            #[cfg(feature = "nats")]
-            init_max_attempts,
-            #[cfg(not(feature = "nats"))]
-                init_max_attempts: _,
-        }) => {
-            if url.is_empty() {
-                return Err(
-                    ConfigError::validation("bits.persistence.url", "must not be empty").into(),
-                );
-            }
-            if jobs_bucket.is_empty() {
-                return Err(ConfigError::validation(
-                    "bits.persistence.jobs_bucket",
-                    "must not be empty",
-                )
-                .into());
-            }
-            if leases_bucket.is_empty() {
-                return Err(ConfigError::validation(
-                    "bits.persistence.leases_bucket",
-                    "must not be empty",
-                )
-                .into());
-            }
-            if num_replicas < 1 {
-                return Err(ConfigError::validation(
-                    "bits.persistence.num_replicas",
-                    "must be at least 1",
-                )
-                .into());
-            }
-            let ttl = Duration::try_from_secs_f64(broker_lease_ttl_secs).map_err(|e| {
-                ConfigError::validation("bits.persistence.broker_lease_ttl_secs", e.to_string())
-            })?;
-            if ttl < Duration::from_secs(1) {
-                return Err(ConfigError::validation(
-                    "bits.persistence.broker_lease_ttl_secs",
-                    "must be at least 1 second",
-                )
-                .into());
-            }
-            #[cfg(not(feature = "nats"))]
-            {
-                return Err(ConfigError::FeatureDisabled {
-                    path: "bits.persistence.type".into(),
-                    feature: "nats".into(),
+                #[cfg(not(feature = "tikv"))]
+                {
+                    if let Some(secs) = connect_timeout_secs {
+                        positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?;
+                    }
+                    return Err(ConfigError::FeatureDisabled {
+                        path: "bits.persistence.type".into(),
+                        feature: "tikv".into(),
+                    }
+                    .into());
                 }
-                .into());
+                #[cfg(feature = "tikv")]
+                {
+                    (
+                        Some(Arc::new(StoreFactory::new(endpoints, connect_timeout))
+                            as Arc<dyn PersistenceStore>),
+                        ttl,
+                    )
+                }
             }
-            #[cfg(feature = "nats")]
-            {
+            Some(PersistenceConfig::Nats {
+                url,
+                jobs_bucket,
+                leases_bucket,
+                broker_lease_ttl_secs,
+                num_replicas,
+                connect_timeout_secs,
+                init_max_attempts,
+            }) => {
+                if url.is_empty() {
+                    return Err(ConfigError::validation(
+                        "bits.persistence.url",
+                        "must not be empty",
+                    )
+                    .into());
+                }
+                if jobs_bucket.is_empty() {
+                    return Err(ConfigError::validation(
+                        "bits.persistence.jobs_bucket",
+                        "must not be empty",
+                    )
+                    .into());
+                }
+                if leases_bucket.is_empty() {
+                    return Err(ConfigError::validation(
+                        "bits.persistence.leases_bucket",
+                        "must not be empty",
+                    )
+                    .into());
+                }
+                if num_replicas < 1 {
+                    return Err(ConfigError::validation(
+                        "bits.persistence.num_replicas",
+                        "must be at least 1",
+                    )
+                    .into());
+                }
+                let ttl = Duration::try_from_secs_f64(broker_lease_ttl_secs).map_err(|e| {
+                    ConfigError::validation("bits.persistence.broker_lease_ttl_secs", e.to_string())
+                })?;
+                if ttl < Duration::from_secs(1) {
+                    return Err(ConfigError::validation(
+                        "bits.persistence.broker_lease_ttl_secs",
+                        "must be at least 1 second",
+                    )
+                    .into());
+                }
+                #[cfg(feature = "nats")]
                 let connect_timeout = match connect_timeout_secs {
                     Some(secs) => {
                         positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?
@@ -515,82 +551,100 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                     )
                     .into());
                 }
-                let store = crate::db::nats::NatsStore::new(
-                    url,
-                    jobs_bucket,
-                    leases_bucket,
-                    ttl,
-                    num_replicas,
-                    connect_timeout,
-                );
-                let handle = tokio::runtime::Handle::try_current().map_err(|_| {
-                    ConfigError::validation(
-                        "bits.persistence.type",
-                        "nats requires a running Tokio runtime for init",
-                    )
-                })?;
-
-                // Retry NATS init with backoff. In Kubernetes the NATS cluster
-                // may not be ready when the broker pod starts; retrying here
-                // avoids CrashLoopBackOff delays from the kubelet.
-                let mut last_err: Option<String> = None;
-                let mut delay = Duration::from_secs(1);
-                for attempt in 1..=max_attempts {
-                    match tokio::task::block_in_place(|| handle.block_on(store.init())) {
-                        Ok(()) => {
-                            last_err = None;
-                            break;
-                        }
-                        Err(e) => {
-                            last_err = Some(e.to_string());
-                            if attempt < max_attempts {
-                                tracing::warn!(
-                                    attempt,
-                                    max_attempts,
-                                    error = %last_err.as_deref().unwrap_or("unknown"),
-                                    retry_in_secs = delay.as_secs(),
-                                    "NATS init failed, retrying"
-                                );
-                                tokio::task::block_in_place(|| std::thread::sleep(delay));
-                                delay = delay.saturating_mul(2).min(Duration::from_secs(10));
-                            }
-                        }
+                #[cfg(not(feature = "nats"))]
+                {
+                    if let Some(secs) = connect_timeout_secs {
+                        positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?;
                     }
-                }
-                if let Some(reason) = last_err {
-                    return Err(ConfigError::PersistenceInit {
-                        path: "bits.persistence".into(),
-                        backend: "nats".into(),
-                        reason,
+                    return Err(ConfigError::FeatureDisabled {
+                        path: "bits.persistence.type".into(),
+                        feature: "nats".into(),
                     }
                     .into());
                 }
+                #[cfg(feature = "nats")]
+                {
+                    let store = crate::db::nats::NatsStore::new(
+                        url,
+                        jobs_bucket,
+                        leases_bucket,
+                        ttl,
+                        num_replicas,
+                        connect_timeout,
+                    );
+                    let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+                        ConfigError::validation(
+                            "bits.persistence.type",
+                            "nats requires a running Tokio runtime for init",
+                        )
+                    })?;
 
-                (Some(Arc::new(store) as Arc<dyn PersistenceStore>), ttl)
+                    // Retry NATS init with backoff. In Kubernetes the NATS cluster
+                    // may not be ready when the broker pod starts; retrying here
+                    // avoids CrashLoopBackOff delays from the kubelet.
+                    let mut last_err: Option<String> = None;
+                    let mut delay = Duration::from_secs(1);
+                    for attempt in 1..=max_attempts {
+                        match tokio::task::block_in_place(|| handle.block_on(store.init())) {
+                            Ok(()) => {
+                                last_err = None;
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = Some(e.to_string());
+                                if attempt < max_attempts {
+                                    tracing::warn!(
+                                        attempt,
+                                        max_attempts,
+                                        error = %last_err.as_deref().unwrap_or("unknown"),
+                                        retry_in_secs = delay.as_secs(),
+                                        "NATS init failed, retrying"
+                                    );
+                                    tokio::task::block_in_place(|| std::thread::sleep(delay));
+                                    delay = delay.saturating_mul(2).min(Duration::from_secs(10));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(reason) = last_err {
+                        return Err(ConfigError::PersistenceInit {
+                            path: "bits.persistence".into(),
+                            backend: "nats".into(),
+                            reason,
+                        }
+                        .into());
+                    }
+
+                    (Some(Arc::new(store) as Arc<dyn PersistenceStore>), ttl)
+                }
             }
-        }
-        None => {
-            if persist_after.is_some() {
-                tracing::warn!(
-                    "bits.persist_after_secs is set but has no effect without bits.persistence"
-                );
-                persist_after = None;
+            None => {
+                if persist_after.is_some() {
+                    tracing::warn!(
+                        "bits.persist_after_secs is set but has no effect without bits.persistence"
+                    );
+                    persist_after = None;
+                }
+                if has_explicit_endpoint {
+                    tracing::warn!(
+                        "bits.internal_poll_endpoint is set but has no effect without bits.persistence"
+                    );
+                }
+                if has_explicit_poll_timeout {
+                    tracing::warn!(
+                        "bits.internal_poll_timeout_secs is set but has no effect without bits.persistence"
+                    );
+                }
+                (
+                    None,
+                    Duration::from_secs(default_broker_lease_ttl_secs() as u64),
+                )
             }
-            if has_explicit_endpoint {
-                tracing::warn!(
-                    "bits.internal_poll_endpoint is set but has no effect without bits.persistence"
-                );
-            }
-            if has_explicit_poll_timeout {
-                tracing::warn!(
-                    "bits.internal_poll_timeout_secs is set but has no effect without bits.persistence"
-                );
-            }
-            (
-                None,
-                Duration::from_secs(default_broker_lease_ttl_secs() as u64),
-            )
-        }
+        };
+
+    let broker_slot = match &job_store {
+        Some(store) => allocate_startup_broker_slot(store.clone(), site.clone(), env.clone())?,
+        None => 0,
     };
 
     let checks: HashMap<String, serde_json::Value> = raw
@@ -655,7 +709,9 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
             route_factory,
             sweep_interval,
             reconnect_buffer,
-            broker_id_prefix: broker_id,
+            site,
+            env,
+            broker_slot,
             internal_poll_endpoint,
             internal_poll_timeout,
             job_store,
@@ -1140,9 +1196,16 @@ impl Default for RouteFactory {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use async_trait::async_trait;
+
+    use super::{RouteFactory, RuntimeConfig};
     use crate::Bits;
     use crate::actions::Action;
+    use crate::db::{
+        BrokerLeaseRecord, ClaimResult, DbError, PersistenceStore, PersistentJobRecord,
+    };
 
     fn extract_target(route: &crate::routing::Route) -> Arc<dyn crate::actions::TargetAction> {
         match route.actions.first() {
@@ -1153,9 +1216,213 @@ mod tests {
 
     fn assert_send_sync<T: Send + Sync>() {}
 
+    fn assert_site_env_config_error(config: &str, expected_field: &str) {
+        let err = crate::config::parse_bootstrap(config)
+            .err()
+            .expect("invalid site/env config should be rejected");
+        assert_eq!(err.code(), "CONFIG_VALIDATION", "unexpected error: {err}");
+        assert!(
+            err.to_string().contains(expected_field),
+            "error should identify {expected_field}: {err}"
+        );
+    }
+
+    fn runtime_config_with_site_env(
+        site: &str,
+        env: &str,
+        broker_slot: u16,
+        job_store: Option<Arc<dyn PersistenceStore>>,
+    ) -> RuntimeConfig {
+        RuntimeConfig {
+            router: crate::routing::switch::Switch::new(vec![]),
+            route_factory: RouteFactory::default(),
+            sweep_interval: Some(Duration::from_secs(60)),
+            reconnect_buffer: Duration::from_secs(5),
+            site: site.to_string(),
+            env: env.to_string(),
+            broker_slot,
+            internal_poll_endpoint: "http://127.0.0.1:8080/job".to_string(),
+            internal_poll_timeout: Duration::from_millis(2500),
+            job_store,
+            broker_lease_ttl: Duration::from_secs(30),
+            persist_after: None,
+            max_jobs: crate::bits::DEFAULT_MAX_JOBS,
+        }
+    }
+
+    #[test]
+    fn site_env_missing_config_is_rejected() {
+        let err = crate::config::parse_bootstrap("{}")
+            .err()
+            .expect("missing bits.site/bits.env should be rejected");
+        assert_eq!(
+            err.code(),
+            "CONFIG_MISSING_FIELD",
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("bits.site") || err.to_string().contains("bits.env"),
+            "error should identify the missing site/env field: {err}"
+        );
+    }
+
+    #[test]
+    fn site_env_accepts_one_two_three_character_tags() {
+        for (site, env) in [("a", "0"), ("b1", "d2"), ("bol", "123")] {
+            let config = format!(
+                r#"
+bits:
+  site: {site}
+  env: {env}
+"#
+            );
+            crate::config::parse_bootstrap(&config)
+                .unwrap_or_else(|err| panic!("site={site:?} env={env:?} should parse: {err}"));
+        }
+    }
+
+    #[test]
+    fn site_env_rejects_empty_too_long_uppercase_and_punctuation() {
+        for (field, value) in [
+            ("site", "''"),
+            ("env", "''"),
+            ("site", "abcd"),
+            ("env", "abcd"),
+            ("site", "AB"),
+            ("env", "AB"),
+            ("site", "a-b"),
+            ("env", "a-b"),
+        ] {
+            let (site, env) = if field == "site" {
+                (value, "dev")
+            } else {
+                ("bol", value)
+            };
+            let config = format!(
+                r#"
+bits:
+  site: {site}
+  env: {env}
+"#
+            );
+            assert_site_env_config_error(&config, &format!("bits.{field}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn site_env_startup_uses_allocated_slot_in_broker_id() {
+        let store = Arc::new(crate::db::memory::MemoryStore::new());
+        let slot = crate::db::BrokerSlotStore::allocate_broker_slot(store.as_ref(), "bol", "dev")
+            .await
+            .expect("slot allocation should succeed");
+        assert_eq!(slot, 0);
+
+        let bits = Bits::from_runtime_config(runtime_config_with_site_env(
+            "bol",
+            "dev",
+            slot,
+            Some(store as Arc<dyn PersistenceStore>),
+        ))
+        .expect("broker should start with allocated slot");
+
+        assert_eq!(bits.broker_id(), "bol-dev-0");
+    }
+
+    #[tokio::test]
+    async fn site_env_no_persistence_uses_ephemeral_slot_zero() {
+        let config = r#"
+bits:
+  site: a
+  env: dev
+"#;
+        let bits = crate::config::parse_bootstrap(config)
+            .expect("site/env-only config should parse")
+            .into_bits()
+            .expect("single-process broker should start without persistence");
+
+        assert_eq!(bits.broker_id(), "a-dev-0");
+    }
+
+    struct UnsupportedSlotStore;
+
+    #[async_trait]
+    impl crate::db::JobStore for UnsupportedSlotStore {
+        async fn upsert_job(&self, _record: PersistentJobRecord) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn delete_job(&self, _job_id: &str) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn claim_if_owner(
+            &self,
+            _job_id: &str,
+            _expected_owner_broker_id: &str,
+            _claimant_broker_id: &str,
+        ) -> Result<ClaimResult, DbError> {
+            Ok(ClaimResult::NotFound)
+        }
+    }
+
+    #[async_trait]
+    impl crate::db::BrokerLeaseStore for UnsupportedSlotStore {
+        async fn upsert_broker_lease(
+            &self,
+            _broker_id: &str,
+            _internal_poll_base_url: &str,
+            _ttl: Duration,
+        ) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn get_broker_lease(
+            &self,
+            _broker_id: &str,
+        ) -> Result<Option<BrokerLeaseRecord>, DbError> {
+            Ok(None)
+        }
+
+        async fn delete_broker_lease(&self, _broker_id: &str) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    async fn runtime_config_after_startup_slot_allocation(
+        site: &str,
+        env: &str,
+        store: Arc<dyn PersistenceStore>,
+    ) -> Result<RuntimeConfig, crate::error::BitsError> {
+        let broker_slot = store.allocate_broker_slot(site, env).await?;
+        Ok(runtime_config_with_site_env(
+            site,
+            env,
+            broker_slot,
+            Some(store),
+        ))
+    }
+
+    #[tokio::test]
+    async fn site_env_startup_fails_when_slot_allocation_fails() {
+        let err = runtime_config_after_startup_slot_allocation(
+            "bol",
+            "dev",
+            Arc::new(UnsupportedSlotStore) as Arc<dyn PersistenceStore>,
+        )
+        .await
+        .err()
+        .expect("startup should fail when slot allocation fails");
+
+        assert!(matches!(err, crate::error::BitsError::Persistence(_)));
+        assert_eq!(err.code(), "PERSISTENCE_BACKEND");
+    }
+
     #[tokio::test]
     async fn test_empty_pipeline() {
         let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - test_pipeline: []
 "#;
@@ -1176,6 +1443,9 @@ routes:
     #[tokio::test]
     async fn test_no_routes_section() {
         let config = r#"
+bits:
+  site: tst
+  env: dev
 targets:
   my_target:
     type: http
@@ -1190,6 +1460,9 @@ targets:
     #[tokio::test]
     async fn test_route_factory_shared_targets() {
         let config = r#"
+bits:
+  site: tst
+  env: dev
 targets:
   my_target:
     type: http

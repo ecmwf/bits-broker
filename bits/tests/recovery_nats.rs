@@ -9,11 +9,11 @@ use bits::db::PersistenceStore;
 use bits::db::nats::NatsStore;
 use bits::server::CODE_JOB_ERROR;
 use common::recovery::{
-    TargetBehavior, ensure_nats_server, insert_job_record, observed_owner, poll_until_terminal,
-    read_success_body, single_target_switch, start_broker_server, start_error_owner_stub,
-    start_gone_owner_stub, start_not_found_owner_stub, start_pending_owner_stub,
-    start_redirect_owner_stub, start_server_error_owner_stub, start_success_owner_stub,
-    test_client, wait_for_no_owner, wait_for_ready,
+    TargetBehavior, broker_identity, ensure_nats_server, insert_job_record, new_recovery_job_id,
+    observed_owner, poll_until_terminal, read_success_body, single_target_switch,
+    start_broker_server, start_error_owner_stub, start_gone_owner_stub, start_not_found_owner_stub,
+    start_pending_owner_stub, start_redirect_owner_stub, start_server_error_owner_stub,
+    start_success_owner_stub, test_client, wait_for_no_owner, wait_for_ready,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -46,7 +46,7 @@ async fn threshold_persistence_and_cleanup() {
     };
 
     let broker = start_broker_server(
-        "cleanup-broker-nats",
+        "tst-nat-10",
         single_target_switch(TargetBehavior::Success {
             delay: Duration::from_millis(120),
             content_type: "application/json".into(),
@@ -61,15 +61,12 @@ async fn threshold_persistence_and_cleanup() {
 
     let handle = broker
         .bits
-        .submit(bits::Job::new(json!({"kind": "cleanup"})))
+        .submit(bits::Job::new_with_id(
+            new_recovery_job_id("tst", "nat", 30),
+            json!({"kind": "cleanup"}),
+        ))
         .expect_accepted("submit should not be rejected");
-    wait_for_owner(
-        &store,
-        &handle.id,
-        "cleanup-broker-nats",
-        Duration::from_secs(5),
-    )
-    .await;
+    wait_for_owner(&store, &handle.id, "tst-nat-10", Duration::from_secs(5)).await;
     let result = wait_for_ready(&broker.bits, &handle.id, Duration::from_secs(1)).await;
     let (_ct, body) = read_success_body(result).await;
     assert_eq!(String::from_utf8(body).unwrap(), r#"{"ok":true}"#);
@@ -128,7 +125,7 @@ async fn fast_jobs_do_not_persist() {
     };
 
     let broker = start_broker_server(
-        "fast-broker-nats",
+        "tst-nat-11",
         single_target_switch(TargetBehavior::Success {
             delay: Duration::from_millis(5),
             content_type: "text/plain".into(),
@@ -143,7 +140,10 @@ async fn fast_jobs_do_not_persist() {
 
     let handle = broker
         .bits
-        .submit(bits::Job::new(json!({"kind": "fast"})))
+        .submit(bits::Job::new_with_id(
+            new_recovery_job_id("tst", "nat", 31),
+            json!({"kind": "fast"}),
+        ))
         .expect_accepted("submit should not be rejected");
     let result = wait_for_ready(&broker.bits, &handle.id, Duration::from_secs(1)).await;
     let (_ct, body) = read_success_body(result).await;
@@ -159,8 +159,8 @@ async fn expired_lease_enables_reclaim_and_completion() {
         return;
     };
 
-    let owner_id = "owner-expired-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 1);
+    let job_id = new_recovery_job_id("tst", "nat", 1);
     insert_job_record(&store, &job_id, owner_id, json!({"job": "reclaim"})).await;
     store
         .upsert_broker_lease(
@@ -199,8 +199,8 @@ async fn active_lease_proxies_success_result() {
         return;
     };
 
-    let owner_id = "owner-success-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 2);
+    let job_id = new_recovery_job_id("tst", "nat", 2);
     let owner_url = start_success_owner_stub("text/plain", b"proxied-body".to_vec()).await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "success"})).await;
     store
@@ -231,8 +231,8 @@ async fn active_lease_proxies_redirect_result() {
         return;
     };
 
-    let owner_id = "owner-redirect-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 3);
+    let job_id = new_recovery_job_id("tst", "nat", 3);
     let owner_url = start_redirect_owner_stub("https://example.test/final").await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "redirect"})).await;
     store
@@ -265,8 +265,8 @@ async fn active_lease_proxies_gone_as_cancelled() {
         return;
     };
 
-    let owner_id = "owner-gone-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 4);
+    let job_id = new_recovery_job_id("tst", "nat", 4);
     let owner_url = start_gone_owner_stub().await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "gone"})).await;
     store
@@ -296,8 +296,8 @@ async fn active_lease_proxies_error_result() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-error-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 5);
+    let job_id = new_recovery_job_id("tst", "nat", 5);
     let owner_url = start_error_owner_stub("bad request").await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "error"})).await;
     store
@@ -331,8 +331,8 @@ async fn active_lease_proxies_not_found() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-not-found-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 6);
+    let job_id = new_recovery_job_id("tst", "nat", 6);
     let owner_url = start_not_found_owner_stub().await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "missing"})).await;
     store
@@ -369,8 +369,8 @@ async fn owner_404_without_durable_record_is_not_found() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-not-found-missing-record-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 7);
+    let job_id = new_recovery_job_id("tst", "nat", 7);
     let owner_url = start_not_found_owner_stub().await;
     store
         .upsert_broker_lease(owner_id, &owner_url, Duration::from_secs(2))
@@ -402,8 +402,8 @@ async fn active_lease_proxy_pending_when_location_points_back_to_job() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-pending-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 8);
+    let job_id = new_recovery_job_id("tst", "nat", 8);
     let owner_url = start_pending_owner_stub(&job_id).await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "pending"})).await;
     store
@@ -436,8 +436,8 @@ async fn active_lease_prevents_reclaim_when_proxy_fails() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-live-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 9);
+    let job_id = new_recovery_job_id("tst", "nat", 9);
     let owner_url = start_server_error_owner_stub().await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "server-error"})).await;
     store
@@ -474,8 +474,8 @@ async fn recently_expired_lease_stays_pending_within_clock_skew_buffer() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-skew-buffer-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 10);
+    let job_id = new_recovery_job_id("tst", "nat", 10);
     insert_job_record(&store, &job_id, owner_id, json!({"job": "skew-buffer"})).await;
     store
         .upsert_broker_lease(owner_id, "http://127.0.0.1:1/job", Duration::from_secs(1))
@@ -512,7 +512,7 @@ async fn expired_lease_without_record_is_job_lost() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-missing-nats";
+    let owner_id = broker_identity("tst", "nat", 13);
     store
         .upsert_broker_lease(
             owner_id,
@@ -533,7 +533,7 @@ async fn expired_lease_without_record_is_job_lost() {
     )
     .await;
 
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let job_id = new_recovery_job_id("tst", "nat", 13);
     assert!(matches!(
         claimant
             .bits
@@ -549,8 +549,8 @@ async fn competing_claimants_only_one_wins() {
     let Some(store) = shared_store().await else {
         return;
     };
-    let owner_id = "owner-race-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 11);
+    let job_id = new_recovery_job_id("tst", "nat", 11);
     insert_job_record(&store, &job_id, owner_id, json!({"job": "race"})).await;
     store
         .upsert_broker_lease(
@@ -622,7 +622,7 @@ async fn wrong_broker_reconnect_proxies_success_result() {
         return;
     };
     let owner = start_broker_server(
-        "broker-a-success-nats",
+        broker_identity("tst", "nat", 20),
         single_target_switch(TargetBehavior::Success {
             delay: Duration::from_millis(120),
             content_type: "application/json".into(),
@@ -635,7 +635,7 @@ async fn wrong_broker_reconnect_proxies_success_result() {
     )
     .await;
     let standby = start_broker_server(
-        "broker-b-success-nats",
+        broker_identity("tst", "nat", 21),
         single_target_switch(TargetBehavior::Never),
         None,
         Some(Arc::clone(&store)),
@@ -673,7 +673,7 @@ async fn wrong_broker_reconnect_proxies_redirect_result() {
         return;
     };
     let owner = start_broker_server(
-        "broker-a-redirect-nats",
+        broker_identity("tst", "nat", 22),
         single_target_switch(TargetBehavior::Redirect {
             delay: Duration::from_millis(120),
             location: "https://example.test/download".into(),
@@ -686,7 +686,7 @@ async fn wrong_broker_reconnect_proxies_redirect_result() {
     )
     .await;
     let standby = start_broker_server(
-        "broker-b-redirect-nats",
+        broker_identity("tst", "nat", 23),
         single_target_switch(TargetBehavior::Never),
         None,
         Some(Arc::clone(&store)),
@@ -726,7 +726,7 @@ async fn sticky_session_failure_returns_gone_when_no_durable_record_exists() {
         return;
     };
     let standby = start_broker_server(
-        "broker-b-gone-nats",
+        broker_identity("tst", "nat", 24),
         single_target_switch(TargetBehavior::Never),
         None,
         Some(Arc::clone(&store)),
@@ -735,8 +735,8 @@ async fn sticky_session_failure_returns_gone_when_no_durable_record_exists() {
     )
     .await;
 
-    let owner_id = "broker-a-missing-nats";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "nat", 12);
+    let job_id = new_recovery_job_id("tst", "nat", 12);
     insert_job_record(&store, &job_id, owner_id, json!({"kind": "lost"})).await;
     store.delete_job(&job_id).await.unwrap();
     store

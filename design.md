@@ -71,6 +71,10 @@ Config is YAML. The top-level sections are three typed registries (`checks`, `tr
 `targets`) for reusable named entries, and a `routes` section defining the pipelines:
 
 ```yaml
+bits:
+  site: bol
+  env: dev
+
 checks:
   is_privileged:
     type: match
@@ -122,7 +126,7 @@ routes:
 - Dispatcher config (`queue`, `executor`) is a **route-step concern** — it sits
   under a `dispatcher:` key in a registry entry, or as a sibling `dispatcher:` key for inline
   step definitions. See the Dispatcher section below.
-- Persistence is configured at `bits` top level (`persist_after_secs`) and validated against `server.poll_timeout_secs`.
+- Broker identity is configured with compact `bits.site` and `bits.env` tags. Persistence is configured at `bits` top level (`persist_after_secs`) and validated against `server.poll_timeout_secs`.
 - YAML anchors are deliberately not used — the named registries are an explicit feature of the
   schema, not a YAML trick. Named entries also ensure shared resources are the same instance in memory.
 - Inline actions (e.g. `check::match:` directly in a pipeline) bypass the registry entirely and
@@ -237,6 +241,8 @@ defined as a **named registry entry** (not inline) so the pool name can be deriv
 
 ```yaml
 bits:
+  site: bol
+  env: dev
   worker_server:
     bind: "0.0.0.0:9001"   # single shared server for all remote pools
 
@@ -269,20 +275,20 @@ target is present.
 
 BITS supports threshold persistence for long-running work.
 
-- Jobs start in-memory immediately.
-- If `bits.persist_after_secs` is configured and a job remains in-flight past that threshold, BITS
-  writes a durable record (`job_id`, owner `broker_id`, `original_request`, `user`, `metadata`,
-  `created_at`).
+- Jobs start in memory immediately.
+- Every job receives an opaque 26-character public request ID. Internally, the ID encodes version, site tag, environment tag, seconds since `2025-01-01T00:00:00Z`, broker slot, and 5 bytes from `OsRng`.
+- With persistence configured, each broker allocates a durable `u16` slot for its `(site, env)` pair and forms an internal broker ID `{site}-{env}-{slot}`.
+- If `bits.persist_after_secs` is configured and a job remains in-flight past that threshold, BITS writes a durable record (`job_id`, authoritative owner `broker_id`, `original_request`, `user`, `metadata`, `created_at`).
+- Job records are keyed by decoded `(site, env, slot, job_id)`; broker leases are keyed separately by internal broker ID.
 - On terminal completion, the durable record is deleted.
 
 Recovery flow:
 
 1. Poll lands on any broker.
 2. Broker checks local state first.
-3. On local miss, broker parses owner from `job_id` and resolves owner endpoint via broker lease records.
-4. If owner lease is active, broker proxies poll to owner.
-5. If owner lease is missing/expired, broker attempts ownership-aware claim and, on success,
-   restores from `original_request` and resubmits.
+3. On local miss, broker decodes the request ID to derive an owner hint and resolves that broker's lease.
+4. If the hinted owner's lease is active, broker proxies poll to that owner.
+5. If the lease is missing/expired, broker reads and claims the durable record using its authoritative owner field; on success it restores from `original_request` and resubmits.
 
 Reclaim is strictly lease-gated: proxy failure with an active owner lease does not trigger claim.
 

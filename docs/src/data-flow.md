@@ -16,7 +16,7 @@ sequenceDiagram
     participant T as Backend
 
     C->>B: POST /job {"class":"od","date":"2024-01-15"}
-    Note over B: Create Job<br/>id = broker-1-abc~def<br/>original_request = frozen copy<br/>request = working copy
+    Note over B: Create Job<br/>id = opaque request ID<br/>original_request = frozen copy<br/>request = working copy
     Note over B: Spawn pipeline task
     Note over B: Pipeline:<br/>check → pass<br/>transform → mutate request<br/>target → dispatch
     B->>T: POST http://backend/api<br/>Body: job.request (after transforms)
@@ -152,7 +152,7 @@ When a worker receives a job, the response body contains:
 
 ```json
 {
-  "job_id": "broker-1-abc123~def456",
+  "job_id": "0217scypcc00000000000000",
   "request": {"class": "od", "param": ["2t", "msl"]},
   "user": {"name": "alice", "group": "research"},
   "metadata": {"cost": 42, "metkit_expanded": true}
@@ -188,8 +188,8 @@ sequenceDiagram
 
     C->>LB: GET /job/{id}
     LB->>B: forward
-    B->>S: Check A's lease → expired
-    B->>S: Claim job (atomic CAS)
+    B->>S: Decode owner hint; check lease → expired
+    B->>S: Claim authoritative job record (atomic CAS)
     B->>B: Restore from original_request
     B->>B: Re-dispatch through pipeline
     B-->>C: Result
@@ -204,7 +204,7 @@ sequenceDiagram
     participant A as Broker A
 
     C->>B: GET /job/{id}
-    B->>B: A owns this, lease active
+    B->>B: Owner hint names A; lease active
     B->>A: Proxy poll to A's internal URL
     A-->>B: Result
     B-->>C: Result

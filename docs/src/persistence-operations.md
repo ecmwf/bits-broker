@@ -8,12 +8,13 @@ All options live under the `bits:` key in your YAML config file.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `broker_id_prefix` | string | `"broker-{uuid}"` | Stable prefix embedded in every job ID. The full per-process identity is `{broker_id_prefix}-{uuid}`. |
-| `internal_poll_endpoint` | string | auto-derived from `server.host`/`port` | URL at which **peer brokers** can reach this instance's poll endpoint. When not set, BITS derives this from `server.host` and `server.port`. If `server.host` is a wildcard bind (`0.0.0.0` or `::`), it falls back to a loopback address and emits a warning; set this explicitly for multi-broker deployments. |
-| `internal_poll_timeout_secs` | float (secs) | `2.5` | Timeout for outbound proxy poll requests to peer brokers. |
-| `sweep_interval_secs` | float (secs) | `180.0` | How often the sweeper thread evicts completed, unpolled jobs from memory. |
-| `reconnect_buffer_secs` | float (secs) | `5.0` | Grace period after a client disconnects before the job is eligible for sweep. Lower values suit non-long-polling APIs. |
-| `persist_after_secs` | float (secs) | *(none)* | Threshold before a job is written to durable storage. Omitting this key disables persistence. |
+| `site` | string/integer tag | *(required)* | 1-3 lowercase letters or digits identifying the deployment site. Encoded into request IDs. |
+| `env` | string/integer tag | *(required)* | 1-3 lowercase letters or digits identifying the environment. Encoded into request IDs. |
+| `internal_poll_endpoint` | string | auto-derived from `server.host`/`port` | URL at which peer brokers can reach this instance's poll endpoint. Set explicitly for multi-broker deployments. |
+| `internal_poll_timeout_secs` | float | `2.5` | Timeout for outbound proxy poll requests to peer brokers. |
+| `sweep_interval_secs` | float | `180.0` | How often the sweeper thread evicts completed, unpolled jobs from memory. |
+| `reconnect_buffer_secs` | float | `5.0` | Grace period after a client disconnect before the job is eligible for sweep. |
+| `persist_after_secs` | float | *(none)* | Threshold before a job is written to durable storage. Has no effect without `bits.persistence`. |
 
 ### Persistence options (`bits.persistence`)
 
@@ -27,59 +28,45 @@ All options live under the `bits:` key in your YAML config file.
 | `num_replicas` | integer | `1` | *(nats only)* JetStream replication factor. Use 3 for production. |
 | `endpoints` | list of strings | *(tikv only, required)* | TiKV PD endpoints, e.g. `["pd:2379"]`. |
 
+## Request IDs and ownership
+
+Public request IDs are opaque. BITS decodes them internally to derive `(site, env, slot)` as an owner hint, then forms the internal broker ID `{site}-{env}-{slot}`. Durable job records carry the authoritative owner in `broker_id`, and that value may change after recovery.
+
+Slot allocation is monotonic per `(site, env)` and uses backend counters. If the `u16` slot range is exhausted, startup fails; recovery requires a new request-ID version before more slots can be allocated for that site/env pair.
+
 ## Config validation
 
-When persistence is enabled, BITS validates at startup that
-`persist_after_secs + 1s < server.poll_timeout_secs`. The 1-second guard
-accounts for I/O jitter on the persistence write. This check ensures a job
-has time to be persisted before any client's poll window could expire.
-Adjust `persist_after_secs` downward (write sooner) or
-`server.poll_timeout_secs` upward (wider window) if you hit this error.
-
-## Removed configuration options
-
-BITS actively rejects several legacy keys to prevent silent misconfiguration:
-
-| Old key | Replacement |
-|---|---|
-| `dispatcher.persistent` | Use `bits.persist_after_secs` |
-| `dispatcher.lock_ttl_secs` | Use `bits.persistence.broker_lease_ttl_secs` |
-| `bits.tikv` | Use `bits.persistence` with `type: tikv` |
-| `bits.nats` | Use `bits.persistence` with `type: nats` |
-| `persist` as a route step name | Persistence is now threshold-based; remove the step |
+When persistence is enabled, BITS validates that `persist_after_secs + 1s < server.poll_timeout_secs`. The guard gives the persistence write time to complete before a client's poll window could expire.
 
 ## Tuning guidance
 
 ### `persist_after_secs`
 
-Set this to a value comfortably shorter than your clients' expected poll timeout window. For
-example, if clients poll with a 30-second timeout, `persist_after_secs: 28.0` is a reasonable
-starting point.
-
-Jobs that complete before this threshold are never written to storage, so short requests pay no
-I/O cost for persistence.
+Set this comfortably shorter than the expected client poll timeout. Jobs that complete before this threshold never touch storage.
 
 ### `broker_lease_ttl_secs`
 
-This controls the window during which jobs are unrecoverable after a broker crashes. A lower
-TTL (e.g., 10 s) means faster recovery but more frequent persistence writes. A higher TTL
-reduces write pressure at the cost of longer client wait times after a crash.
+This controls the recovery delay after a broker disappears. Lower TTLs recover faster and write heartbeats more often; higher TTLs reduce write pressure and increase client wait time after a crash.
 
 ### Sticky ingress
 
-Configure your load balancer to hash incoming requests on a stable client property (for example
-`Authorization`). This maximises the fraction of polls that hit the owning broker and return
-from local in-memory state, avoiding proxy or recovery paths entirely.
+Use load-balancer affinity on a stable client property such as `Authorization`. This maximises local in-memory poll hits. Do not route clients by parsing request IDs.
 
 ## Failure mode reference
 
 | Scenario | Behaviour |
 |---|---|
 | Store unreachable at lease lookup | `Pending` returned to client. No claim attempted. |
-| Store unreachable at claim (repeated) | Exponential backoff (100 ms → 1 s), budget `min(timeout, 2 s)`. Returns `Pending` on exhaustion. |
-| Two brokers claim the same job simultaneously | Backend-specific CAS ensures only one wins (TiKV: optimistic transaction, NATS: revision-based update). Loser returns `Pending`; next poll finds the new owner. |
-| `upsert_job` fails at persist threshold | Logged as a warning; job continues in memory. If the broker subsequently crashes, the job is unrecoverable. |
-| `delete_job` fails at job completion | Logged as a warning (`durable record cleanup failed`). The stale record remains in the store. While the owning broker's lease is active, peers still see that lease. If the owner later loses its lease, the stale record may be treated as recoverable. |
-| Broker crashes without lease cleanup | Lease expires after `broker_lease_ttl_secs` (default 30 s). Jobs become recoverable after that window. NATS leases auto-expire via bucket `max_age`; TiKV lease records require application-level expiry checks. |
-| `persistence.type` set, feature not compiled | `Bits::from_config` returns an error immediately at startup. |
-| Missing required backend fields | `Bits::from_config` returns an error immediately at startup (e.g., empty `endpoints` for TiKV, empty `url` for NATS). |
+| Store unreachable at claim | Exponential backoff with a `min(timeout, 2 s)` budget. Returns `Pending` on exhaustion. |
+| Two brokers claim the same job | Backend compare-and-swap ensures only one wins. Loser returns `Pending`; next poll finds the new owner. |
+| `upsert_job` fails at persist threshold | Logged as a warning; job continues in memory. If the broker then crashes, the job is unrecoverable. |
+| `delete_job` fails at completion | Logged as a warning; the stale durable record remains and may need cleanup. |
+| Broker crashes | Jobs become recoverable after the owner's lease expires. |
+| `persistence.type` set, feature not compiled | Startup fails. |
+| Missing required backend fields | Startup fails. |
+
+## Hard cutover and orphan cleanup
+
+The current request-ID format and key layout are a hard cutover boundary. After deploying it, persisted records and leases written by an incompatible format are not discoverable by normal poll recovery.
+
+Operationally, drain or stop old brokers before deploying the new format. After all old leases have expired and no old-format work is expected to complete, remove orphaned job records, broker lease records, and slot counters from the old key spaces using the backend's administrative tools. Keep the cleanup scoped to BITS buckets/prefixes and take a backup first.

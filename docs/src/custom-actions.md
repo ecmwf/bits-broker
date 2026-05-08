@@ -28,7 +28,7 @@ All actions receive a job. The fields relevant to action authors:
 
 | Field | Writable | Description |
 |-------|----------|-------------|
-| `id` | No | Unique job identifier (`{broker_id}~{uuid}`). |
+| `id` | No | Opaque request ID. Treat it as a stable string handle, not as a routable field. |
 | `request` | Transform only | Working request payload. Mutated by transforms; read by checks and targets. |
 | `original_request` | No | Snapshot of the request as submitted. Used as restart point on recovery. Never modify this. |
 | `metadata` | Transform only | Pipeline-internal annotations (cost, roles, license, etc.). Written by transforms; read by checks, targets, and dispatchers. |

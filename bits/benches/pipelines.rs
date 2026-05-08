@@ -63,6 +63,9 @@ fn make_bits(config: &str) -> Bits {
 /// Baseline: just a target, nothing else.
 fn config_target_only() -> &'static str {
     r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::noop: ~
@@ -71,6 +74,9 @@ routes:
 
 fn config_check_target() -> &'static str {
     r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - check::noop_check: ~
@@ -80,6 +86,9 @@ routes:
 
 fn config_transform_target() -> &'static str {
     r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - transform::noop_transform: ~
@@ -89,6 +98,9 @@ routes:
 
 fn config_full_pipeline() -> &'static str {
     r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - check::noop_check: ~
@@ -99,6 +111,9 @@ routes:
 
 fn config_deep_pipeline() -> &'static str {
     r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - check::noop_check: ~

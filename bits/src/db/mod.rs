@@ -40,6 +40,11 @@ pub enum ClaimResult {
 pub enum DbError {
     Conflict(String),
     Backend(String),
+    SlotExhausted {
+        site: String,
+        env: String,
+        ceiling: u16,
+    },
 }
 
 impl std::fmt::Display for DbError {
@@ -47,6 +52,10 @@ impl std::fmt::Display for DbError {
         match self {
             Self::Conflict(message) => write!(f, "conflict: {message}"),
             Self::Backend(message) => write!(f, "backend error: {message}"),
+            Self::SlotExhausted { site, env, ceiling } => write!(
+                f,
+                "broker slot allocation exhausted for site '{site}' env '{env}': reached slot ceiling {ceiling}; recovery requires bumping the broker-id version byte before allocating more broker slots"
+            ),
         }
     }
 }
@@ -58,11 +67,12 @@ impl DbError {
         match self {
             DbError::Conflict(_) => "PERSISTENCE_CONFLICT",
             DbError::Backend(_) => "PERSISTENCE_BACKEND",
+            DbError::SlotExhausted { .. } => "PERSISTENCE_SLOT_EXHAUSTED",
         }
     }
 
     pub fn is_retryable(&self) -> bool {
-        true
+        !matches!(self, DbError::SlotExhausted { .. })
     }
 }
 
@@ -159,13 +169,58 @@ pub trait BrokerLeaseStore: Send + Sync {
     async fn delete_broker_lease(&self, broker_id: &str) -> Result<(), DbError>;
 }
 
+#[async_trait]
+/// Broker slot allocator for compact broker-id construction.
+///
+/// `site_tag` and `env_tag` are expected to be validated 1-3 character tags at
+/// the configuration/request-id boundary before this persistence API is called.
+/// Implementations should allocate a durable `u16` slot for each site/env pair
+/// and return `DbError::SlotExhausted` when the `u16` slot space is exhausted.
+pub trait BrokerSlotStore: Send + Sync {
+    /// Allocate the next durable broker slot for a validated site/env pair.
+    async fn allocate_broker_slot(&self, site_tag: &str, env_tag: &str) -> Result<u16, DbError>;
+}
+
+#[async_trait]
+impl<T> BrokerSlotStore for T
+where
+    T: JobStore + BrokerLeaseStore + Send + Sync + 'static,
+{
+    async fn allocate_broker_slot(&self, site_tag: &str, env_tag: &str) -> Result<u16, DbError> {
+        if let Some(memory_store) =
+            (self as &dyn std::any::Any).downcast_ref::<memory::MemoryStore>()
+        {
+            return memory_store.allocate_memory_broker_slot(site_tag, env_tag);
+        }
+
+        #[cfg(feature = "nats")]
+        if let Some(nats_store) = (self as &dyn std::any::Any).downcast_ref::<nats::NatsStore>() {
+            return nats_store
+                .allocate_nats_broker_slot(site_tag, env_tag)
+                .await;
+        }
+
+        #[cfg(feature = "tikv")]
+        if let Some(tikv_store) = (self as &dyn std::any::Any).downcast_ref::<tikv::TiKvStore>() {
+            return tikv_store
+                .allocate_tikv_broker_slot(site_tag, env_tag)
+                .await;
+        }
+
+        Err(DbError::Backend(format!(
+            "broker slot allocation is not implemented for this persistence backend (site '{site_tag}', env '{env_tag}')"
+        )))
+    }
+}
+
 /// Composite persistence capability used by the broker runtime.
 ///
-/// Any backend that implements both `JobStore` and `BrokerLeaseStore`
-/// automatically implements `PersistenceStore` via the blanket impl below.
-pub trait PersistenceStore: JobStore + BrokerLeaseStore {}
+/// Any backend that implements `JobStore`, `BrokerLeaseStore`, and
+/// `BrokerSlotStore` automatically implements `PersistenceStore` via the
+/// blanket impl below.
+pub trait PersistenceStore: JobStore + BrokerLeaseStore + BrokerSlotStore {}
 
-impl<T: JobStore + BrokerLeaseStore> PersistenceStore for T {}
+impl<T: JobStore + BrokerLeaseStore + BrokerSlotStore> PersistenceStore for T {}
 
 pub async fn durable_job_present(
     store: &dyn PersistenceStore,

@@ -57,6 +57,9 @@ register_action!(target, "echo", Echo);
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const CONFIG: &str = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   forecast:
     - check::match_field:

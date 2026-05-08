@@ -1,37 +1,38 @@
 # Poll Proxying and Recovery
 
-When a poll request arrives for a job that is not in local memory, the broker follows a
-structured decision sequence to locate the result or recover the job.
+When a poll request arrives for a job that is not in local memory, the broker follows a lease-gated sequence to locate the result or recover the job.
 
 ## Decision sequence
 
-```
+```text
 poll(id)
   │
   ├─ 1. Check local in-memory state
   │       ↓ found → long-poll, return result
   │       ↓ not found
   │
-  ├─ 2. Parse owner from job_id (split on first '~')
-  │       ↓ unparseable → NotFound
-  │       ↓ owner == self → NotFound  (we are authoritative; job never existed or was evicted)
-  │       ↓ owner == another broker
+  ├─ 2. Decode request ID
+  │       ↓ invalid → NotFound
+  │       ↓ valid → derive hinted broker ID: {site}-{env}-{slot}
   │
-  ├─ 3. Look up owner's broker lease
+  ├─ 3. Look up hinted broker lease
   │       ↓ Active lease     → Step 4a (proxy)
-  │       ↓ Missing/expired  → Step 4b (claim-and-recover)
-  │       ↓ Store unreachable → Pending (no claim attempted)
+  │       ↓ Missing/expired  → Step 4b (load durable record)
+  │       ↓ Store unreachable → Pending
   │
-  ├─ 4a. Proxy to owner's internal_poll_endpoint/{id}
-  │       ↓ success → return translated response (see table below)
-  │       ↓ network/timeout failure → Pending (no claim while lease is active)
+  ├─ 4a. Proxy to lease.internal_poll_base_url/{id}
+  │       ↓ success → return translated response
+  │       ↓ network/timeout failure → Pending
   │
   └─ 4b. Claim-and-recover from durable storage
+          ↓ Record owner differs from hint and owner lease active → proxy to authoritative owner
           ↓ Claimed     → restore job, long-poll, return Pending
           ↓ Active(new) → look up new owner's lease; proxy if active, else Pending
           ↓ NotFound    → JobLost
-          ↓ Error       → Pending (with exponential backoff retries)
+          ↓ Error       → Pending
 ```
+
+The owner decoded from the request ID is only a hint. The durable job record's `broker_id` is authoritative once a job has been persisted and may change after recovery.
 
 ## Proxy response translation
 
@@ -50,35 +51,30 @@ When proxying to the owner broker, BITS translates the HTTP response back to a `
 
 ## Claim and recovery
 
-Recovery is only attempted when the owner's broker lease is missing or expired. The broker
-runs `claim_with_backoff`:
+Recovery is only attempted when the relevant broker lease is missing or expired. The broker runs `claim_with_backoff`:
 
 - Budget: `min(requested_timeout, 2 s)`
 - Backoff: starts at 100 ms, doubles each retry, capped at 1 s
-- Uses backend-specific CAS: optimistic transaction in TiKV, revision-based update with retry in NATS
+- Uses backend-specific compare-and-swap semantics: optimistic transaction in TiKV, revision-based update in NATS
 
 On a successful claim, `Job::restore` reconstructs the job from the durable record:
 
-- `request` is reset to `original_request`. The pipeline re-runs from the beginning
-- `created_at` is preserved from the original submission timestamp
-- All runtime state (cancelled flag, client-connected flag, etc.) starts fresh
+- `request` is reset to `original_request`; the pipeline runs again from the beginning.
+- `created_at` is preserved from the original submission.
+- Runtime state starts fresh.
 
-The job is submitted immediately and the polling request is attached to it, so the client
-receives `Pending` in response to the recovery poll without an extra round-trip.
+The polling request attaches to the restored job and receives `Pending` unless the job finishes within the poll timeout.
 
 ## Claim outcomes
 
 | `ClaimResult` | Action |
 |---|---|
-| `Claimed(record)` | Job restored and submitted; poll attaches and waits. Returns `Pending`. |
-| `Active { owner_broker_id }` | Another broker won the race. Look up its lease; proxy if active, else `Pending`. |
+| `Claimed(record)` | Job restored and submitted; poll attaches and waits. Returns `Pending` unless completed during the wait. |
+| `Active { owner_broker_id }` | Another broker owns the record. Look up its lease; proxy if active, else `Pending`. |
 | `NotFound` | No durable record exists. Returns `JobLost`. |
-| `Conflict` (commit race) | Returns `Pending`; next poll will find the winner. |
-| Backend error (after retries) | Returns `Pending`. |
+| `Conflict` | Returns `Pending`; next poll will find the winner. |
+| Backend error | Returns `Pending`. |
 
 ## Client reconnect window
 
-After each `poll_local` call returns, the broker extends the reconnect deadline by `bits.reconnect_buffer_secs` (default 5 seconds). A job
-considers the client "present" while `client_connected` is set **or** while the reconnect
-deadline has not yet elapsed. This gives the client that many seconds to reconnect between polls before
-the dispatch pipeline treats the connection as lost and stops work.
+After each local poll returns, the broker extends the reconnect deadline by `bits.reconnect_buffer_secs` (default 5 seconds). This gives the client time to reconnect between polls before the dispatch pipeline treats the connection as lost.

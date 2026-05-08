@@ -12,7 +12,7 @@ use crate::result::JobResult;
 use crate::route_handle::RouteHandle;
 use crate::routing::switch::Switch;
 use crate::runtime::maintenance::{ConnectedGuard, ShutdownSignal, start_sweeper};
-use crate::runtime::recovery::{LeaseLookup, owner_from_job_id};
+use crate::runtime::recovery::{LeaseLookup, decode_job_id, slot_from_job_id};
 use crate::runtime::runner::spawn_job;
 
 /// Default reconnect buffer added on top of the poll timeout.
@@ -67,6 +67,9 @@ pub struct Bits {
     pub(crate) route_factory: RouteFactory,
     pub(crate) jobs: Arc<DashMap<String, Arc<Job>>>,
     pub(crate) broker_id: String,
+    pub(crate) site: String,
+    pub(crate) env: String,
+    pub(crate) broker_slot: u16,
     pub(crate) internal_poll_base_url: String,
     pub(crate) internal_poll_timeout: Duration,
     pub(crate) persist_after: Option<Duration>,
@@ -98,11 +101,21 @@ impl Bits {
     ) -> Self {
         let shutdown = Arc::new(ShutdownSignal::new());
         let job_count = Arc::new(AtomicUsize::new(0));
+        let (site, env, broker_slot) = broker_id
+            .rsplit_once('-')
+            .and_then(|(prefix, slot)| {
+                let (site, env) = prefix.split_once('-')?;
+                Some((site.to_string(), env.to_string(), slot.parse::<u16>().ok()?))
+            })
+            .unwrap_or_else(|| ("tst".to_string(), "tst".to_string(), 0));
         let mut bits = Bits {
             router: Arc::new(router),
             route_factory: RouteFactory::default(),
             jobs: Arc::new(DashMap::new()),
             broker_id,
+            site,
+            env,
+            broker_slot,
             internal_poll_base_url,
             internal_poll_timeout,
             persist_after,
@@ -158,14 +171,17 @@ impl Bits {
 
     pub(crate) fn from_runtime_config(parsed: RuntimeConfig) -> Result<Self, BitsError> {
         let sweep_interval = parsed.sweep_interval.unwrap_or(DEFAULT_SWEEP_INTERVAL);
-        let instance_id = format!("{}-{}", parsed.broker_id_prefix, uuid::Uuid::new_v4());
+        let broker_id = format!("{}-{}-{}", parsed.site, parsed.env, parsed.broker_slot);
         let shutdown = Arc::new(ShutdownSignal::new());
         let job_count = Arc::new(AtomicUsize::new(0));
         let mut bits = Bits {
             router: Arc::new(parsed.router),
             route_factory: parsed.route_factory,
             jobs: Arc::new(DashMap::new()),
-            broker_id: instance_id,
+            broker_id,
+            site: parsed.site,
+            env: parsed.env,
+            broker_slot: parsed.broker_slot,
             internal_poll_base_url: parsed.internal_poll_endpoint,
             internal_poll_timeout: parsed.internal_poll_timeout,
             persist_after: parsed.persist_after,
@@ -208,6 +224,21 @@ impl Bits {
     /// Returns the broker instance identifier.
     pub fn broker_id(&self) -> &str {
         &self.broker_id
+    }
+
+    /// Returns the validated site tag used for generated broker and request identifiers.
+    pub fn site(&self) -> &str {
+        &self.site
+    }
+
+    /// Returns the validated environment tag used for generated broker and request identifiers.
+    pub fn env(&self) -> &str {
+        &self.env
+    }
+
+    /// Returns the allocated broker slot for this process.
+    pub fn broker_slot(&self) -> u16 {
+        self.broker_slot
     }
 
     pub fn route_factory(&self) -> &RouteFactory {
@@ -267,6 +298,9 @@ impl Bits {
             router: Arc::new(switch),
             jobs: self.jobs.clone(),
             broker_id: self.broker_id.clone(),
+            site: self.site.clone(),
+            env: self.env.clone(),
+            broker_slot: self.broker_slot,
             job_store: self.job_store.clone(),
             persist_after: self.persist_after,
             reconnect_buffer: self.reconnect_buffer,
@@ -295,7 +329,7 @@ impl Bits {
     }
 
     fn submit_with_state(&self, mut job: Job, already_persisted: bool) -> SubmitOutcome {
-        if owner_from_job_id(&job.id).is_none() {
+        if decode_job_id(&job.id).is_err() {
             job.id = self.new_job_id();
         }
         let job_id = job.id.clone();
@@ -366,23 +400,21 @@ impl Bits {
             return outcome;
         }
 
-        let Some(owner) = owner_from_job_id(id) else {
+        let Ok(owner) = slot_from_job_id(id) else {
             return PollOutcome::NotFound;
         };
 
-        if owner == self.broker_id {
-            return PollOutcome::NotFound;
-        }
-
-        match self.lookup_owner_lease(owner).await {
-            LeaseLookup::Active(lease) => {
-                if let Some(outcome) = self.try_proxy_with_lease(&lease, id, timeout).await {
-                    return outcome;
+        if owner != self.broker_id {
+            match self.lookup_owner_lease(&owner).await {
+                LeaseLookup::Active(lease) => {
+                    if let Some(outcome) = self.try_proxy_with_lease(&lease, id, timeout).await {
+                        return outcome;
+                    }
+                    return PollOutcome::Pending { id: id.to_string() };
                 }
-                return PollOutcome::Pending { id: id.to_string() };
+                LeaseLookup::Unknown => return PollOutcome::Pending { id: id.to_string() },
+                LeaseLookup::MissingOrExpired => {}
             }
-            LeaseLookup::Unknown => return PollOutcome::Pending { id: id.to_string() },
-            LeaseLookup::MissingOrExpired => {}
         }
 
         let Some(store) = &self.job_store else {
@@ -392,7 +424,7 @@ impl Bits {
         // We only reach claim once the observed owner lease is missing/expired.
         // The claim result then determines whether we recover locally, retry proxying,
         // or surface terminal/liveness outcomes to the caller.
-        match self.claim_with_backoff(store, id, owner, timeout).await {
+        match self.claim_with_backoff(store, id, &owner, timeout).await {
             Ok(ClaimResult::Claimed(record)) => {
                 // This broker won ownership and can recover from durable state.
                 // Re-submit restored work, then immediately continue as a local poll
@@ -416,6 +448,7 @@ impl Bits {
                 }
             }
             // No durable record exists for this id anymore.
+            Ok(ClaimResult::NotFound) if owner == self.broker_id => PollOutcome::NotFound,
             Ok(ClaimResult::NotFound) => PollOutcome::JobLost,
             Err(DbError::Conflict(message)) => {
                 // Rare optimistic-claim race. Keep response in pending loop so the
@@ -427,6 +460,10 @@ impl Bits {
                 // Backend remained unavailable after in-poll backoff retries.
                 // Return pending so client retries on the next poll interval.
                 tracing::warn!(job.id = %id, error = %message, "claim backend unavailable after retries");
+                PollOutcome::Pending { id: id.to_string() }
+            }
+            Err(err @ DbError::SlotExhausted { .. }) => {
+                tracing::error!(job.id = %id, error = %err, "broker slot space exhausted during claim");
                 PollOutcome::Pending { id: id.to_string() }
             }
         }
@@ -508,7 +545,8 @@ impl Bits {
     }
 
     fn new_job_id(&self) -> String {
-        format!("{}~{}", self.broker_id, uuid::Uuid::new_v4())
+        crate::polytope_id::encode(&self.site, &self.env, self.broker_slot, chrono::Utc::now())
+            .expect("runtime site/env/slot should encode as a request ID")
     }
 }
 
@@ -584,14 +622,136 @@ impl Drop for Bits {
 
 #[cfg(test)]
 mod route_handle_tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use super::*;
+    use crate::db::{BrokerLeaseStore, PersistenceStore, memory::MemoryStore};
     use crate::job::Job;
+    use crate::polytope_id;
+
+    fn bits_for_request_id_tests(
+        broker_id: &str,
+        job_store: Option<Arc<dyn PersistenceStore>>,
+    ) -> Bits {
+        Bits::from_router_for_tests(
+            Switch::new(vec![]),
+            broker_id.to_string(),
+            "http://127.0.0.1:1/job".to_string(),
+            Duration::from_millis(10),
+            None,
+            job_store,
+            Duration::from_secs(60),
+        )
+    }
+
+    #[tokio::test]
+    async fn request_id_runtime_poll_rejects_legacy_tilde_id_as_not_found() {
+        let memory_store = Arc::new(MemoryStore::new());
+        memory_store
+            .upsert_broker_lease(
+                "legacy-owner",
+                "http://127.0.0.1:1/job",
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("lease should upsert");
+        let store: Arc<dyn PersistenceStore> = memory_store;
+        let bits = bits_for_request_id_tests("bol-dev-1", Some(store));
+
+        let outcome = bits
+            .poll(
+                "legacy-owner~550e8400-e29b-41d4-a716-446655440000",
+                Some(Duration::from_millis(1)),
+            )
+            .await;
+
+        assert!(matches!(outcome, PollOutcome::NotFound));
+    }
+
+    #[tokio::test]
+    async fn request_id_runtime_submit_with_legacy_tilde_id_generates_new_format_id() {
+        let bits = bits_for_request_id_tests("bol-dev-42", None);
+        let valid_id = polytope_id::encode("bol", "dev", 42, chrono::Utc::now()).unwrap();
+
+        let preserved = bits
+            .submit(Job::new_with_id(
+                valid_id.clone(),
+                serde_json::json!({"case": "valid"}),
+            ))
+            .expect_accepted("submit should not be rejected");
+        let replaced = bits
+            .submit(Job::new_with_id(
+                "bol-dev-42~550e8400-e29b-41d4-a716-446655440000".to_string(),
+                serde_json::json!({"case": "legacy"}),
+            ))
+            .expect_accepted("submit should not be rejected");
+
+        assert_eq!(preserved.id, valid_id);
+        assert_ne!(
+            replaced.id,
+            "bol-dev-42~550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert!(!replaced.id.contains('~'));
+        assert!(polytope_id::decode(&replaced.id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn request_id_runtime_route_handle_submit_with_legacy_tilde_id_generates_new_format_id() {
+        let config = r#"
+bits:
+  site: bol
+  env: dev
+targets:
+  my_target:
+    type: http
+    url: http://127.0.0.1:1
+"#;
+        let bits = Bits::from_config(config).expect("should build");
+        let route_val = serde_json::json!([{"my_route": ["target::my_target"]}]);
+        let handle = bits.add_route("my_route", &route_val).expect("add_route");
+        let valid_id = polytope_id::encode(
+            handle.site(),
+            handle.env(),
+            handle.broker_slot(),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+
+        let preserved = handle.submit(Job::new_with_id(
+            valid_id.clone(),
+            serde_json::json!({"case": "valid"}),
+        ));
+        let replaced = handle.submit(Job::new_with_id(
+            format!(
+                "{}-{}-{}~550e8400-e29b-41d4-a716-446655440000",
+                handle.site(),
+                handle.env(),
+                handle.broker_slot()
+            ),
+            serde_json::json!({"case": "legacy"}),
+        ));
+
+        assert_eq!(preserved.id, valid_id);
+        assert_ne!(
+            replaced.id,
+            format!(
+                "{}-{}-{}~550e8400-e29b-41d4-a716-446655440000",
+                handle.site(),
+                handle.env(),
+                handle.broker_slot()
+            )
+        );
+        assert!(!replaced.id.contains('~'));
+        assert!(polytope_id::decode(&replaced.id).is_ok());
+    }
 
     #[tokio::test]
     async fn submit_via_route_handle_pollable_via_bits() {
         let config = r#"
+bits:
+  site: tst
+  env: dev
 targets:
   my_target:
     type: http
@@ -616,6 +776,9 @@ targets:
     #[tokio::test]
     async fn route_handles_share_jobs_map_pollable_via_bits() {
         let config = r#"
+bits:
+  site: tst
+  env: dev
 targets:
   my_target:
     type: http

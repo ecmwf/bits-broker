@@ -65,6 +65,8 @@ fn make_two_pool_bits(port: u16, queue_a: &str, queue_b: &str, hb_a: f64, hb_b: 
     let config = format!(
         r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: {port}
@@ -103,6 +105,8 @@ fn make_dedup_pool_bits(port: u16) -> Bits {
     let config = format!(
         r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "127.0.0.1"
     port: {port}

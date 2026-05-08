@@ -9,6 +9,7 @@
 # Concepts
 
 - [Architecture](architecture.md)
+- [Request IDs](request-ids.md)
 - [Data Flow](data-flow.md)
 - [Error Handling](error-handling.md)
 

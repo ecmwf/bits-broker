@@ -71,7 +71,7 @@ Response body:
 
 ```json
 {
-  "job_id": "broker-a123~9d2f...",
+  "job_id": "0217scypcc00000000000000",
   "request": {"dataset": "era5"},
   "user": {"id": "alice"},
   "metadata": {"cost": 2.0}
@@ -80,6 +80,7 @@ Response body:
 
 Notes:
 
+- `job_id` is an opaque request ID; workers must pass it back unchanged in heartbeat and completion calls.
 - `request` is the transformed request as it reached the remote target step.
 - `metadata` includes values produced by earlier transforms.
 - One poll returns at most one job.
@@ -105,7 +106,7 @@ Submit exactly one successful terminal outcome for a claimed job.
 Example:
 
 ```http
-POST /complete/data/broker-a123~9d2f... HTTP/1.1
+POST /complete/data/0217scypcc00000000000000 HTTP/1.1
 Content-Type: application/x-grib
 
 ...streamed bytes...

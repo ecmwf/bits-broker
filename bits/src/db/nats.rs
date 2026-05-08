@@ -3,7 +3,6 @@ use std::time::Duration;
 use async_nats::jetstream;
 use async_nats::jetstream::kv;
 use async_trait::async_trait;
-use base64::Engine;
 use chrono::Utc;
 use tokio::sync::OnceCell;
 
@@ -136,15 +135,104 @@ impl NatsStore {
             .map_err(|e| DbError::Backend(format!("deserialize failed: {e}")))
     }
 
-    fn encode_key(key: &str) -> String {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.as_bytes())
+    fn job_key(public_id: &str) -> Result<String, DbError> {
+        let decoded = crate::polytope_id::decode(public_id)
+            .map_err(|e| DbError::Backend(format!("invalid public job ID {public_id:?}: {e}")))?;
+        Ok(format!(
+            "jobs.{}.{}.{}.{}",
+            decoded.site, decoded.env, decoded.broker_slot, public_id
+        ))
+    }
+
+    fn broker_lease_key(broker_id: &str) -> String {
+        format!("brokers.{broker_id}")
+    }
+
+    #[cfg(test)]
+    fn encode_key(public_id: &str) -> String {
+        Self::job_key(public_id).unwrap_or_else(|e| format!("invalid_public_job_id.{e}"))
+    }
+
+    fn broker_slot_counter_key(site_tag: &str, env_tag: &str) -> String {
+        format!("counters.broker_slot.{site_tag}.{env_tag}")
+    }
+
+    pub(crate) async fn allocate_nats_broker_slot(
+        &self,
+        site_tag: &str,
+        env_tag: &str,
+    ) -> Result<u16, DbError> {
+        let key = Self::broker_slot_counter_key(site_tag, env_tag);
+        let jobs = self.jobs().await?;
+
+        loop {
+            let entry = jobs
+                .entry(&key)
+                .await
+                .map_err(|e| DbError::Backend(format!("get broker slot counter: {e}")))?;
+
+            let Some(entry) = entry else {
+                match jobs.create(&key, Self::serialize(&1_u32)?).await {
+                    Ok(_) => return Ok(0),
+                    Err(e) if matches!(e.kind(), kv::CreateErrorKind::AlreadyExists) => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(DbError::Backend(format!("create broker slot counter: {e}")));
+                    }
+                }
+            };
+
+            if entry.operation != kv::Operation::Put {
+                match jobs
+                    .update(&key, Self::serialize(&1_u32)?, entry.revision)
+                    .await
+                {
+                    Ok(_) => return Ok(0),
+                    Err(e) if matches!(e.kind(), kv::UpdateErrorKind::WrongLastRevision) => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(DbError::Backend(format!(
+                            "recreate broker slot counter: {e}"
+                        )));
+                    }
+                }
+            }
+
+            let next_slot: u32 = Self::deserialize(&entry.value)?;
+            if next_slot > u32::from(u16::MAX) {
+                return Err(DbError::SlotExhausted {
+                    site: site_tag.to_string(),
+                    env: env_tag.to_string(),
+                    ceiling: u16::MAX,
+                });
+            }
+
+            let allocated_slot = u16::try_from(next_slot).map_err(|e| {
+                DbError::Backend(format!("broker slot conversion failed unexpectedly: {e}"))
+            })?;
+            let next_value = next_slot + 1;
+            match jobs
+                .update(&key, Self::serialize(&next_value)?, entry.revision)
+                .await
+            {
+                Ok(_) => return Ok(allocated_slot),
+                Err(e) if matches!(e.kind(), kv::UpdateErrorKind::WrongLastRevision) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(e) => return Err(DbError::Backend(format!("update broker slot counter: {e}"))),
+            }
+        }
     }
 }
 
 #[async_trait]
 impl JobStore for NatsStore {
     async fn upsert_job(&self, record: PersistentJobRecord) -> Result<(), DbError> {
-        let key = Self::encode_key(&record.job_id);
+        let key = Self::job_key(&record.job_id)?;
         let value = Self::serialize(&record)?;
         self.jobs()
             .await?
@@ -155,7 +243,7 @@ impl JobStore for NatsStore {
     }
 
     async fn delete_job(&self, job_id: &str) -> Result<(), DbError> {
-        let key = Self::encode_key(job_id);
+        let key = Self::job_key(job_id)?;
         self.jobs()
             .await?
             .purge(&key)
@@ -171,7 +259,7 @@ impl JobStore for NatsStore {
         claimant_broker_id: &str,
     ) -> Result<ClaimResult, DbError> {
         const MAX_CAS_ATTEMPTS: u8 = 3;
-        let key = Self::encode_key(job_id);
+        let key = Self::job_key(job_id)?;
         let jobs = self.jobs().await?;
 
         for _ in 0..MAX_CAS_ATTEMPTS {
@@ -251,7 +339,7 @@ impl BrokerLeaseStore for NatsStore {
             lease_until: now + lease_duration,
             updated_at: now,
         };
-        let key = Self::encode_key(broker_id);
+        let key = Self::broker_lease_key(broker_id);
         let value = Self::serialize(&record)?;
         self.leases()
             .await?
@@ -265,7 +353,7 @@ impl BrokerLeaseStore for NatsStore {
         &self,
         broker_id: &str,
     ) -> Result<Option<BrokerLeaseRecord>, DbError> {
-        let key = Self::encode_key(broker_id);
+        let key = Self::broker_lease_key(broker_id);
         let entry = self
             .leases()
             .await?
@@ -283,12 +371,96 @@ impl BrokerLeaseStore for NatsStore {
     }
 
     async fn delete_broker_lease(&self, broker_id: &str) -> Result<(), DbError> {
-        let key = Self::encode_key(broker_id);
+        let key = Self::broker_lease_key(broker_id);
         self.leases()
             .await?
             .delete(&key)
             .await
             .map_err(|e| DbError::Backend(format!("delete lease: {e}")))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine;
+    use chrono::Utc;
+
+    use super::*;
+
+    fn deterministic_job_id(site: &str, env: &str, broker_slot: u16) -> String {
+        let timestamp = chrono::DateTime::parse_from_rfc3339(crate::polytope_id::CUSTOM_EPOCH)
+            .unwrap()
+            .with_timezone(&Utc);
+        crate::polytope_id::encode_with_fixed_random(
+            site,
+            env,
+            broker_slot,
+            timestamp,
+            [0x01, 0x23, 0x45, 0x67, 0x89],
+        )
+        .unwrap()
+    }
+
+    fn structured_job_subject(job_id: &str) -> String {
+        let decoded = crate::polytope_id::decode(job_id).unwrap();
+        format!(
+            "jobs.{}.{}.{}.{}",
+            decoded.site, decoded.env, decoded.broker_slot, job_id
+        )
+    }
+
+    #[test]
+    fn nats_job_key_uses_structured_subject() {
+        let job_id = deterministic_job_id("bol", "dev", 42);
+        let expected_subject = structured_job_subject(&job_id);
+        let current_subject = NatsStore::encode_key(&job_id);
+        let whole_id_base64url =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(job_id.as_bytes());
+
+        assert_eq!(
+            current_subject, expected_subject,
+            "NATS job records should be stored under structured subject {expected_subject:?} with the public ID used directly as a safe subject token"
+        );
+        assert_ne!(
+            current_subject, whole_id_base64url,
+            "NATS job records must not key by whole-ID base64url encoding"
+        );
+    }
+
+    #[test]
+    fn nats_job_key_rejects_invalid_public_id() {
+        let malformed_id = "not-a-new-format-id";
+        assert!(
+            crate::polytope_id::decode(malformed_id).is_err(),
+            "test fixture must be malformed"
+        );
+
+        let current_subject = NatsStore::encode_key(malformed_id);
+        let whole_id_base64url =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(malformed_id.as_bytes());
+
+        assert_ne!(
+            current_subject, whole_id_base64url,
+            "malformed public job IDs should be rejected at the NATS persistence boundary, not converted to a whole-ID base64url key"
+        );
+    }
+
+    #[test]
+    fn nats_job_key_delete_uses_structured_subject() {
+        let job_id = deterministic_job_id("bol", "dev", 42);
+        let expected_subject = structured_job_subject(&job_id);
+        let delete_subject = NatsStore::encode_key(&job_id);
+        let whole_id_base64url =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(job_id.as_bytes());
+
+        assert_eq!(
+            delete_subject, expected_subject,
+            "delete_job should purge the same structured subject derived from decoded (site, env, slot, public_id)"
+        );
+        assert_ne!(
+            delete_subject, whole_id_base64url,
+            "delete_job must not purge the whole-ID base64url key"
+        );
     }
 }

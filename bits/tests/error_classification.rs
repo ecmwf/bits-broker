@@ -33,6 +33,8 @@ fn non_mapping_yaml_produces_config_validation() {
 fn empty_persistence_url_produces_config_validation_not_missing() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   persistence:
     type: nats
     url: ""
@@ -56,6 +58,8 @@ routes:
 fn feature_disabled_produces_config_feature_disabled() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   persistence:
     type: tikv
     endpoints:
@@ -74,6 +78,9 @@ routes:
 #[test]
 fn unknown_action_produces_routing_invalid_action() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - banana::something: ~
@@ -92,6 +99,9 @@ fn route_without_target_is_rejected() {
     let _ = common::CheckDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - no_target:
       - check::dummy_delay:
@@ -110,6 +120,8 @@ routes:
 fn invalid_persistence_ttl_produces_config_validation() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   persistence:
     type: tikv
     endpoints:
@@ -135,6 +147,9 @@ fn routes_as_map_produces_routing_error() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   default:
     - target::dummy_dispatch:
@@ -151,6 +166,9 @@ routes:
 #[test]
 fn unknown_server_field_is_rejected() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 server:
   host: "0.0.0.0"
   port: 8080
@@ -170,6 +188,8 @@ routes:
 fn unknown_worker_server_field_is_rejected() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   worker_server:
     host: "0.0.0.0"
     portt: 9001
@@ -188,6 +208,8 @@ routes:
 fn zero_sweep_interval_is_rejected() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   sweep_interval_secs: 0.0
 routes:
   - default: []
@@ -204,6 +226,8 @@ routes:
 fn negative_duration_is_rejected() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   internal_poll_timeout_secs: -1.0
 routes:
   - default: []
@@ -219,6 +243,9 @@ routes:
 #[test]
 fn zero_poll_timeout_is_rejected() {
     let config = r#"
+bits:
+  site: tst
+  env: dev
 server:
   poll_timeout_secs: 0.0
 routes:
@@ -236,6 +263,8 @@ routes:
 fn persist_after_without_persistence_succeeds() {
     let config = r#"
 bits:
+  site: tst
+  env: dev
   persist_after_secs: 5.0
 routes:
   - default:

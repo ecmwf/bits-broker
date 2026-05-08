@@ -49,6 +49,9 @@ def unique_name(prefix: str) -> str:
 def target_config(target_type: str) -> str:
     """Minimal bits YAML config with a single named target and one route."""
     return f"""
+bits:
+  site: tst
+  env: dev
 targets:
   t:
     type: {target_type}
@@ -61,6 +64,9 @@ routes:
 def check_target_config(check_type: str, target_type: str) -> str:
     """Config with a named check + target in sequence."""
     return f"""
+bits:
+  site: tst
+  env: dev
 checks:
   gate:
     type: {check_type}
@@ -233,6 +239,9 @@ class TestCheckActionEndToEnd:
         register_action(check_name, AlwaysReject)
 
         config = f"""
+bits:
+  site: tst
+  env: dev
 checks:
   gate:
     type: {check_name}
@@ -313,6 +322,9 @@ class TestTransformActionEndToEnd:
         register_action(target_name, CaptureTarget)
 
         config = f"""
+bits:
+  site: tst
+  env: dev
 transforms:
   adder:
     type: {transform_name}
@@ -360,6 +372,9 @@ routes:
         register_action(target_name, MetaTarget)
 
         config = f"""
+bits:
+  site: tst
+  env: dev
 transforms:
   tagger:
     type: {transform_name}
@@ -389,6 +404,9 @@ routes:
         register_action(transform_name, AlwaysRejectTransform)
 
         config = f"""
+bits:
+  site: tst
+  env: dev
 transforms:
   blocker:
     type: {transform_name}
@@ -557,6 +575,9 @@ class TestConfigKwargs:
         register_action(target_name, ConfiguredTarget)
 
         config = f"""
+bits:
+  site: tst
+  env: dev
 targets:
   t:
     type: {target_name}
@@ -600,6 +621,9 @@ routes:
         register_action(target_name, OkTarget)
 
         config = f"""
+bits:
+  site: tst
+  env: dev
 checks:
   gate:
     type: {check_name}

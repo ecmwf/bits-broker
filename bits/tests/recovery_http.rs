@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use bits::db::{PersistenceStore, memory::MemoryStore};
 use common::recovery::{
-    LeaseWriteGateStore, TargetBehavior, insert_job_record, single_target_switch,
-    start_broker_server, test_client, wait_for_owner,
+    LeaseWriteGateStore, TargetBehavior, broker_identity, insert_job_record, new_recovery_job_id,
+    single_target_switch, start_broker_server, test_client, wait_for_owner,
 };
 use serde_json::json;
 
@@ -44,8 +44,10 @@ async fn wrong_broker_reconnect_proxies_success_result() {
     // Simulate sticky-session drift: a client reconnects to the wrong broker,
     // which should proxy the successful response from the live owner.
     let store = shared_store().await;
+    let owner_id = broker_identity("tst", "htt", 10);
+    let standby_id = broker_identity("tst", "htt", 11);
     let owner = start_broker_server(
-        "broker-a-success",
+        owner_id,
         single_target_switch(TargetBehavior::Success {
             delay: Duration::from_millis(120),
             content_type: "application/json".into(),
@@ -58,7 +60,7 @@ async fn wrong_broker_reconnect_proxies_success_result() {
     )
     .await;
     let standby = start_broker_server(
-        "broker-b-success",
+        standby_id,
         single_target_switch(TargetBehavior::Never),
         None,
         Some(Arc::clone(&store)),
@@ -83,13 +85,7 @@ async fn wrong_broker_reconnect_proxies_success_result() {
         .unwrap()
         .to_string();
     let job_id = location.trim_start_matches("/job/");
-    wait_for_owner(
-        &store,
-        job_id,
-        "broker-a-success",
-        Duration::from_millis(250),
-    )
-    .await;
+    wait_for_owner(&store, job_id, owner_id, Duration::from_millis(250)).await;
 
     let proxied = poll_wrong_broker_until_terminal(&client, &standby, job_id).await;
     assert_eq!(proxied.status(), reqwest::StatusCode::OK);
@@ -109,8 +105,10 @@ async fn wrong_broker_reconnect_proxies_redirect_result() {
     // Wrong-broker reconnects should also preserve terminal redirects produced
     // by the live owner.
     let store = shared_store().await;
+    let owner_id = broker_identity("tst", "htt", 12);
+    let standby_id = broker_identity("tst", "htt", 13);
     let owner = start_broker_server(
-        "broker-a-redirect",
+        owner_id,
         single_target_switch(TargetBehavior::Redirect {
             delay: Duration::from_millis(120),
             location: "https://example.test/download".into(),
@@ -123,7 +121,7 @@ async fn wrong_broker_reconnect_proxies_redirect_result() {
     )
     .await;
     let standby = start_broker_server(
-        "broker-b-redirect",
+        standby_id,
         single_target_switch(TargetBehavior::Never),
         None,
         Some(Arc::clone(&store)),
@@ -166,8 +164,10 @@ async fn sticky_session_failure_reclaims_after_owner_lease_expires() {
     let lease_flag = gated.lease_flag();
     let store = gated.clone() as Arc<dyn PersistenceStore>;
 
+    let owner_id = broker_identity("tst", "htt", 14);
+    let standby_id = broker_identity("tst", "htt", 15);
     let owner = start_broker_server(
-        "broker-a-reclaim",
+        owner_id,
         single_target_switch(TargetBehavior::Success {
             delay: Duration::from_millis(300),
             content_type: "application/json".into(),
@@ -180,7 +180,7 @@ async fn sticky_session_failure_reclaims_after_owner_lease_expires() {
     )
     .await;
     let standby = start_broker_server(
-        "broker-b-reclaim",
+        standby_id,
         single_target_switch(TargetBehavior::Success {
             delay: Duration::from_millis(30),
             content_type: "application/json".into(),
@@ -210,13 +210,7 @@ async fn sticky_session_failure_reclaims_after_owner_lease_expires() {
         .to_string();
     let job_id = location.trim_start_matches("/job/").to_string();
 
-    wait_for_owner(
-        &store,
-        &job_id,
-        "broker-a-reclaim",
-        Duration::from_millis(250),
-    )
-    .await;
+    wait_for_owner(&store, &job_id, owner_id, Duration::from_millis(250)).await;
     lease_flag.store(false, Ordering::Relaxed);
     tokio::time::sleep(Duration::from_millis(180)).await;
 
@@ -232,7 +226,7 @@ async fn sticky_session_failure_returns_gone_when_no_durable_record_exists() {
     // durable record has already disappeared, the HTTP surface should return 410.
     let store = shared_store().await;
     let standby = start_broker_server(
-        "broker-b-gone",
+        broker_identity("tst", "htt", 16),
         single_target_switch(TargetBehavior::Never),
         None,
         Some(Arc::clone(&store)),
@@ -241,8 +235,8 @@ async fn sticky_session_failure_returns_gone_when_no_durable_record_exists() {
     )
     .await;
 
-    let owner_id = "broker-a-missing";
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "htt", 1);
+    let job_id = new_recovery_job_id("tst", "htt", 1);
     insert_job_record(&store, &job_id, owner_id, json!({"kind": "lost"})).await;
     store.delete_job(&job_id).await.unwrap();
     store

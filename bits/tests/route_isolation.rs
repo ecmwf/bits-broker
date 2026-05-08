@@ -15,6 +15,9 @@ async fn transform_mutation_in_rejected_route_does_not_leak_to_next_route() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - route_a:
       - transform::dummy_cost:

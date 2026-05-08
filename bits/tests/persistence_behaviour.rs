@@ -19,6 +19,7 @@ use bits::db::{
 };
 use bits::routing::{Route, switch::Switch};
 use bits::{Bits, Job, JobResult, PersistentJobRecord, PollOutcome};
+use common::recovery::{broker_identity, new_recovery_job_id};
 use serde_json::json;
 use tokio::net::TcpListener;
 
@@ -304,7 +305,10 @@ async fn threshold_persistence_and_cleanup() {
     );
 
     let handle = bits
-        .submit(Job::new(json!({"kind": "cleanup"})))
+        .submit(Job::new_with_id(
+            new_recovery_job_id("tst", "per", 30),
+            json!({"kind": "cleanup"}),
+        ))
         .expect_accepted("submit should not be rejected");
     wait_for_owner(&store, &handle.id, "cleanup-broker", 300).await;
 
@@ -326,7 +330,10 @@ async fn fast_jobs_do_not_persist() {
     );
 
     let handle = bits
-        .submit(Job::new(json!({"kind": "fast"})))
+        .submit(Job::new_with_id(
+            new_recovery_job_id("tst", "per", 31),
+            json!({"kind": "fast"}),
+        ))
         .expect_accepted("submit should not be rejected");
     let _ = bits.poll(&handle.id, Some(Duration::from_secs(1))).await;
 
@@ -340,11 +347,11 @@ async fn active_lease_prevents_reclaim_when_proxy_fails() {
     // even if proxying to owner fails (stub returns 500), reclaim must NOT happen
     // while owner lease is still active. Ownership should remain with the original owner.
     let store = Arc::new(MemoryStore::new());
-    let owner_id = "owner-live";
     let owner_url = start_owner_stub(StatusCode::INTERNAL_SERVER_ERROR).await;
-    let claimant = test_bits("claimant-a", 40, None, Some(Arc::clone(&store)));
+    let claimant = test_bits("tst-per-20", 40, None, Some(Arc::clone(&store)));
 
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "per", 2);
+    let job_id = new_recovery_job_id("tst", "per", 2);
     store
         .upsert_job(PersistentJobRecord {
             job_id: job_id.clone(),
@@ -377,11 +384,11 @@ async fn expired_lease_enables_reclaim() {
     // with an expired owner lease, a different broker is allowed to claim durable ownership
     // and continue processing from restored job state.
     let store = Arc::new(MemoryStore::new());
-    let owner_id = "owner-expired";
-    let claimant_id = "claimant-b";
+    let claimant_id = broker_identity("tst", "per", 21);
     let claimant = test_bits(claimant_id, 80, None, Some(Arc::clone(&store)));
 
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let owner_id = broker_identity("tst", "per", 3);
+    let job_id = new_recovery_job_id("tst", "per", 3);
     store
         .upsert_job(PersistentJobRecord {
             job_id: job_id.clone(),
@@ -419,8 +426,8 @@ async fn expired_lease_without_record_is_job_lost() {
     // when owner lease is expired and no durable record exists for the job id,
     // poll must return `JobLost` (not perpetual pending).
     let store = Arc::new(MemoryStore::new());
-    let owner_id = "owner-missing";
-    let claimant = test_bits("claimant-c", 10, None, Some(Arc::clone(&store)));
+    let owner_id = broker_identity("tst", "per", 4);
+    let claimant = test_bits("tst-per-22", 10, None, Some(Arc::clone(&store)));
 
     store
         .upsert_broker_lease(
@@ -432,7 +439,7 @@ async fn expired_lease_without_record_is_job_lost() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
 
-    let job_id = format!("{owner_id}~{}", uuid::Uuid::new_v4());
+    let job_id = new_recovery_job_id("tst", "per", 4);
     let outcome = claimant
         .poll(&job_id, Some(Duration::from_millis(30)))
         .await;
@@ -447,6 +454,8 @@ async fn config_rejects_invalid_threshold_ordering() {
 server:
   poll_timeout_secs: 1.0
 bits:
+  site: tst
+  env: per
   persist_after_secs: 0.5
   persistence:
     type: nats
@@ -474,7 +483,7 @@ async fn backend_claim_errors_backoff_within_single_poll() {
     let router = Switch::new(vec![Route::new("default".into(), vec![])]);
     let bits = Bits::from_router_for_tests(
         router,
-        "claimer-backoff".to_string(),
+        "tst-tst-20".to_string(),
         "http://127.0.0.1:9/job".to_string(),
         Duration::from_millis(30),
         None,
@@ -482,8 +491,7 @@ async fn backend_claim_errors_backoff_within_single_poll() {
         Duration::from_secs(5),
     );
 
-    let owner = "expired-owner";
-    let job_id = format!("{owner}~{}", uuid::Uuid::new_v4());
+    let job_id = new_recovery_job_id("tst", "per", 1);
     let started = Instant::now();
     let outcome = bits.poll(&job_id, Some(Duration::from_millis(220))).await;
     let elapsed = started.elapsed();
@@ -515,7 +523,7 @@ async fn upsert_failure_does_not_set_persisted_flag() {
     )]);
     let bits = Bits::from_router_for_tests(
         router,
-        "upsert-failing".to_string(),
+        "tst-tst-21".to_string(),
         "http://127.0.0.1:9/job".to_string(),
         Duration::from_millis(30),
         Some(Duration::from_millis(20)),
@@ -524,7 +532,10 @@ async fn upsert_failure_does_not_set_persisted_flag() {
     );
 
     let handle = bits
-        .submit(Job::new(json!({"kind": "upsert-failure"})))
+        .submit(Job::new_with_id(
+            new_recovery_job_id("tst", "per", 32),
+            json!({"kind": "upsert-failure"}),
+        ))
         .expect_accepted("submit should not be rejected");
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(matches!(
@@ -545,7 +556,7 @@ async fn delete_failure_leaves_record_for_reclaim() {
     )]);
     let bits = Bits::from_router_for_tests(
         router,
-        "delete-failing".to_string(),
+        "tst-tst-22".to_string(),
         "http://127.0.0.1:9/job".to_string(),
         Duration::from_millis(30),
         Some(Duration::from_millis(20)),
@@ -554,15 +565,18 @@ async fn delete_failure_leaves_record_for_reclaim() {
     );
 
     let handle = bits
-        .submit(Job::new(json!({"kind": "delete-failure"})))
+        .submit(Job::new_with_id(
+            new_recovery_job_id("tst", "per", 33),
+            json!({"kind": "delete-failure"}),
+        ))
         .expect_accepted("submit should not be rejected");
-    wait_for_owner(&inner, &handle.id, "delete-failing", 300).await;
+    wait_for_owner(&inner, &handle.id, "tst-tst-22", 300).await;
     tokio::time::sleep(Duration::from_millis(120)).await;
     let _ = bits.poll(&handle.id, Some(Duration::from_secs(1))).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
         observed_owner(&inner, &handle.id).await.as_deref(),
-        Some("delete-failing")
+        Some("tst-tst-22")
     );
 }
 
@@ -571,6 +585,8 @@ async fn delete_failure_leaves_record_for_reclaim() {
 async fn config_rejects_tiny_broker_lease_ttl() {
     let cfg = r#"
 bits:
+  site: tst
+  env: per
   persistence:
     type: tikv
     endpoints:
@@ -601,7 +617,10 @@ async fn durable_record_survives_until_poll_consumes_result() {
     );
 
     let handle = bits
-        .submit(Job::new(json!({"kind": "durable-until-consume"})))
+        .submit(Job::new_with_id(
+            new_recovery_job_id("tst", "per", 34),
+            json!({"kind": "durable-until-consume"}),
+        ))
         .expect_accepted("submit should not be rejected");
     wait_for_owner(&store, &handle.id, "poll-consume-cleanup", 300).await;
     tokio::time::sleep(Duration::from_millis(200)).await;

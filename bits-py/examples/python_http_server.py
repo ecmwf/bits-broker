@@ -16,6 +16,9 @@ BIND_PORT = 8080
 POLL_TIMEOUT_SECS = 25.0
 
 CONFIG = """
+bits:
+  site: tst
+  env: dev
 routes:
   default:
     - target::http:

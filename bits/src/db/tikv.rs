@@ -18,6 +18,7 @@ fn is_write_conflict(err: &tikv_client::Error) -> bool {
 
 const JOB_PREFIX: &str = "jobs/";
 const BROKER_PREFIX: &str = "brokers/";
+const BROKER_SLOT_COUNTER_PREFIX: &str = "counters/broker_slot/";
 
 pub struct TiKvStore {
     endpoints: Vec<String>,
@@ -54,12 +55,26 @@ impl TiKvStore {
             .await
     }
 
-    fn job_key(job_id: &str) -> String {
-        format!("{JOB_PREFIX}{job_id}")
+    fn job_key(job_id: &str) -> Result<String, DbError> {
+        let decoded = crate::polytope_id::decode(job_id)
+            .map_err(|err| DbError::Backend(format!("invalid public job ID {job_id:?}: {err}")))?;
+        Ok(format!(
+            "{JOB_PREFIX}{}/{}/{}/{}",
+            decoded.site, decoded.env, decoded.broker_slot, job_id
+        ))
+    }
+
+    #[cfg(test)]
+    fn job_key_for_tests(job_id: &str) -> Result<String, DbError> {
+        Self::job_key(job_id)
     }
 
     fn broker_key(broker_id: &str) -> String {
         format!("{BROKER_PREFIX}{broker_id}")
+    }
+
+    fn broker_slot_counter_key(site_tag: &str, env_tag: &str) -> String {
+        format!("{BROKER_SLOT_COUNTER_PREFIX}{site_tag}/{env_tag}")
     }
 
     fn serialize<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, DbError> {
@@ -78,7 +93,7 @@ impl TiKvStore {
         expected_owner_broker_id: &str,
         claimant_broker_id: &str,
     ) -> Result<ClaimResult, DbError> {
-        let key = Self::job_key(job_id);
+        let key = Self::job_key(job_id)?;
         let client = self.client().await?;
 
         for _ in 0..2 {
@@ -133,12 +148,62 @@ impl TiKvStore {
             "claim conflict for job '{job_id}'"
         )))
     }
+
+    pub(crate) async fn allocate_tikv_broker_slot(
+        &self,
+        site_tag: &str,
+        env_tag: &str,
+    ) -> Result<u16, DbError> {
+        let key = Self::broker_slot_counter_key(site_tag, env_tag);
+        let client = self.client().await?;
+
+        loop {
+            let mut txn = client
+                .begin_optimistic()
+                .await
+                .map_err(|err| DbError::Backend(format!("begin txn failed: {err}")))?;
+            let current = txn.get(key.clone()).await.map_err(|err| {
+                DbError::Backend(format!("get broker slot counter failed: {err}"))
+            })?;
+            let next_slot = current.map(Self::deserialize).transpose()?.unwrap_or(0_u32);
+
+            if next_slot > u32::from(u16::MAX) {
+                let _ = txn.rollback().await;
+                return Err(DbError::SlotExhausted {
+                    site: site_tag.to_string(),
+                    env: env_tag.to_string(),
+                    ceiling: u16::MAX,
+                });
+            }
+
+            let allocated_slot = u16::try_from(next_slot).map_err(|err| {
+                DbError::Backend(format!("broker slot conversion failed unexpectedly: {err}"))
+            })?;
+            let next_value = next_slot + 1;
+            txn.put(key.clone(), Self::serialize(&next_value)?)
+                .await
+                .map_err(|err| {
+                    DbError::Backend(format!("put broker slot counter failed: {err}"))
+                })?;
+            match txn.commit().await {
+                Ok(_) => return Ok(allocated_slot),
+                Err(err) if is_write_conflict(&err) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(err) => {
+                    return Err(DbError::Backend(format!(
+                        "commit broker slot counter failed: {err}"
+                    )));
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl JobStore for TiKvStore {
     async fn upsert_job(&self, record: PersistentJobRecord) -> Result<(), DbError> {
-        let key = Self::job_key(&record.job_id);
+        let key = Self::job_key(&record.job_id)?;
         let client = self.client().await?;
         let mut txn = client
             .begin_optimistic()
@@ -154,7 +219,7 @@ impl JobStore for TiKvStore {
     }
 
     async fn delete_job(&self, job_id: &str) -> Result<(), DbError> {
-        let key = Self::job_key(job_id);
+        let key = Self::job_key(job_id)?;
         let client = self.client().await?;
         let mut txn = client
             .begin_optimistic()
@@ -245,5 +310,84 @@ impl BrokerLeaseStore for TiKvStore {
             .await
             .map_err(|err| DbError::Backend(format!("commit failed: {err}")))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    fn deterministic_job_id(site: &str, env: &str, broker_slot: u16) -> String {
+        let timestamp = chrono::DateTime::parse_from_rfc3339(crate::polytope_id::CUSTOM_EPOCH)
+            .unwrap()
+            .with_timezone(&Utc);
+        crate::polytope_id::encode_with_fixed_random(
+            site,
+            env,
+            broker_slot,
+            timestamp,
+            [0x01, 0x23, 0x45, 0x67, 0x89],
+        )
+        .unwrap()
+    }
+
+    fn decoded_job_path(job_id: &str) -> String {
+        let decoded = crate::polytope_id::decode(job_id).unwrap();
+        format!(
+            "jobs/{}/{}/{}/{}",
+            decoded.site, decoded.env, decoded.broker_slot, job_id
+        )
+    }
+
+    #[test]
+    fn tikv_job_key_uses_decoded_path() {
+        let job_id = deterministic_job_id("bol", "dev", 42);
+        let expected_path = decoded_job_path(&job_id);
+        let current_path = TiKvStore::job_key_for_tests(&job_id).unwrap();
+        let legacy_fallback_path = format!("jobs/{job_id}");
+
+        assert_eq!(
+            current_path, expected_path,
+            "TiKV job records should be stored under decoded path {expected_path:?}"
+        );
+        assert_ne!(
+            current_path, legacy_fallback_path,
+            "TiKV job records must not fall back to the whole public ID path"
+        );
+    }
+
+    #[test]
+    fn tikv_job_key_rejects_invalid_public_id() {
+        let malformed_id = "broker-legacy~1";
+        assert!(
+            crate::polytope_id::decode(malformed_id).is_err(),
+            "test fixture must be malformed"
+        );
+
+        let current_path = TiKvStore::job_key_for_tests(malformed_id);
+
+        assert!(
+            current_path.is_err(),
+            "malformed public job IDs should be rejected at the TiKV persistence boundary"
+        );
+    }
+
+    #[test]
+    fn tikv_job_key_delete_uses_decoded_path() {
+        let job_id = deterministic_job_id("bol", "dev", 42);
+        let expected_path = decoded_job_path(&job_id);
+        let delete_path = TiKvStore::job_key_for_tests(&job_id).unwrap();
+        let legacy_fallback_path = format!("jobs/{job_id}");
+
+        assert_eq!(
+            delete_path, expected_path,
+            "delete_job should delete the same TiKV path derived from decoded (site, env, slot, public_id)"
+        );
+        assert_ne!(
+            delete_path, legacy_fallback_path,
+            "delete_job must not delete the legacy whole-ID path"
+        );
     }
 }

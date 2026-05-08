@@ -1,52 +1,32 @@
 # Sticky Routing
 
-BITS assigns every job an ID that encodes the owning broker:
-
-```
-{broker_id_prefix}-{instance_uuid}~{job_uuid}
-```
-
-For example: `api-broker-a1b2c3d4~f7e6d5c4-b3a2-...`
-
-The broker prefix is everything before the first `~`. Any broker that receives a poll request
-can determine the intended owner by splitting the job ID on `~`, without consulting any routing
-table or database.
+BITS request IDs are opaque public strings. Internally, BITS can decode a request ID to obtain a site, environment, and broker slot. Those fields form an owner hint, not a user-facing routing contract.
 
 ## Why sticky ingress matters
 
-On poll, a broker first checks its **local in-memory state**. If the job is found there, the
-result is returned immediately with no database access and no network call. If the job is not found
-locally but the parsed owner prefix names a different broker, the request must be proxied or
-the job must be recovered.
+On poll, a broker first checks its local in-memory state. If the job is found, the result is returned immediately with no persistence lookup and no peer call.
 
-Configuring your load balancer to apply session affinity (for example, consistent hashing on
-the `Authorization` header) ensures that most polls land on the owning broker and take the fast
-path. Without affinity, every poll may incur an internal proxy call.
+Configure your load balancer to apply session affinity using a stable client property such as the `Authorization` header, client IP, or tenant header. This makes most poll requests return through the local fast path.
+
+Without affinity, a poll may land on a non-owner broker. That broker decodes the request ID for an owner hint, checks broker leases, and either proxies the poll or starts recovery.
 
 ## Internal proxy
 
-When a poll misses locally and the job ID names another broker, BITS looks up that broker's
-registered endpoint from the [broker lease table](persistence-broker-leases.md) and proxies the
-poll directly without involving the client. The client receives the same response it would
-have received had it contacted the owner directly.
+When a poll misses locally, BITS derives the hinted broker ID as `{site}-{env}-{slot}` and looks up that broker's lease. If the lease is active, BITS proxies the poll to the lease's `internal_poll_base_url` and returns the translated result to the client.
 
-Proxy failure (network error, timeout) while the owner's lease is still active returns
-`Pending` to the client. BITS does **not** attempt to claim the job while a valid lease exists.
+Proxy failure while the hinted owner's lease is still active returns `Pending`. BITS does not claim the job while a valid lease exists.
 
-See [Poll Proxying and Recovery](persistence-poll-recovery.md) for the full decision sequence.
+If the hinted owner's lease is missing or expired, BITS reads the durable job record. The record's `broker_id` is authoritative: after a previous recovery it may name a different owner than the request ID hint. See [Poll Proxying and Recovery](persistence-poll-recovery.md).
 
 ## Configuration
 
-Set `broker_id_prefix` in your config to a stable, human-readable string. Each process instance
-appends its own UUID at startup, so replicas of the same service share a common `broker_id_prefix`
-but have distinct per-process identities:
+Set compact deployment tags and a broker-to-broker poll endpoint:
 
 ```yaml
 bits:
-  broker_id_prefix: api-broker      # stable prefix; instance ID becomes api-broker-{uuid}
+  site: bol
+  env: dev
   internal_poll_endpoint: "http://bits-0.bits-headless.default.svc.cluster.local:8080/job"
 ```
 
-`internal_poll_endpoint` is the URL at which **other brokers** can reach this instance's poll
-endpoint. It must be reachable from all peer brokers. Each job ID appended to this base URL
-forms the proxy target: `{internal_poll_endpoint}/{job_id}`.
+`site` and `env` must be 1-3 lowercase letters or digits. `internal_poll_endpoint` is the base URL that peer brokers use for proxied polls; appending `/{job_id}` forms the target URL.

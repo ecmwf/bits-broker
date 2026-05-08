@@ -74,16 +74,16 @@ The server returns a pending redirect with the job ID:
 
 ```http
 HTTP/1.1 303 See Other
-Location: /job/broker-1-abc123~def456
+Location: /job/0217scypcc00000000000000
 Retry-After: 0
 ```
 
-The client should follow the `Location` to reconnect and continue polling.
+The client should follow the `Location` to reconnect and continue polling. Treat the job ID as an opaque string.
 
 ## Reconnecting to a job
 
 ```http
-GET /job/broker-1-abc123~def456 HTTP/1.1
+GET /job/0217scypcc00000000000000 HTTP/1.1
 Host: bits-broker:8080
 ```
 

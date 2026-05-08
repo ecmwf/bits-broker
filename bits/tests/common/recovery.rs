@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
@@ -209,17 +210,36 @@ fn wait_for_pd_ready(pd_endpoint: &str, timeout: Duration) {
     let socket = format!("{host}:{port}");
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        if std::net::TcpStream::connect_timeout(
-            &socket.parse().expect("valid PD socket address"),
-            Duration::from_secs(1),
-        )
-        .is_ok()
-        {
+        if pd_has_up_store(&socket, host) {
             return;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
     panic!("timed out waiting for TiUP playground PD endpoint {pd_endpoint}");
+}
+
+fn pd_has_up_store(socket: &str, host: &str) -> bool {
+    let Ok(addr) = socket.parse() else {
+        return false;
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+
+    let request =
+        format!("GET /pd/api/v1/stores HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+
+    response.starts_with("HTTP/1.1 200") && response.contains("\"state_name\": \"Up\"")
 }
 
 pub fn ensure_tiup_playground() -> String {
@@ -358,6 +378,14 @@ pub fn ensure_nats_server() -> String {
         data_dir: tmp,
     });
     url
+}
+
+pub fn broker_identity(site: &str, env: &str, slot: u16) -> &'static str {
+    Box::leak(format!("{site}-{env}-{slot}").into_boxed_str())
+}
+
+pub fn new_recovery_job_id(site: &str, env: &str, slot: u16) -> String {
+    bits::polytope_id::encode(site, env, slot, chrono::Utc::now()).unwrap()
 }
 
 pub fn test_client() -> reqwest::Client {

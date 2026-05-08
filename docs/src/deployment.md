@@ -14,6 +14,10 @@ server:
   port: 8080
   poll_timeout_secs: 25.0
 
+bits:
+  site: dev
+  env: loc
+
 targets:
   backend:
     type: http
@@ -53,8 +57,8 @@ graph TD
 
 Each broker needs:
 
-1. A unique `broker_id_prefix` (for example `bits-api`)
-2. Reachable `internal_poll_endpoint` for broker-to-broker communication
+1. Compact `bits.site` and `bits.env` tags for request ID generation
+2. A reachable `internal_poll_endpoint` for broker-to-broker communication
 3. Access to the shared persistence backend
 
 ## Persistence backend setup
@@ -69,7 +73,8 @@ Build BITS with the `nats` feature enabled.
 
 ```yaml
 bits:
-  broker_id_prefix: "bits-dev"
+  site: dev
+  env: loc
   internal_poll_endpoint: "http://127.0.0.1:8080/job"
   persist_after_secs: 10.0
   persistence:
@@ -94,7 +99,8 @@ Configure BITS with cluster endpoints and replication:
 
 ```yaml
 bits:
-  broker_id_prefix: "bits-prod"
+  site: bol
+  env: prd
   internal_poll_endpoint: "http://bits-0.bits-headless:8080/job"
   persist_after_secs: 10.0
   persistence:
@@ -129,7 +135,8 @@ A minimal production cluster needs:
 
 ```yaml
 bits:
-  broker_id_prefix: "bits-prod"
+  site: bol
+  env: prd
   internal_poll_endpoint: "http://bits-0.bits-headless:8080/job"
   persist_after_secs: 10.0
   persistence:
@@ -454,6 +461,8 @@ server:
   poll_timeout_secs: 30.0    # actual client long-poll timeout
 
 bits:
+  site: bol
+  env: prd
   persist_after_secs: 25.0   # persist after 25 seconds
 ```
 
@@ -488,8 +497,9 @@ server:
 # BITS broker identity and persistence
 # =============================================================================
 bits:
-  # Stable prefix for this broker set. Each instance appends a UUID.
-  broker_id_prefix: "bits-prod"
+  # Compact tags encoded into opaque request IDs.
+  site: bol
+  env: prd
 
   # Maximum total jobs tracked by this broker (queued + executing + completed).
   # Default 500000. Acts as OOM protection, not load control.
@@ -585,7 +595,7 @@ routes:
 
 Before deploying to production:
 
-- [ ] `broker_id_prefix` is set to a stable, human-readable prefix
+- [ ] `bits.site` and `bits.env` are set to 1-3 lowercase letters or digits
 - [ ] `internal_poll_endpoint` uses a broker-to-broker reachable address
 - [ ] When persistence is enabled: `persist_after_secs + 1s < server.poll_timeout_secs`
 - [ ] Load balancer uses session affinity (sticky routing)

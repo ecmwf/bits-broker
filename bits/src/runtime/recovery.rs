@@ -47,6 +47,7 @@ impl Bits {
             {
                 Ok(result) => return Ok(result),
                 Err(DbError::Conflict(message)) => return Err(DbError::Conflict(message)),
+                Err(err @ DbError::SlotExhausted { .. }) => return Err(err),
                 Err(DbError::Backend(message)) => {
                     let now = Instant::now();
                     if now >= deadline {
@@ -294,14 +295,86 @@ impl Bits {
     }
 }
 
-pub(crate) fn owner_from_job_id(job_id: &str) -> Option<&str> {
-    let (owner, _suffix) = job_id.split_once('~')?;
-    if owner.is_empty() { None } else { Some(owner) }
+pub(crate) fn decode_job_id(
+    job_id: &str,
+) -> Result<crate::polytope_id::DecodedId, crate::polytope_id::DecodeError> {
+    crate::polytope_id::decode(job_id)
+}
+
+pub(crate) fn slot_from_job_id(job_id: &str) -> Result<String, crate::polytope_id::DecodeError> {
+    let decoded = decode_job_id(job_id)?;
+    Ok(format!(
+        "{}-{}-{}",
+        decoded.site, decoded.env, decoded.broker_slot
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::polytope_id::{DecodeError, encode_with_fixed_random};
+    use chrono::{DateTime, TimeZone, Utc};
+
+    fn epoch() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(crate::polytope_id::CUSTOM_EPOCH)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn request_id_decode_returns_decoded_fields() {
+        let id = encode_with_fixed_random(
+            "bol",
+            "dev",
+            42,
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 1, 2).unwrap(),
+            [0x01, 0x23, 0x45, 0x67, 0x89],
+        )
+        .unwrap();
+
+        let decoded = decode_job_id(&id).unwrap();
+
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.site, "bol");
+        assert_eq!(decoded.env, "dev");
+        assert_eq!(
+            decoded.timestamp,
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 1, 2).unwrap()
+        );
+        assert_eq!(decoded.broker_slot, 42);
+        assert_eq!(decoded.random, [0x01, 0x23, 0x45, 0x67, 0x89]);
+    }
+
+    #[test]
+    fn request_id_decode_slot_returns_stable_broker_identity() {
+        let id = encode_with_fixed_random("bol", "dev", 42, epoch(), [0, 1, 2, 3, 4]).unwrap();
+
+        assert_eq!(slot_from_job_id(&id).unwrap(), "bol-dev-42");
+    }
+
+    #[test]
+    fn request_id_decode_rejects_legacy_owner_tilde_uuid() {
+        assert!(decode_job_id("bol-dev-42~550e8400-e29b-41d4-a716-446655440000").is_err());
+    }
+
+    #[test]
+    fn request_id_decode_rejects_malformed_crockford() {
+        let mut id = encode_with_fixed_random("bol", "dev", 42, epoch(), [0, 1, 2, 3, 4]).unwrap();
+        id.replace_range(0..1, "i");
+
+        assert!(decode_job_id(&id).is_err());
+    }
+
+    #[test]
+    fn request_id_decode_preserves_unknown_version_error() {
+        let mut id = encode_with_fixed_random("bol", "dev", 42, epoch(), [0, 1, 2, 3, 4]).unwrap();
+        id.replace_range(0..2, "02");
+
+        assert_eq!(
+            decode_job_id(&id),
+            Err(DecodeError::UnknownVersion { version: 2 })
+        );
+    }
 
     #[test]
     fn lease_stays_active_briefly_past_expiry() {

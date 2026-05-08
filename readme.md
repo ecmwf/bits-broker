@@ -41,6 +41,10 @@
 Define your routing policy in YAML:
 
 ```yaml
+bits:
+  site: dev
+  env: loc
+
 checks:
   is_operational:
     type: match
@@ -129,6 +133,10 @@ register_action("has_role_py", HasRole)
 register_action("echo", EchoTarget)
 
 config = """
+bits:
+  site: dev
+  env: loc
+
 checks:
   gate:
     type: has_role_py

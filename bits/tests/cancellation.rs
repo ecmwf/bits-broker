@@ -12,6 +12,9 @@ async fn cancel_stops_job_before_target() {
 
     // The check runs for 100ms, giving us a window to cancel before the target is reached.
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - check::dummy_delay:
@@ -43,6 +46,9 @@ async fn cancel_after_completion_has_no_effect() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -78,6 +84,9 @@ async fn double_cancel_does_not_panic() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - check::dummy_delay:
@@ -104,6 +113,9 @@ async fn cancel_nonexistent_job_does_not_panic() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:

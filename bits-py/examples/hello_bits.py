@@ -21,6 +21,9 @@ class Echo(TargetAction):
 register_action("echo", Echo)
 
 CONFIG = """
+bits:
+  site: tst
+  env: dev
 routes:
   default:
     - target::echo:

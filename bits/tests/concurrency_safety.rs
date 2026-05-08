@@ -8,6 +8,8 @@ use bits::{Bits, Job, PollOutcome};
 fn fast_sweep_config() -> &'static str {
     r#"
 bits:
+  site: tst
+  env: dev
   sweep_interval_secs: 0.05
 routes:
   - default:
@@ -20,6 +22,8 @@ routes:
 fn slow_sweep_config() -> &'static str {
     r#"
 bits:
+  site: tst
+  env: dev
   sweep_interval_secs: 30.0
 routes:
   - default:
@@ -108,6 +112,8 @@ async fn sweeper_removes_completed_job_after_reconnect_window() {
     // Short reconnect buffer (100ms) + fast sweep (50ms) keeps the test fast.
     let config = r#"
 bits:
+  site: tst
+  env: dev
   sweep_interval_secs: 0.05
   reconnect_buffer_secs: 0.1
 routes:
@@ -137,6 +143,9 @@ async fn panicking_action_produces_failed_result_and_broker_continues() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - panicking:
       - target::panicking: ~

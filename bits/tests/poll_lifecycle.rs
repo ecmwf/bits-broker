@@ -7,6 +7,9 @@ use bits::{Bits, Job, JobResult, PollOutcome};
 
 fn default_config() -> &'static str {
     r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:
@@ -17,6 +20,9 @@ routes:
 
 fn slow_config() -> &'static str {
     r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - target::dummy_dispatch:

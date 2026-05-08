@@ -112,6 +112,9 @@ async fn pipeline_check_transform_target() {
     let _ = common::TargetDummyDelay::new(0);
 
     let config = r#"
+bits:
+  site: tst
+  env: dev
 routes:
   - default:
       - check::dummy_delay:

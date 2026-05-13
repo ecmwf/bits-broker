@@ -545,7 +545,7 @@ impl Bits {
     }
 
     fn new_job_id(&self) -> String {
-        crate::polytope_id::encode(&self.site, &self.env, self.broker_slot, chrono::Utc::now())
+        crate::request_id::encode(&self.site, &self.env, self.broker_slot, chrono::Utc::now())
             .expect("runtime site/env/slot should encode as a request ID")
     }
 }
@@ -628,7 +628,7 @@ mod route_handle_tests {
     use super::*;
     use crate::db::{BrokerLeaseStore, PersistenceStore, memory::MemoryStore};
     use crate::job::Job;
-    use crate::polytope_id;
+    use crate::request_id;
 
     fn bits_for_request_id_tests(
         broker_id: &str,
@@ -672,7 +672,7 @@ mod route_handle_tests {
     #[tokio::test]
     async fn request_id_runtime_submit_with_legacy_tilde_id_generates_new_format_id() {
         let bits = bits_for_request_id_tests("bol-dev-42", None);
-        let valid_id = polytope_id::encode("bol", "dev", 42, chrono::Utc::now()).unwrap();
+        let valid_id = request_id::encode("bol", "dev", 42, chrono::Utc::now()).unwrap();
 
         let preserved = bits
             .submit(Job::new_with_id(
@@ -693,7 +693,7 @@ mod route_handle_tests {
             "bol-dev-42~550e8400-e29b-41d4-a716-446655440000"
         );
         assert!(!replaced.id.contains('~'));
-        assert!(polytope_id::decode(&replaced.id).is_ok());
+        assert!(request_id::decode(&replaced.id).is_ok());
     }
 
     #[tokio::test]
@@ -710,7 +710,7 @@ targets:
         let bits = Bits::from_config(config).expect("should build");
         let route_val = serde_json::json!([{"my_route": ["target::my_target"]}]);
         let handle = bits.add_route("my_route", &route_val).expect("add_route");
-        let valid_id = polytope_id::encode(
+        let valid_id = request_id::encode(
             handle.site(),
             handle.env(),
             handle.broker_slot(),
@@ -743,7 +743,7 @@ targets:
             )
         );
         assert!(!replaced.id.contains('~'));
-        assert!(polytope_id::decode(&replaced.id).is_ok());
+        assert!(request_id::decode(&replaced.id).is_ok());
     }
 
     #[tokio::test]

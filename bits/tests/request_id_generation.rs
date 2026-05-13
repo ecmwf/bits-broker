@@ -2,7 +2,7 @@ mod common;
 
 use std::collections::HashSet;
 
-use bits::polytope_id::{self, DecodedId};
+use bits::request_id::{self, DecodedId};
 use bits::{Bits, Job};
 use chrono::{DateTime, Duration, Utc};
 
@@ -36,7 +36,7 @@ fn assert_lowercase_crockford_id(id: &str) {
 }
 
 fn custom_epoch() -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(polytope_id::CUSTOM_EPOCH)
+    DateTime::parse_from_rfc3339(request_id::CUSTOM_EPOCH)
         .expect("custom epoch should parse")
         .with_timezone(&Utc)
 }
@@ -50,8 +50,8 @@ fn decode_and_assert_generated_id(
     latest: DateTime<Utc>,
 ) -> DecodedId {
     assert_lowercase_crockford_id(id);
-    let decoded = polytope_id::decode(id)
-        .unwrap_or_else(|err| panic!("request ID should decode as a polytope ID: {id}: {err}"));
+    let decoded = request_id::decode(id)
+        .unwrap_or_else(|err| panic!("request ID should decode successfully: {id}: {err}"));
 
     assert_eq!(decoded.site, site);
     assert_eq!(decoded.env, env);

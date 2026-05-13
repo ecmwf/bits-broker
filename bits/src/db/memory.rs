@@ -8,7 +8,7 @@ use chrono::Utc;
 use crate::db::{
     BrokerLeaseRecord, BrokerLeaseStore, ClaimResult, DbError, JobStore, PersistentJobRecord,
 };
-use crate::polytope_id;
+use crate::request_id;
 
 pub struct MemoryStore {
     jobs: Mutex<HashMap<String, PersistentJobRecord>>,
@@ -33,7 +33,7 @@ impl Default for MemoryStore {
 }
 
 fn memory_job_key(job_id: &str) -> Result<String, DbError> {
-    let decoded = polytope_id::decode(job_id)
+    let decoded = request_id::decode(job_id)
         .map_err(|err| DbError::Backend(format!("invalid public job ID {job_id:?}: {err}")))?;
     Ok(format!(
         "{}/{}/{}/{}",
@@ -184,10 +184,10 @@ mod tests {
     }
 
     fn deterministic_job_id(site: &str, env: &str, broker_slot: u16) -> String {
-        let timestamp = chrono::DateTime::parse_from_rfc3339(crate::polytope_id::CUSTOM_EPOCH)
+        let timestamp = chrono::DateTime::parse_from_rfc3339(crate::request_id::CUSTOM_EPOCH)
             .unwrap()
             .with_timezone(&Utc);
-        crate::polytope_id::encode_with_fixed_random(
+        crate::request_id::encode_with_fixed_random(
             site,
             env,
             broker_slot,
@@ -198,7 +198,7 @@ mod tests {
     }
 
     fn decoded_memory_job_key(job_id: &str) -> String {
-        let decoded = crate::polytope_id::decode(job_id).unwrap();
+        let decoded = crate::request_id::decode(job_id).unwrap();
         format!(
             "{}/{}/{}/{}",
             decoded.site, decoded.env, decoded.broker_slot, job_id

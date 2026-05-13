@@ -297,11 +297,11 @@ impl Bits {
 
 pub(crate) fn decode_job_id(
     job_id: &str,
-) -> Result<crate::polytope_id::DecodedId, crate::polytope_id::DecodeError> {
-    crate::polytope_id::decode(job_id)
+) -> Result<crate::request_id::DecodedId, crate::request_id::DecodeError> {
+    crate::request_id::decode(job_id)
 }
 
-pub(crate) fn slot_from_job_id(job_id: &str) -> Result<String, crate::polytope_id::DecodeError> {
+pub(crate) fn slot_from_job_id(job_id: &str) -> Result<String, crate::request_id::DecodeError> {
     let decoded = decode_job_id(job_id)?;
     Ok(format!(
         "{}-{}-{}",
@@ -312,11 +312,11 @@ pub(crate) fn slot_from_job_id(job_id: &str) -> Result<String, crate::polytope_i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::polytope_id::{DecodeError, encode_with_fixed_random};
+    use crate::request_id::{DecodeError, encode_with_fixed_random};
     use chrono::{DateTime, TimeZone, Utc};
 
     fn epoch() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(crate::polytope_id::CUSTOM_EPOCH)
+        DateTime::parse_from_rfc3339(crate::request_id::CUSTOM_EPOCH)
             .unwrap()
             .with_timezone(&Utc)
     }

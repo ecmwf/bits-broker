@@ -290,10 +290,11 @@ mod tests {
 
     #[test]
     fn roundtrip_known_vector() {
+        let timestamp = Utc.with_ymd_and_hms(2025, 1, 2, 3, 4, 5).unwrap();
         let id =
-            encode_with_fixed_random("bol", "dev", 42, epoch(), [0x01, 0x23, 0x45, 0x67, 0x89])
+            encode_with_fixed_random("bol", "dev", 42, timestamp, [0x01, 0x23, 0x45, 0x67, 0x89])
                 .unwrap();
-        assert_eq!(id, "017sg4fag00000001a04hmasw9");
+        assert_eq!(id, "017sg4fag005yaa01a04hmasw9");
 
         let decoded = decode(&id).unwrap();
         assert_eq!(
@@ -302,7 +303,7 @@ mod tests {
                 version: 1,
                 site: "bol".to_string(),
                 env: "dev".to_string(),
-                timestamp: epoch(),
+                timestamp,
                 broker_slot: 42,
                 random: [0x01, 0x23, 0x45, 0x67, 0x89],
             }

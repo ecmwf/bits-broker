@@ -47,7 +47,7 @@ fn require_site_env_tag(
             );
         }
     };
-    crate::polytope_id::pack_tag(&tag)
+    crate::request_id::pack_tag(&tag)
         .map(|_| tag)
         .map_err(|err| ConfigError::validation(field, err.to_string()).into())
 }

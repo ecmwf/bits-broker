@@ -13,7 +13,7 @@ pub mod error;
 /// Job model and lifecycle state.
 pub mod job;
 /// Public request ID encoding and decoding helpers.
-pub mod polytope_id;
+pub mod request_id;
 /// Terminal job results returned to clients.
 pub mod result;
 mod route_handle;

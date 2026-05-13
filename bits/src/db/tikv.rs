@@ -56,7 +56,7 @@ impl TiKvStore {
     }
 
     fn job_key(job_id: &str) -> Result<String, DbError> {
-        let decoded = crate::polytope_id::decode(job_id)
+        let decoded = crate::request_id::decode(job_id)
             .map_err(|err| DbError::Backend(format!("invalid public job ID {job_id:?}: {err}")))?;
         Ok(format!(
             "{JOB_PREFIX}{}/{}/{}/{}",
@@ -320,10 +320,10 @@ mod tests {
     use super::*;
 
     fn deterministic_job_id(site: &str, env: &str, broker_slot: u16) -> String {
-        let timestamp = chrono::DateTime::parse_from_rfc3339(crate::polytope_id::CUSTOM_EPOCH)
+        let timestamp = chrono::DateTime::parse_from_rfc3339(crate::request_id::CUSTOM_EPOCH)
             .unwrap()
             .with_timezone(&Utc);
-        crate::polytope_id::encode_with_fixed_random(
+        crate::request_id::encode_with_fixed_random(
             site,
             env,
             broker_slot,
@@ -334,7 +334,7 @@ mod tests {
     }
 
     fn decoded_job_path(job_id: &str) -> String {
-        let decoded = crate::polytope_id::decode(job_id).unwrap();
+        let decoded = crate::request_id::decode(job_id).unwrap();
         format!(
             "jobs/{}/{}/{}/{}",
             decoded.site, decoded.env, decoded.broker_slot, job_id
@@ -362,7 +362,7 @@ mod tests {
     fn tikv_job_key_rejects_invalid_public_id() {
         let malformed_id = "broker-legacy~1";
         assert!(
-            crate::polytope_id::decode(malformed_id).is_err(),
+            crate::request_id::decode(malformed_id).is_err(),
             "test fixture must be malformed"
         );
 

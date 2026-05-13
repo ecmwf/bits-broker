@@ -136,7 +136,7 @@ impl NatsStore {
     }
 
     fn job_key(public_id: &str) -> Result<String, DbError> {
-        let decoded = crate::polytope_id::decode(public_id)
+        let decoded = crate::request_id::decode(public_id)
             .map_err(|e| DbError::Backend(format!("invalid public job ID {public_id:?}: {e}")))?;
         Ok(format!(
             "jobs.{}.{}.{}.{}",
@@ -389,10 +389,10 @@ mod tests {
     use super::*;
 
     fn deterministic_job_id(site: &str, env: &str, broker_slot: u16) -> String {
-        let timestamp = chrono::DateTime::parse_from_rfc3339(crate::polytope_id::CUSTOM_EPOCH)
+        let timestamp = chrono::DateTime::parse_from_rfc3339(crate::request_id::CUSTOM_EPOCH)
             .unwrap()
             .with_timezone(&Utc);
-        crate::polytope_id::encode_with_fixed_random(
+        crate::request_id::encode_with_fixed_random(
             site,
             env,
             broker_slot,
@@ -403,7 +403,7 @@ mod tests {
     }
 
     fn structured_job_subject(job_id: &str) -> String {
-        let decoded = crate::polytope_id::decode(job_id).unwrap();
+        let decoded = crate::request_id::decode(job_id).unwrap();
         format!(
             "jobs.{}.{}.{}.{}",
             decoded.site, decoded.env, decoded.broker_slot, job_id
@@ -432,7 +432,7 @@ mod tests {
     fn nats_job_key_rejects_invalid_public_id() {
         let malformed_id = "not-a-new-format-id";
         assert!(
-            crate::polytope_id::decode(malformed_id).is_err(),
+            crate::request_id::decode(malformed_id).is_err(),
             "test fixture must be malformed"
         );
 

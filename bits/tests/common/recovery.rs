@@ -385,7 +385,7 @@ pub fn broker_identity(site: &str, env: &str, slot: u16) -> &'static str {
 }
 
 pub fn new_recovery_job_id(site: &str, env: &str, slot: u16) -> String {
-    bits::polytope_id::encode(site, env, slot, chrono::Utc::now()).unwrap()
+    bits::request_id::encode(site, env, slot, chrono::Utc::now()).unwrap()
 }
 
 pub fn test_client() -> reqwest::Client {

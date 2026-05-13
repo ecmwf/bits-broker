@@ -70,7 +70,7 @@ impl RouteHandle {
     }
 
     fn new_job_id(&self) -> String {
-        crate::polytope_id::encode(&self.site, &self.env, self.broker_slot, chrono::Utc::now())
+        crate::request_id::encode(&self.site, &self.env, self.broker_slot, chrono::Utc::now())
             .expect("runtime site/env/slot should encode as a request ID")
     }
 }

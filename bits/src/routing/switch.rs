@@ -172,15 +172,28 @@ impl TargetAction for Switch {
                             }
                         }
                     }
-                    Action::Target(target, dispatcher, silent_override) => {
+                    Action::Target(target, dispatcher, silent_override, breaker) => {
                         let result = match dispatcher {
                             Some(d) => {
+                                let breaker_gen = match breaker {
+                                    Some(cb) => Some(cb.allow_request()?),
+                                    None => None,
+                                };
                                 let t = Arc::clone(target);
                                 let j = (*current_job).clone();
                                 let work: BoxFuture<'static, Result<TargetResult, ActionError>> =
                                     Box::pin(async move { t.dispatch(&j).await });
-                                d.dispatch(&current_job, DispatchGuard::CancelledOrClientGone, work)
-                                    .await?
+                                let r = d
+                                    .dispatch(
+                                        &current_job,
+                                        DispatchGuard::CancelledOrClientGone,
+                                        work,
+                                    )
+                                    .await;
+                                if let (Some(cb), Some(g)) = (breaker, breaker_gen) {
+                                    cb.record_outcome(g, &r);
+                                }
+                                r?
                             }
                             None => {
                                 if current_job.is_cancelled() {
@@ -189,7 +202,15 @@ impl TargetAction for Switch {
                                 if !current_job.client_present() {
                                     return Err(ActionError::ClientGone);
                                 }
-                                target.dispatch(&current_job).await?
+                                let breaker_gen = match breaker {
+                                    Some(cb) => Some(cb.allow_request()?),
+                                    None => None,
+                                };
+                                let r = target.dispatch(&current_job).await;
+                                if let (Some(cb), Some(g)) = (breaker, breaker_gen) {
+                                    cb.record_outcome(g, &r);
+                                }
+                                r?
                             }
                         };
                         match result {
@@ -256,7 +277,7 @@ mod tests {
     async fn client_gone_before_target() {
         let switch = Switch::new(vec![Route::new(
             "default".to_string(),
-            vec![Action::Target(Arc::new(AlwaysSucceed), None, None)],
+            vec![Action::Target(Arc::new(AlwaysSucceed), None, None, None)],
         )]);
 
         // Job::new() has reconnect_deadline = Instant::now() (immediately expired)
@@ -319,6 +340,7 @@ mod tests {
                 }),
                 Some(dispatcher.clone()),
                 None,
+                None,
             )],
         )]);
 
@@ -337,6 +359,7 @@ mod tests {
                     ran: Arc::clone(&ran),
                 }),
                 Some(dispatcher),
+                None,
                 None,
             )],
         )]);
@@ -414,7 +437,7 @@ mod tests {
                     Some(dispatcher.clone()),
                     None,
                 ),
-                Action::Target(Arc::new(AlwaysSucceed), None, None),
+                Action::Target(Arc::new(AlwaysSucceed), None, None, None),
             ],
         )]);
 
@@ -436,7 +459,7 @@ mod tests {
                     Some(dispatcher),
                     None,
                 ),
-                Action::Target(Arc::new(AlwaysSucceed), None, None),
+                Action::Target(Arc::new(AlwaysSucceed), None, None, None),
             ],
         )]);
 
@@ -460,5 +483,119 @@ mod tests {
 
         assert!(matches!(result, Err(ActionError::Cancelled)));
         assert_eq!(ran.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_rejects_after_threshold() {
+        struct FailingTarget;
+
+        #[async_trait]
+        impl TargetAction for FailingTarget {
+            async fn dispatch(&self, _job: &Job) -> Result<TargetResult, ActionError> {
+                Err(ActionError::NetworkError("connection refused".into()))
+            }
+        }
+
+        let config = crate::circuit_breaker::CircuitBreakerConfig {
+            failure_threshold: 2,
+            open_timeout_secs: 999.0,
+        };
+        let breaker = Arc::new(crate::circuit_breaker::CircuitBreaker::new(
+            &config,
+            "test-target".into(),
+        ));
+
+        let switch = Switch::new(vec![Route::new(
+            "default".to_string(),
+            vec![Action::Target(
+                Arc::new(FailingTarget),
+                None,
+                None,
+                Some(Arc::clone(&breaker)),
+            )],
+        )]);
+
+        let job = Job::new(serde_json::json!({}));
+        job.set_reconnect_deadline_for_test(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+
+        assert!(matches!(
+            switch.dispatch(&job).await,
+            Err(ActionError::NetworkError(_))
+        ));
+        assert!(matches!(
+            switch.dispatch(&job).await,
+            Err(ActionError::NetworkError(_))
+        ));
+        assert!(
+            matches!(
+                switch.dispatch(&job).await,
+                Err(ActionError::CircuitOpen(_))
+            ),
+            "third request should be rejected by circuit breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_recovers_after_probe_success() {
+        let succeed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        struct ToggleTarget {
+            succeed: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        #[async_trait]
+        impl TargetAction for ToggleTarget {
+            async fn dispatch(&self, _job: &Job) -> Result<TargetResult, ActionError> {
+                if self.succeed.load(Ordering::Relaxed) {
+                    Ok(TargetResult::Complete(JobResult::Error {
+                        message: "ok".into(),
+                    }))
+                } else {
+                    Err(ActionError::NetworkError("down".into()))
+                }
+            }
+        }
+
+        let config = crate::circuit_breaker::CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_timeout_secs: 0.05,
+        };
+        let breaker = Arc::new(crate::circuit_breaker::CircuitBreaker::new(
+            &config,
+            "toggle".into(),
+        ));
+
+        let switch = Switch::new(vec![Route::new(
+            "default".to_string(),
+            vec![Action::Target(
+                Arc::new(ToggleTarget {
+                    succeed: Arc::clone(&succeed),
+                }),
+                None,
+                None,
+                Some(Arc::clone(&breaker)),
+            )],
+        )]);
+
+        let job = Job::new(serde_json::json!({}));
+        job.set_reconnect_deadline_for_test(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+
+        assert!(switch.dispatch(&job).await.is_err());
+
+        succeed.store(true, Ordering::Relaxed);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(
+            switch.dispatch(&job).await.is_ok(),
+            "probe should succeed and close the circuit"
+        );
+        assert!(
+            switch.dispatch(&job).await.is_ok(),
+            "circuit should be closed, normal traffic flows"
+        );
     }
 }

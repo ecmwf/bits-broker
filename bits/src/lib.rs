@@ -3,6 +3,8 @@
 /// Action traits, result enums, and built-in action implementations.
 pub mod actions;
 mod bits;
+/// Per-target circuit breaker for downstream failure protection.
+pub mod circuit_breaker;
 mod config;
 /// Durable storage traits and in-memory / optional backend implementations.
 pub mod db;

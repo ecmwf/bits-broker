@@ -124,7 +124,7 @@ macro_rules! register_action {
                 factory: |config| {
                     let action: $action_type = serde_json::from_value(config)
                         .map_err(|e| $crate::actions::ActionError::ConfigError(e.to_string()))?;
-                    Ok($crate::actions::Action::Target(std::sync::Arc::new(action), None, None))
+                    Ok($crate::actions::Action::Target(std::sync::Arc::new(action), None, None, None))
                 }
             }
         }

@@ -28,6 +28,7 @@ pub enum ActionError {
     ConfigError(String),
     AuthError(String),
     ResourceError(String),
+    CircuitOpen(String),
     Cancelled,
     ClientGone,
 }
@@ -41,6 +42,7 @@ impl std::fmt::Display for ActionError {
             ActionError::ConfigError(msg) => write!(f, "Config error: {}", msg),
             ActionError::AuthError(msg) => write!(f, "Auth error: {}", msg),
             ActionError::ResourceError(msg) => write!(f, "Resource error: {}", msg),
+            ActionError::CircuitOpen(msg) => write!(f, "Circuit open: {}", msg),
             ActionError::Cancelled => write!(f, "Cancelled"),
             ActionError::ClientGone => {
                 write!(f, "Client disconnected before data could be delivered")
@@ -60,6 +62,7 @@ impl ActionError {
             ActionError::ConfigError(_) => "ACTION_CONFIG",
             ActionError::AuthError(_) => "ACTION_AUTH",
             ActionError::ResourceError(_) => "ACTION_RESOURCE",
+            ActionError::CircuitOpen(_) => "ACTION_CIRCUIT_OPEN",
             ActionError::Cancelled => "ACTION_CANCELLED",
             ActionError::ClientGone => "ACTION_CLIENT_GONE",
         }
@@ -68,7 +71,10 @@ impl ActionError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            ActionError::NetworkError(_) | ActionError::Timeout(_) | ActionError::QueueFull(_)
+            ActionError::NetworkError(_)
+                | ActionError::Timeout(_)
+                | ActionError::QueueFull(_)
+                | ActionError::CircuitOpen(_)
         )
     }
 }
@@ -93,6 +99,7 @@ pub enum Action {
         Arc<dyn TargetAction>,
         Option<crate::dispatcher::Dispatcher<TargetResult>>,
         Option<bool>,
+        Option<std::sync::Arc<crate::circuit_breaker::CircuitBreaker>>,
     ),
     Switch(crate::routing::switch::Switch),
 }
@@ -102,7 +109,7 @@ impl Action {
         match self {
             Action::Check(_, Some(d), _) => d.close(),
             Action::Transform(_, Some(d), _) => d.close(),
-            Action::Target(_, Some(d), _) => d.close(),
+            Action::Target(_, Some(d), _, _) => d.close(),
             Action::Switch(switch) => switch.close_all(),
             _ => {}
         }
@@ -116,7 +123,7 @@ impl Action {
     /// Config-level override for whether this action's rejections are silent.
     pub fn silent_override(&self) -> Option<bool> {
         match self {
-            Action::Check(_, _, o) | Action::Transform(_, _, o) | Action::Target(_, _, o) => *o,
+            Action::Check(_, _, o) | Action::Transform(_, _, o) | Action::Target(_, _, o, _) => *o,
             Action::Switch(_) => None,
         }
     }
@@ -130,7 +137,7 @@ impl Action {
         match self {
             Action::Check(a, _, _) => a.describe(),
             Action::Transform(a, _, _) => a.describe(),
-            Action::Target(a, _, _) => a.describe(),
+            Action::Target(a, _, _, _) => a.describe(),
             Action::Switch(_) => serde_json::json!({}),
         }
     }

@@ -87,6 +87,7 @@ type ResolvedTarget = (
     Arc<dyn TargetAction>,
     Option<Dispatcher<TargetResult>>,
     Option<bool>,
+    Option<Arc<crate::circuit_breaker::CircuitBreaker>>,
 );
 
 struct ParseContext {
@@ -852,6 +853,7 @@ fn parse_action(
                         action,
                         settings,
                         silent,
+                        None,
                         ctx,
                     );
                 }
@@ -920,11 +922,14 @@ fn resolve_named(
             action_from_entry(ns, name, entry, ctx)
         }
         "target" => {
-            if let Some((target, dispatcher, surface)) = ctx.resolved_targets.borrow().get(name) {
+            if let Some((target, dispatcher, surface, breaker)) =
+                ctx.resolved_targets.borrow().get(name)
+            {
                 return Ok(Action::Target(
                     Arc::clone(target),
                     dispatcher.clone(),
                     *surface,
+                    breaker.clone(),
                 ));
             }
             let entry =
@@ -937,10 +942,15 @@ fn resolve_named(
                         reason: format!("unknown target '{name}'"),
                     })?;
             let action = action_from_entry(ns, name, entry, ctx)?;
-            if let Action::Target(target, dispatcher, surface) = &action {
+            if let Action::Target(target, dispatcher, surface, breaker) = &action {
                 ctx.resolved_targets.borrow_mut().insert(
                     name.to_string(),
-                    (Arc::clone(target), dispatcher.clone(), *surface),
+                    (
+                        Arc::clone(target),
+                        dispatcher.clone(),
+                        *surface,
+                        breaker.clone(),
+                    ),
                 );
             }
             Ok(action)
@@ -1072,9 +1082,32 @@ fn action_from_entry(
         })
         .transpose()?;
 
+    let cb_config = map
+        .get("circuit_breaker")
+        .map(|v| {
+            serde_json::from_value::<crate::circuit_breaker::CircuitBreakerConfig>(v.clone())
+                .map_err(|e| {
+                    ConfigError::validation(
+                        format!("{ns}.{entry_name}.circuit_breaker"),
+                        e.to_string(),
+                    )
+                })
+        })
+        .transpose()?;
+    if let Some(ref cb) = cb_config {
+        cb.validate().map_err(|e| {
+            ConfigError::validation(format!("{ns}.{entry_name}.circuit_breaker"), e)
+        })?;
+    }
+
     let remaining: serde_json::Map<_, _> = map
         .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "type" | "dispatcher" | "silent"))
+        .filter(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "type" | "dispatcher" | "silent" | "circuit_breaker"
+            )
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let config = if remaining.is_empty() {
@@ -1084,7 +1117,9 @@ fn action_from_entry(
     };
     let action = create_action(type_name, config)
         .map_err(|e| ConfigError::validation(format!("{ns}.{entry_name}.type"), e.to_string()))?;
-    attach_dispatcher(entry_name, type_name, action, settings, silent, ctx)
+    attach_dispatcher(
+        entry_name, type_name, action, settings, silent, cb_config, ctx,
+    )
 }
 
 fn attach_dispatcher(
@@ -1093,8 +1128,17 @@ fn attach_dispatcher(
     action: Action,
     mut settings: DispatcherSettings,
     silent: Option<bool>,
+    cb_config: Option<crate::circuit_breaker::CircuitBreakerConfig>,
     ctx: &ParseContext,
 ) -> Result<Action, BitsError> {
+    if cb_config.is_some() && !matches!(action, Action::Target(..)) {
+        return Err(ConfigError::validation(
+            format!("{action_name}.{entry_name}.circuit_breaker"),
+            "only valid on target actions",
+        )
+        .into());
+    }
+
     let is_remote_action = action_name == "remote";
     let is_remote_pool = matches!(&settings.executor, Some(ExecutorKind::RemotePool { .. }));
 
@@ -1152,7 +1196,7 @@ fn attach_dispatcher(
             .map_err(|e| ConfigError::validation("dispatcher", e))?;
             Ok(Action::Transform(transform, dispatcher, silent))
         }
-        Action::Target(target, _, _) => {
+        Action::Target(target, _, _, _) => {
             let pool_name = if is_remote_action {
                 Some(entry_name)
             } else {
@@ -1166,7 +1210,13 @@ fn attach_dispatcher(
                 settings.queue_capacity,
             )
             .map_err(|e| ConfigError::validation("dispatcher", e))?;
-            Ok(Action::Target(target, dispatcher, silent))
+            let breaker = cb_config.map(|cfg| {
+                Arc::new(crate::circuit_breaker::CircuitBreaker::new(
+                    &cfg,
+                    entry_name.to_string(),
+                ))
+            });
+            Ok(Action::Target(target, dispatcher, silent, breaker))
         }
         _ if has_dispatcher => Err(ConfigError::validation(
             "dispatcher",
@@ -1209,7 +1259,7 @@ mod tests {
 
     fn extract_target(route: &crate::routing::Route) -> Arc<dyn crate::actions::TargetAction> {
         match route.actions.first() {
-            Some(Action::Target(target, _, _)) => Arc::clone(target),
+            Some(Action::Target(target, _, _, _)) => Arc::clone(target),
             _ => panic!("expected first action to be a target"),
         }
     }

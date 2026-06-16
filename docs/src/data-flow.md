@@ -188,7 +188,7 @@ sequenceDiagram
 
     C->>LB: GET /job/{id}
     LB->>B: forward
-    B->>S: Decode owner hint; check lease → expired
+    B->>S: Decode owner hint & check lease → expired
     B->>S: Claim authoritative job record (atomic CAS)
     B->>B: Restore from original_request
     B->>B: Re-dispatch through pipeline
@@ -204,7 +204,7 @@ sequenceDiagram
     participant A as Broker A
 
     C->>B: GET /job/{id}
-    B->>B: Owner hint names A; lease active
+    B->>B: Owner hint names A & lease active
     B->>A: Proxy poll to A's internal URL
     A-->>B: Result
     B-->>C: Result

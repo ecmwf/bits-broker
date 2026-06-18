@@ -80,11 +80,25 @@ impl SubmitContext {
         job.set_reconnect_deadline(Instant::now() + self.reconnect_buffer);
 
         let job = Arc::new(job);
-        self.jobs.insert(job_id.clone(), job.clone());
+        let job_for_spawn = match self.jobs.entry(job_id.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                let j = job.clone();
+                slot.insert(job);
+                j
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                self.job_count.fetch_sub(1, Ordering::Relaxed);
+                tracing::warn!(
+                    job_id = %job_id,
+                    "duplicate job id submitted, rejecting to prevent counter leak"
+                );
+                return SubmitOutcome::Overloaded;
+            }
+        };
 
         spawn_job(
             router,
-            job,
+            job_for_spawn,
             self.job_store.clone(),
             self.persist_after,
             self.broker_id.clone(),

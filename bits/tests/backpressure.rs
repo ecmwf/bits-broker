@@ -409,6 +409,41 @@ async fn permit_freed_on_dequeue_not_completion() {
 }
 
 #[tokio::test]
+async fn duplicate_job_id_returns_overloaded() {
+    let _ = common::TargetDummyDelay::new(500);
+    let config = r#"
+bits:
+  site: tst
+  env: dev
+  max_jobs: 10
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 500
+          concurrency: 1
+"#;
+    let bits = parse_bootstrap(config)
+        .expect("parse")
+        .into_bits()
+        .expect("build");
+
+    let valid_id = bits::request_id::encode("tst", "dev", 0, chrono::Utc::now())
+        .expect("encode valid BITS ID");
+
+    let first = bits.submit(Job::new_with_id(valid_id.clone(), serde_json::json!({})));
+    assert!(
+        matches!(first, SubmitOutcome::Accepted(_)),
+        "first submit with a valid BITS ID should be accepted"
+    );
+
+    let second = bits.submit(Job::new_with_id(valid_id.clone(), serde_json::json!({})));
+    assert!(
+        matches!(second, SubmitOutcome::Overloaded),
+        "second submit with the same job ID must be rejected as Overloaded"
+    );
+}
+
+#[tokio::test]
 async fn overloaded_result_maps_to_http_529_with_retry_after() {
     let _ = common::TargetDummyDelay::new(250);
 

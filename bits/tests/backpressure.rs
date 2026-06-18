@@ -269,6 +269,63 @@ routes:
 }
 
 #[tokio::test]
+async fn route_handle_submit_returns_overloaded_at_max_jobs() {
+    let _ = common::TargetDummyDelay::new(500);
+    let config = r#"
+bits:
+  site: tst
+  env: dev
+  max_jobs: 1
+targets:
+  slow:
+    type: dummy_dispatch
+    duration_ms: 500
+"#;
+    let bits = parse_bootstrap(config)
+        .expect("parse")
+        .into_bits()
+        .expect("build");
+    let route = serde_json::json!([{"added": ["target::slow"]}]);
+    let handle = bits.add_route("added", &route).expect("add route");
+
+    let first = handle.submit(Job::new(serde_json::json!({})));
+    assert!(matches!(first, SubmitOutcome::Accepted(_)));
+
+    let second = handle.submit(Job::new(serde_json::json!({})));
+    assert!(matches!(second, SubmitOutcome::Overloaded));
+}
+
+#[tokio::test]
+async fn bits_and_route_handle_share_max_jobs_counter() {
+    let _ = common::TargetDummyDelay::new(500);
+    let config = r#"
+bits:
+  site: tst
+  env: dev
+  max_jobs: 1
+targets:
+  slow:
+    type: dummy_dispatch
+    duration_ms: 500
+routes:
+  - default:
+      - target::slow
+"#;
+    let bits = parse_bootstrap(config)
+        .expect("parse")
+        .into_bits()
+        .expect("build");
+    let route = serde_json::json!([{"added": ["target::slow"]}]);
+    let handle = bits.add_route("added", &route).expect("add route");
+
+    let first = bits.submit(Job::new(serde_json::json!({})));
+    assert!(matches!(first, SubmitOutcome::Accepted(_)));
+
+    let second = handle.submit(Job::new(serde_json::json!({})));
+    assert!(matches!(second, SubmitOutcome::Overloaded));
+}
+
+#[tokio::test]
 async fn max_jobs_counter_recovers_after_completion() {
     let _ = common::TargetDummyDelay::new(0);
     let config = r#"

@@ -42,7 +42,7 @@ impl Bits {
 
         loop {
             match store
-                .claim_if_owner(id, expected_owner, &self.broker_id)
+                .claim_if_owner(id, expected_owner, &self.submit_context.broker_id)
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -71,7 +71,7 @@ impl Bits {
     }
 
     pub(crate) async fn lookup_owner_lease(&self, owner_broker_id: &str) -> LeaseLookup {
-        let Some(store) = &self.job_store else {
+        let Some(store) = &self.submit_context.job_store else {
             return LeaseLookup::Unknown;
         };
         match store.get_broker_lease(owner_broker_id).await {
@@ -87,7 +87,7 @@ impl Bits {
     }
 
     async fn owner_not_found_outcome(&self, id: &str) -> PollOutcome {
-        let Some(store) = &self.job_store else {
+        let Some(store) = &self.submit_context.job_store else {
             return PollOutcome::NotFound;
         };
 
@@ -229,11 +229,11 @@ impl Bits {
         &self,
         broker_lease_ttl: Duration,
     ) -> Option<std::thread::JoinHandle<()>> {
-        let store = self.job_store.as_ref()?;
+        let store = self.submit_context.job_store.as_ref()?;
         let store = Arc::clone(store);
-        let broker_id = self.broker_id.clone();
+        let broker_id = self.submit_context.broker_id.clone();
         let shutdown = self.shutdown.clone();
-        let in_flight = self.in_flight.clone();
+        let in_flight = self.submit_context.in_flight.clone();
         let base_url = self.internal_poll_base_url.clone();
         Some(std::thread::spawn(move || {
             let tick = broker_lease_ttl

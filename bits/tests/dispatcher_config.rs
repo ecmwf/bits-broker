@@ -111,6 +111,32 @@ routes:
     );
 }
 
+#[tokio::test]
+async fn worker_server_accepts_advertised_addr() {
+    let config = r#"
+bits:
+  site: tst
+  env: dev
+  worker_server:
+    host: "127.0.0.1"
+    port: 0
+    advertised_addr: "10.1.2.3:9001"
+targets:
+  mars:
+    type: remote
+    dispatcher:
+      executor:
+        type: remote_pool
+routes:
+  - default:
+      - target::mars
+"#;
+    assert!(
+        Bits::from_config(config).is_ok(),
+        "valid config should parse"
+    );
+}
+
 #[test]
 fn inline_remote_target_is_rejected() {
     let config = r#"

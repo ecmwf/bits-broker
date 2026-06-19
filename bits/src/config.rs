@@ -118,6 +118,8 @@ struct WorkerServerConfig {
     host: String,
     #[serde(default = "default_worker_server_port")]
     port: u16,
+    #[serde(default)]
+    advertised_addr: Option<String>,
 }
 
 fn default_worker_server_host() -> String {
@@ -340,10 +342,13 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         .transpose()?
         .unwrap_or_default();
 
-    let worker_server: Option<Arc<WorkerServer>> = bits_cfg
-        .worker_server
-        .as_ref()
-        .map(|ws_cfg| Arc::new(WorkerServer::new(&ws_cfg.host, ws_cfg.port)));
+    let worker_server: Option<Arc<WorkerServer>> = bits_cfg.worker_server.as_ref().map(|ws_cfg| {
+        Arc::new(WorkerServer::with_advertised_addr(
+            &ws_cfg.host,
+            ws_cfg.port,
+            ws_cfg.advertised_addr.clone(),
+        ))
+    });
 
     if bits_cfg.broker_id_prefix.is_some() {
         tracing::warn!(

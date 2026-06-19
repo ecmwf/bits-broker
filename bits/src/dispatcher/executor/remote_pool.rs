@@ -127,6 +127,7 @@ struct RemotePoolState {
     pending: Arc<PendingMap<TargetResult>>,
     in_progress: DashMap<String, InProgressJob>,
     heartbeat_timeout: Duration,
+    callback_url: Option<String>,
 }
 
 // ─── HTTP request / response types ────────────────────────────────────────────
@@ -148,6 +149,8 @@ struct WorkResponse {
     request: serde_json::Value,
     user: std::sync::Arc<serde_json::Value>,
     metadata: std::sync::Arc<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callback_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -290,6 +293,7 @@ async fn handle_get_work(
         request: job.request.clone(),
         user: job.user.clone(),
         metadata: job.metadata.clone(),
+        callback_url: state.callback_url.clone(),
     };
 
     Ok(Json(resp))
@@ -493,6 +497,7 @@ pub struct RemotePoolExecutor {
     pool_name: String,
     heartbeat_timeout: Duration,
     worker_server: Arc<WorkerServer>,
+    callback_url: Option<String>,
 }
 
 impl RemotePoolExecutor {
@@ -505,7 +510,13 @@ impl RemotePoolExecutor {
             pool_name: pool_name.to_string(),
             heartbeat_timeout,
             worker_server,
+            callback_url: None,
         }
+    }
+
+    pub fn with_callback_url(mut self, callback_url: Option<String>) -> Self {
+        self.callback_url = callback_url;
+        self
     }
 }
 
@@ -520,6 +531,7 @@ impl Executor<TargetResult> for RemotePoolExecutor {
             pending,
             in_progress: DashMap::new(),
             heartbeat_timeout: self.heartbeat_timeout,
+            callback_url: self.callback_url.clone(),
         });
 
         // HTTP server task.

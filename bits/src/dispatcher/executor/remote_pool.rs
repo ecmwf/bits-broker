@@ -277,7 +277,9 @@ async fn handle_get_work(
                     reason,
                     silent: true,
                 }),
-                WorkerOutcome::Error { message } => Err(ActionError::ResourceError(message)),
+                WorkerOutcome::Error { message } => {
+                    Ok(TargetResult::Complete(JobResult::Error { message }))
+                }
             },
             Err(_) => Err(ActionError::ResourceError(
                 "worker heartbeat timeout or disconnect".into(),

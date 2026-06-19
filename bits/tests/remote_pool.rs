@@ -337,7 +337,7 @@ async fn worker_rejects_job() {
     }
 }
 
-/// Worker posts an error → Bits surfaces it as a Failed result.
+/// Worker posts an error → Bits surfaces it as a job-level Error.
 #[tokio::test]
 async fn worker_reports_error() {
     let port = free_port().await;
@@ -372,10 +372,10 @@ async fn worker_reports_error() {
         .unwrap();
 
     match bits.poll(&handle.id, Some(Duration::from_secs(5))).await {
-        PollOutcome::Ready(JobResult::Failed { reason }) => {
-            assert_eq!(reason, "internal server error");
+        PollOutcome::Ready(JobResult::Error { message }) => {
+            assert_eq!(message, "internal worker failure");
         }
-        other => panic!("expected Failed, got {:?}", other),
+        other => panic!("expected Error, got {:?}", other),
     }
 }
 

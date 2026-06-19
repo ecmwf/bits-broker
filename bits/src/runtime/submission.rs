@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use crate::bits::{JobHandle, SubmitOutcome};
 use crate::db::PersistenceStore;
 use crate::job::Job;
+use crate::metrics;
 use crate::routing::switch::Switch;
 use crate::runtime::recovery::decode_job_id;
 use crate::runtime::runner::spawn_job;
@@ -38,6 +39,7 @@ impl SubmitContext {
         router: Arc<Switch>,
         mut job: Job,
         admission: SubmissionAdmission,
+        route_handle: Option<&str>,
     ) -> SubmitOutcome {
         if decode_job_id(&job.id).is_err() {
             job.id = self.new_job_id();
@@ -96,6 +98,14 @@ impl SubmitContext {
             }
         };
 
+        if !already_persisted {
+            metrics::record_job_accepted();
+            if let Some(name) = route_handle {
+                metrics::record_route_handle_job_accepted(name);
+            }
+        }
+
+        let route_handle_owned = route_handle.map(|s| s.to_owned());
         spawn_job(
             router,
             job_for_spawn,
@@ -104,6 +114,7 @@ impl SubmitContext {
             self.broker_id.clone(),
             already_persisted,
             self.in_flight.clone(),
+            route_handle_owned,
         );
 
         SubmitOutcome::Accepted(JobHandle { id: job_id })

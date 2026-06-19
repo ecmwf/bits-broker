@@ -313,8 +313,12 @@ impl Bits {
     /// Must be called from within a Tokio runtime (`#[tokio::main]` or `#[tokio::test]`).
     /// Panics if no runtime is available.
     pub fn submit(&self, job: Job) -> SubmitOutcome {
-        self.submit_context
-            .submit(self.router.clone(), job, SubmissionAdmission::EnforceLimit)
+        self.submit_context.submit(
+            self.router.clone(),
+            job,
+            SubmissionAdmission::EnforceLimit,
+            None,
+        )
     }
 
     fn submit_with_state(&self, job: Job, already_persisted: bool) -> SubmitOutcome {
@@ -324,7 +328,7 @@ impl Bits {
             SubmissionAdmission::EnforceLimit
         };
         self.submit_context
-            .submit(self.router.clone(), job, admission)
+            .submit(self.router.clone(), job, admission, None)
     }
 
     /// Requests cancellation for a previously submitted job.

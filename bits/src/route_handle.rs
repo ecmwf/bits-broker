@@ -14,8 +14,12 @@ pub struct RouteHandle {
 
 impl RouteHandle {
     pub fn submit(&self, job: Job) -> SubmitOutcome {
-        self.submit_context
-            .submit(self.router.clone(), job, SubmissionAdmission::EnforceLimit)
+        self.submit_context.submit(
+            self.router.clone(),
+            job,
+            SubmissionAdmission::EnforceLimit,
+            Some(&self.name),
+        )
     }
 
     pub fn name(&self) -> &str {

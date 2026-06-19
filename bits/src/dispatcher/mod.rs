@@ -184,11 +184,11 @@ impl<T: Send + 'static> Dispatcher<T> {
                 if heartbeat_timeout.is_zero() {
                     return Err("remote_pool: heartbeat_timeout_secs must be positive".to_string());
                 }
-                let concrete: Arc<dyn Executor<TargetResult>> = Arc::new(RemotePoolExecutor::new(
-                    pool_name,
-                    heartbeat_timeout,
-                    worker_server,
-                ));
+                let callback_url = worker_server.callback_url(pool_name);
+                let concrete: Arc<dyn Executor<TargetResult>> = Arc::new(
+                    RemotePoolExecutor::new(pool_name, heartbeat_timeout, worker_server)
+                        .with_callback_url(callback_url),
+                );
                 let any: Box<dyn Any> = Box::new(concrete);
                 *any.downcast::<Arc<dyn Executor<T>>>().map_err(|_| {
                     "remote_pool: internal type mismatch (T != TargetResult)".to_string()

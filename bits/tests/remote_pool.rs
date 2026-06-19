@@ -83,7 +83,87 @@ routes:
     Bits::from_config(&config).expect("config error")
 }
 
+fn make_bits_with_advertised_addr(
+    port: u16,
+    heartbeat_timeout_secs: f64,
+    advertised_addr: &str,
+) -> Bits {
+    let config = format!(
+        r#"
+bits:
+  site: tst
+  env: dev
+  worker_server:
+    host: "127.0.0.1"
+    port: {port}
+    advertised_addr: "{advertised_addr}"
+targets:
+  test_pool:
+    type: remote
+    dispatcher:
+      executor:
+        type: remote_pool
+        heartbeat_timeout_secs: {heartbeat_timeout_secs}
+routes:
+  - default:
+      - target::test_pool
+"#
+    );
+    Bits::from_config(&config).expect("config error")
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn remote_pool_work_response_includes_callback_url_when_advertised_addr_is_configured() {
+    let port = free_port().await;
+    let bits = make_bits_with_advertised_addr(port, 60.0, "10.1.2.3:9001");
+    wait_for_server(port).await;
+
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"class": "od"})))
+        .expect_accepted("submit should not be rejected");
+    let client = Client::new();
+
+    let resp = client
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let work: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(work["job_id"], handle.id);
+    assert_eq!(
+        work["callback_url"].as_str(),
+        Some("http://10.1.2.3:9001/test_pool")
+    );
+}
+
+#[tokio::test]
+async fn remote_pool_work_response_omits_callback_url_when_advertised_addr_is_absent() {
+    let port = free_port().await;
+    let bits = make_bits(port, 60.0);
+    wait_for_server(port).await;
+
+    bits.submit(Job::new(serde_json::json!({"class": "od"})))
+        .expect_accepted("submit should not be rejected");
+    let client = Client::new();
+
+    let resp = client
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let work: serde_json::Value = resp.json().await.unwrap();
+    assert!(work.get("callback_url").is_none());
+}
 
 /// Happy path: worker polls, sends a heartbeat, then streams a completion body.
 #[tokio::test]

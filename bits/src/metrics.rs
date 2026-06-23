@@ -4,8 +4,9 @@
 //! All instruments are no-ops when no provider is installed (tests, local dev).
 
 use std::sync::OnceLock;
+use std::time::Instant;
 
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
 use opentelemetry::{KeyValue, global};
 
 use crate::result::JobResult;
@@ -71,6 +72,49 @@ pub fn job_result_outcome(result: &JobResult) -> &'static str {
         JobResult::Overloaded { .. } => "overloaded",
         JobResult::Cancelled => "cancelled",
         JobResult::ClientGone => "client_gone",
+    }
+}
+
+// --- Dispatcher / queue metrics ---
+
+struct DispatcherInstruments {
+    queue_depth: UpDownCounter<i64>,
+    queue_wait_seconds: Histogram<f64>,
+}
+
+fn dispatcher_instruments() -> &'static DispatcherInstruments {
+    static INSTANCE: OnceLock<DispatcherInstruments> = OnceLock::new();
+    INSTANCE.get_or_init(|| {
+        let m = meter();
+        DispatcherInstruments {
+            queue_depth: m
+                .i64_up_down_counter("bits.dispatcher.queue_depth")
+                .with_description("Current number of jobs waiting in the dispatch queue")
+                .build(),
+            queue_wait_seconds: m
+                .f64_histogram("bits.dispatcher.queue_wait.seconds")
+                .with_description("Time a job spent waiting in the dispatch queue")
+                .build(),
+        }
+    })
+}
+
+pub fn record_queue_enqueued() {
+    dispatcher_instruments().queue_depth.add(1, &[]);
+}
+
+pub fn record_queue_dequeued(enqueued_at: Instant) {
+    let instruments = dispatcher_instruments();
+    instruments.queue_depth.add(-1, &[]);
+    instruments
+        .queue_wait_seconds
+        .record(enqueued_at.elapsed().as_secs_f64(), &[]);
+}
+
+/// Call for each stranded item when the dispatcher closes.
+pub fn record_queue_drained(count: usize) {
+    if count > 0 {
+        dispatcher_instruments().queue_depth.add(-(count as i64), &[]);
     }
 }
 

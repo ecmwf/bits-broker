@@ -9,13 +9,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 use crate::actions::{ActionError, TargetResult};
 use crate::job::Job;
+use crate::metrics;
 use crate::worker_server::WorkerServer;
 
 pub const DEFAULT_QUEUE_CAPACITY: usize = 500_000;
@@ -54,6 +55,7 @@ pub type PendingItem<T> = (
     BoxFuture<'static, Result<T, ActionError>>,
     oneshot::Sender<Result<T, ActionError>>,
     Option<OwnedSemaphorePermit>,
+    Instant, // ponytail: enqueued_at — for queue wait-time metric
 );
 
 /// Maps `job.id` to the pending work and reply channel.
@@ -124,8 +126,9 @@ impl<T: Send + 'static> Dispatcher<T> {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .drain()
-            .map(|(_, (_guard, _work, reply_tx, _permit))| reply_tx)
+            .map(|(_, (_guard, _work, reply_tx, _permit, _enqueued_at))| reply_tx)
             .collect();
+        metrics::record_queue_drained(stranded.len());
         for reply_tx in stranded {
             let _ = reply_tx.send(Err(ActionError::ResourceError(
                 "dispatcher closed".to_string(),
@@ -286,8 +289,9 @@ impl<T: Send + 'static> Dispatcher<T> {
                 if closing.load(Ordering::Acquire) {
                     return Err(ActionError::ResourceError("dispatcher closed".to_string()));
                 }
-                map.insert(job_id, (guard, guarded_work, reply_tx, Some(permit)));
+                map.insert(job_id, (guard, guarded_work, reply_tx, Some(permit), Instant::now()));
             }
+            metrics::record_queue_enqueued();
             queue.enqueue(job_to_enqueue);
 
             reply_rx

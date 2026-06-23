@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::actions::{ActionError, TargetResult};
 use crate::dispatcher::queue::Queue;
 use crate::dispatcher::{DispatchGuard, Executor, PendingMap};
+use crate::metrics;
 use crate::result::JobResult;
 use crate::worker_server::WorkerServer;
 
@@ -201,12 +202,13 @@ async fn handle_get_work(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .remove(&job.id);
-    let Some((guard, _work, reply_tx, permit)) = item else {
+    let Some((guard, _work, reply_tx, permit, enqueued_at)) = item else {
         // Caller cancelled before the work handler picked it up — skip.
         // Return 204 to tell the worker to poll again.
         return Err(StatusCode::NO_CONTENT);
     };
     drop(permit);
+    metrics::record_queue_dequeued(enqueued_at);
 
     if reply_tx.is_closed() {
         // Caller cancelled — drop.

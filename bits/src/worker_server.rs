@@ -54,6 +54,7 @@ fn validate_pool_name(name: &str) -> Result<(), Box<dyn std::error::Error + Send
 pub struct WorkerServer {
     host: String,
     port: u16,
+    advertised_addr: Option<String>,
     pools: Arc<RwLock<HashMap<String, Router>>>,
     started: OnceLock<()>,
     shutdown_tx: watch::Sender<bool>,
@@ -61,10 +62,15 @@ pub struct WorkerServer {
 
 impl WorkerServer {
     pub fn new(host: &str, port: u16) -> Self {
+        Self::with_advertised_addr(host, port, None)
+    }
+
+    pub fn with_advertised_addr(host: &str, port: u16, advertised_addr: Option<String>) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             host: host.to_string(),
             port,
+            advertised_addr,
             pools: Arc::new(RwLock::new(HashMap::new())),
             started: OnceLock::new(),
             shutdown_tx,
@@ -73,6 +79,12 @@ impl WorkerServer {
 
     pub fn address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    pub fn callback_url(&self, pool_name: &str) -> Option<String> {
+        self.advertised_addr
+            .as_ref()
+            .map(|addr| format!("http://{}/{pool_name}", addr.trim_end_matches('/')))
     }
 
     pub(crate) fn shutdown_rx(&self) -> watch::Receiver<bool> {

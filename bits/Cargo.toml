@@ -56,3 +56,8 @@ harness = false
 [[bench]]
 name = "queues"
 harness = false
+
+[[bench]]
+name = "metrics"
+harness = false
+required-features = ["metrics-prometheus"]

@@ -33,6 +33,8 @@
 
 - 🔌 **Pluggable actions** — additional actions can be created in Rust or Python.
 
+- 📊 **Observable** — OpenTelemetry instrumentation with an opt-in, scrapeable Prometheus `/metrics` endpoint and configurable histogram buckets.
+
 
 ---
 
@@ -224,6 +226,37 @@ routes:
 | `executor.concurrency` | positive integer | 256 |
 
 \* `remote_pool` is only valid with `target::remote`.
+
+---
+
+## 📊 Metrics
+
+BITS is instrumented with [OpenTelemetry](https://opentelemetry.io/). Build with the
+`metrics-prometheus` feature (enabled by default in the `bits-server` binary) to install a
+Prometheus exporter and expose a scrapeable endpoint on the same port as the job API:
+
+```
+GET /metrics
+```
+
+Exposed series include job counters (`bits_jobs_accepted_total`, `bits_jobs_finished_total`
+by `outcome`), duration histograms (`bits_job_duration_seconds`), and dispatcher
+instruments (`bits_dispatcher_queue_depth`, `bits_dispatcher_queue_wait_seconds`), plus
+per-route variants labelled by `route_handle`.
+
+Histogram bucket boundaries (seconds) are configurable via an optional top-level `metrics:`
+section, with sensible defaults:
+
+```yaml
+metrics:
+  duration_buckets:   [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 60, 120]
+  queue_wait_buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30]
+```
+
+When BITS is embedded as a library, the instrumentation is a no-op unless a meter provider
+is installed — either call `bits::metrics::init_prometheus(..)`, or install your own
+OpenTelemetry provider. See [Deployment → Metrics](docs/src/deployment.md) for the full
+metric list and a Prometheus scrape config.
 
 ---
 

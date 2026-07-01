@@ -289,7 +289,10 @@ impl<T: Send + 'static> Dispatcher<T> {
                 if closing.load(Ordering::Acquire) {
                     return Err(ActionError::ResourceError("dispatcher closed".to_string()));
                 }
-                map.insert(job_id, (guard, guarded_work, reply_tx, Some(permit), Instant::now()));
+                map.insert(
+                    job_id,
+                    (guard, guarded_work, reply_tx, Some(permit), Instant::now()),
+                );
             }
             metrics::record_queue_enqueued();
             queue.enqueue(job_to_enqueue);

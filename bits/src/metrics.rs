@@ -16,6 +16,32 @@ const METER_NAME: &str = "bits";
 const OUTCOME_KEY: &str = "outcome";
 const ROUTE_HANDLE_KEY: &str = "route_handle";
 
+/// Histogram bucket boundaries (in seconds) for the broker's duration and
+/// queue-wait histograms. Resolved from config; defaults live here next to the
+/// instruments they describe.
+#[derive(Debug, Clone)]
+pub struct HistogramBuckets {
+    /// Boundaries for the job-duration histograms
+    /// (`bits.job.duration.seconds` and the route_handle variant).
+    pub duration: Vec<f64>,
+    /// Boundaries for the dispatcher queue-wait histogram
+    /// (`bits.dispatcher.queue_wait.seconds`).
+    pub queue_wait: Vec<f64>,
+}
+
+impl Default for HistogramBuckets {
+    fn default() -> Self {
+        Self {
+            duration: vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 60.0, 120.0,
+            ],
+            queue_wait: vec![
+                0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+            ],
+        }
+    }
+}
+
 struct GlobalInstruments {
     jobs_accepted: Counter<u64>,
     jobs_finished: Counter<u64>,
@@ -37,8 +63,8 @@ fn global_instruments() -> &'static GlobalInstruments {
     INSTANCE.get_or_init(|| {
         let m = meter();
         GlobalInstruments {
-            jobs_accepted: m.u64_counter("bits.jobs.accepted.total").build(),
-            jobs_finished: m.u64_counter("bits.jobs.finished.total").build(),
+            jobs_accepted: m.u64_counter("bits.jobs.accepted").build(),
+            jobs_finished: m.u64_counter("bits.jobs.finished").build(),
             job_duration: m.f64_histogram("bits.job.duration.seconds").build(),
         }
     })
@@ -49,12 +75,8 @@ fn route_handle_instruments() -> &'static RouteHandleInstruments {
     INSTANCE.get_or_init(|| {
         let m = meter();
         RouteHandleInstruments {
-            jobs_accepted: m
-                .u64_counter("bits.route_handle.jobs.accepted.total")
-                .build(),
-            jobs_finished: m
-                .u64_counter("bits.route_handle.jobs.finished.total")
-                .build(),
+            jobs_accepted: m.u64_counter("bits.route_handle.jobs.accepted").build(),
+            jobs_finished: m.u64_counter("bits.route_handle.jobs.finished").build(),
             job_duration: m
                 .f64_histogram("bits.route_handle.job.duration.seconds")
                 .build(),
@@ -114,7 +136,9 @@ pub fn record_queue_dequeued(enqueued_at: Instant) {
 /// Call for each stranded item when the dispatcher closes.
 pub fn record_queue_drained(count: usize) {
     if count > 0 {
-        dispatcher_instruments().queue_depth.add(-(count as i64), &[]);
+        dispatcher_instruments()
+            .queue_depth
+            .add(-(count as i64), &[]);
     }
 }
 
@@ -165,6 +189,96 @@ pub fn record_route_handle_job_duration(route_handle: &str, outcome: &str, secon
     );
 }
 
+#[cfg(feature = "metrics-prometheus")]
+mod prometheus_export {
+    use std::sync::{Arc, OnceLock};
+
+    use opentelemetry_sdk::metrics::{Aggregation, Instrument, SdkMeterProvider, Stream};
+    use prometheus::{Encoder, TextEncoder};
+
+    use super::HistogramBuckets;
+
+    /// Cloneable handle over the installed Prometheus registry. Rendering it
+    /// yields the text exposition format for a `/metrics` endpoint.
+    #[derive(Clone)]
+    pub struct PrometheusHandle {
+        registry: prometheus::Registry,
+        // Keeps the meter provider alive; dropping it stops collection.
+        _provider: Arc<SdkMeterProvider>,
+    }
+
+    impl PrometheusHandle {
+        /// Renders the Prometheus text exposition format for the current metrics.
+        pub fn render(&self) -> String {
+            let mut buf = Vec::new();
+            let encoder = TextEncoder::new();
+            let families = self.registry.gather();
+            let _ = encoder.encode(&families, &mut buf);
+            String::from_utf8(buf).unwrap_or_default()
+        }
+
+        /// Content-type for the exposition format, derived from the encoder.
+        pub fn content_type(&self) -> String {
+            TextEncoder::new().format_type().to_string()
+        }
+    }
+
+    static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+
+    /// Installs the global Prometheus meter provider exactly once and returns a
+    /// cloneable handle. `buckets` carries the histogram boundaries resolved
+    /// from config. Subsequent calls ignore `buckets` and clone the existing
+    /// handle. Must run before the first metric is recorded.
+    pub fn init_prometheus(buckets: HistogramBuckets) -> PrometheusHandle {
+        HANDLE.get_or_init(|| build_handle(buckets)).clone()
+    }
+
+    /// Returns the handle installed by [`init_prometheus`], if any. Lets the
+    /// HTTP server wire up `/metrics` without threading the handle through its
+    /// public signature (metrics are process-global by design).
+    pub fn installed_handle() -> Option<PrometheusHandle> {
+        HANDLE.get().cloned()
+    }
+
+    fn build_handle(buckets: HistogramBuckets) -> PrometheusHandle {
+        let registry = prometheus::Registry::new();
+        let reader = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .build()
+            .expect("prometheus exporter should build");
+
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader)
+            .with_view(move |inst: &Instrument| {
+                let boundaries = match inst.name() {
+                    "bits.job.duration.seconds" | "bits.route_handle.job.duration.seconds" => {
+                        buckets.duration.clone()
+                    }
+                    "bits.dispatcher.queue_wait.seconds" => buckets.queue_wait.clone(),
+                    _ => return None,
+                };
+                Stream::builder()
+                    .with_aggregation(Aggregation::ExplicitBucketHistogram {
+                        boundaries,
+                        record_min_max: false,
+                    })
+                    .build()
+                    .ok()
+            })
+            .build();
+
+        opentelemetry::global::set_meter_provider(provider.clone());
+
+        PrometheusHandle {
+            registry,
+            _provider: Arc::new(provider),
+        }
+    }
+}
+
+#[cfg(feature = "metrics-prometheus")]
+pub use prometheus_export::{PrometheusHandle, init_prometheus, installed_handle};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +326,58 @@ mod tests {
         for (result, expected) in &cases {
             assert_eq!(job_result_outcome(result), *expected);
         }
+    }
+
+    #[test]
+    fn default_buckets_are_strictly_increasing() {
+        let b = HistogramBuckets::default();
+        assert!(b.duration.windows(2).all(|w| w[0] < w[1]));
+        assert!(b.queue_wait.windows(2).all(|w| w[0] < w[1]));
+    }
+}
+
+#[cfg(all(test, feature = "metrics-prometheus"))]
+mod prometheus_tests {
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::SdkMeterProvider;
+    use prometheus::{Encoder, TextEncoder};
+
+    // Builds a LOCAL provider + registry (never the global path) so rendered
+    // metric names can be asserted deterministically without process-global
+    // OnceLock/global-provider interference.
+    #[test]
+    fn rendered_counter_names_have_single_total_suffix() {
+        let registry = prometheus::Registry::new();
+        let reader = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .build()
+            .expect("exporter builds");
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("bits");
+
+        meter.u64_counter("bits.jobs.accepted").build().add(1, &[]);
+        meter
+            .f64_histogram("bits.job.duration.seconds")
+            .build()
+            .record(0.5, &[]);
+
+        let mut buf = Vec::new();
+        TextEncoder::new()
+            .encode(&registry.gather(), &mut buf)
+            .expect("encode");
+        let rendered = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            rendered.contains("bits_jobs_accepted_total"),
+            "expected single-total counter name, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("_total_total"),
+            "counter must not be double-suffixed, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("bits_job_duration_seconds_bucket"),
+            "expected histogram bucket series, got:\n{rendered}"
+        );
     }
 }

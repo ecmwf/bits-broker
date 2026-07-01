@@ -15,8 +15,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     });
     let config_str = std::fs::read_to_string(&config_path)?;
-    let (bits, server_config) = bits::parse_bootstrap(&config_str)?.into_parts()?;
+    let bootstrap = bits::parse_bootstrap(&config_str)?;
+    let metrics_buckets = bootstrap.metrics_buckets();
+    let (bits, server_config) = bootstrap.into_parts()?;
     let bits = Arc::new(bits);
+
+    // Installs the global Prometheus meter provider; `serve_with_shutdown` picks
+    // up the resulting handle and exposes it on `/metrics`.
+    bits::metrics::init_prometheus(metrics_buckets);
 
     bits::server::serve_with_shutdown(bits, server_config, bits::server::shutdown_signal()).await
 }

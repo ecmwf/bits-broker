@@ -220,16 +220,15 @@ fn bench_throughput(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 // Render — cost of generating the Prometheus text exposition.
 //
-// Runs a warmup pass first so all series are lazily created and populated
-// before measurement begins. The render cost depends on series count
-// (fixed by label cardinality), not on the number of samples recorded.
+// Warmup pass ensures all OTel series are lazily created before measurement.
+// Render cost depends on series count (fixed by label cardinality), not on
+// the number of samples recorded.
 // ---------------------------------------------------------------------------
 
 fn bench_render(c: &mut Criterion) {
     let handle = installed_handle();
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    // Warmup: run enough jobs to create all OTel series (they are lazy).
     {
         let bits = Arc::new(bits::Bits::from_config(config_full_pipeline()).unwrap());
         rt.block_on(async {

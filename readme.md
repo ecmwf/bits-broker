@@ -74,7 +74,8 @@ Load it and process jobs:
 let bits = Bits::from_config(config)?;
 
 // Submit a job — returns a handle immediately
-let handle = bits.submit(Job::new(json!({"class": "od"})));
+let handle = bits.submit(Job::new(json!({"class": "od"})))
+    .expect_accepted("broker at capacity");
 
 // Poll for the result (blocks until ready or timeout)
 let outcome = bits.poll(&handle.id, Some(Duration::from_secs(30))).await;
@@ -174,7 +175,8 @@ let bits = Bits::from_config(config)?;
 let handle = bits.add_route("my_collection", &route_yaml)?;
 
 // Submit via the named route
-let job_handle = handle.submit(Job::new(json!({"class": "od"})));
+let job_handle = handle.submit(Job::new(json!({"class": "od"})))
+    .expect_accepted("broker at capacity");
 ```
 
 If the route uses `target::remote`, the worker server is started automatically inside

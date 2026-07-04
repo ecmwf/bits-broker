@@ -377,12 +377,31 @@ impl Bits {
                 // This broker won ownership and can recover from durable state.
                 // Re-submit restored work, then immediately continue as a local poll
                 // so this request can long-poll instead of forcing an instant reconnect.
-                self.submit_with_state(Job::restore(record), true);
+                match self.submit_with_state(Job::restore(record), true) {
+                    SubmitOutcome::Accepted(_) => {}
+                    SubmitOutcome::Overloaded => {
+                        // A concurrent recovery already inserted this job —
+                        // it is already being processed, so proceed to poll.
+                        tracing::debug!(
+                            job.id = id,
+                            "recovered job already present from concurrent recovery"
+                        );
+                    }
+                }
                 self.poll_local(id, timeout)
                     .await
                     .unwrap_or(PollOutcome::Pending { id: id.to_string() })
             }
             Ok(ClaimResult::Active { owner_broker_id }) => {
+                if owner_broker_id == self.submit_context.broker_id {
+                    // The DB says we own this job but it is not in memory.
+                    // Avoid a self-proxy loop; let the client retry.
+                    tracing::warn!(
+                        job.id = id,
+                        "job owned by this broker but not in memory, returning pending"
+                    );
+                    return PollOutcome::Pending { id: id.to_string() };
+                }
                 match self.lookup_owner_lease(&owner_broker_id).await {
                     // Ownership moved concurrently to another live broker.
                     // Proxy to that owner when reachable, otherwise keep client in pending loop.

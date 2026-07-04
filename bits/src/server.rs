@@ -1,8 +1,10 @@
-//! Generic HTTP server for the bits broker.
+//! Generic HTTP server for the bits broker, exposing two endpoints (plus an
+//! optional metrics endpoint when the `metrics-prometheus` feature is enabled):
 //!
-//! Exposes a jobs endpoint:
-//!   POST /job          — submit a job; long-polls up to the configured timeout, then redirects
-//!   GET  /job/{id}     — reconnect after a poll redirect
+//! - `POST /job`    — submit a job; the server long-polls up to the configured
+//!                    timeout and returns a result or redirects the client.
+//! - `GET  /job/{id}` — reconnect after a poll redirect.
+//! - `GET  /metrics`  — Prometheus text exposition (requires `metrics-prometheus` feature).
 //!
 //! Usage from a binary crate:
 //! ```ignore

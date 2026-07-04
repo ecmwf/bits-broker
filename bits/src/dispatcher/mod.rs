@@ -55,7 +55,7 @@ pub type PendingItem<T> = (
     BoxFuture<'static, Result<T, ActionError>>,
     oneshot::Sender<Result<T, ActionError>>,
     Option<OwnedSemaphorePermit>,
-    Instant, // ponytail: enqueued_at — for queue wait-time metric
+    Instant, // enqueued_at — for queue wait-time metric
 );
 
 /// Maps `job.id` to the pending work and reply channel.

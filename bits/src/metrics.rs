@@ -148,16 +148,16 @@ pub fn record_job_accepted() {
     global_instruments().jobs_accepted.add(1, &[]);
 }
 
-pub fn record_job_finished(outcome: &str) {
+pub fn record_job_finished(outcome: &'static str) {
     global_instruments()
         .jobs_finished
-        .add(1, &[KeyValue::new(OUTCOME_KEY, outcome.to_owned())]);
+        .add(1, &[KeyValue::new(OUTCOME_KEY, outcome)]);
 }
 
-pub fn record_job_duration(outcome: &str, seconds: f64) {
+pub fn record_job_duration(outcome: &'static str, seconds: f64) {
     global_instruments()
         .job_duration
-        .record(seconds, &[KeyValue::new(OUTCOME_KEY, outcome.to_owned())]);
+        .record(seconds, &[KeyValue::new(OUTCOME_KEY, outcome)]);
 }
 
 // --- RouteHandle-scoped metrics ---
@@ -169,22 +169,22 @@ pub fn record_route_handle_job_accepted(route_handle: &str) {
     );
 }
 
-pub fn record_route_handle_job_finished(route_handle: &str, outcome: &str) {
+pub fn record_route_handle_job_finished(route_handle: &str, outcome: &'static str) {
     route_handle_instruments().jobs_finished.add(
         1,
         &[
             KeyValue::new(ROUTE_HANDLE_KEY, route_handle.to_owned()),
-            KeyValue::new(OUTCOME_KEY, outcome.to_owned()),
+            KeyValue::new(OUTCOME_KEY, outcome),
         ],
     );
 }
 
-pub fn record_route_handle_job_duration(route_handle: &str, outcome: &str, seconds: f64) {
+pub fn record_route_handle_job_duration(route_handle: &str, outcome: &'static str, seconds: f64) {
     route_handle_instruments().job_duration.record(
         seconds,
         &[
             KeyValue::new(ROUTE_HANDLE_KEY, route_handle.to_owned()),
-            KeyValue::new(OUTCOME_KEY, outcome.to_owned()),
+            KeyValue::new(OUTCOME_KEY, outcome),
         ],
     );
 }

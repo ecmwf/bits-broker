@@ -244,7 +244,8 @@ bits:
   site: bol
   env: dev
   worker_server:
-    bind: "0.0.0.0:9001"   # single shared server for all remote pools
+    host: "0.0.0.0"
+    port: 9001   # single shared server for all remote pools
 
 targets:
   mars:
@@ -343,7 +344,7 @@ An embedding host may install its own provider instead of the built-in exporter.
 
 Multiple broker instances each hold a shard of the dispatcher:
 
-- Brokers **lease resource quotas** from a central Postgres DB atomically. Local quota
+- Brokers **lease resource quotas** from a shared persistence backend (NATS or TiKV) atomically. Local quota
   reservations avoid per-job DB queries. On broker crash, unreleased reservations expire by TTL.
 - **Persistent job ownership** uses owner-aware durable records plus broker lease TTL. Reclaim is
   allowed only after owner lease expiry/missing and uses ownership-aware claim semantics.

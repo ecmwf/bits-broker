@@ -272,7 +272,7 @@ histograms render as `_bucket`/`_sum`/`_count` series.
 | `bits_route_handle_jobs_accepted_total` | counter | `route_handle` |
 | `bits_route_handle_jobs_finished_total` | counter | `route_handle`, `outcome` |
 | `bits_route_handle_job_duration_seconds` | histogram | `route_handle`, `outcome` |
-| `bits_dispatcher_queue_depth` | gauge | — |
+| `bits_dispatcher_queue_depth` | up-down counter | — |
 | `bits_dispatcher_queue_wait_seconds` | histogram | — |
 
 The `outcome` label takes one of: `success`, `redirect`, `error`, `failed`,
@@ -299,6 +299,12 @@ metrics:
 
 Bucket lists must be non-empty, finite, non-negative, and strictly increasing;
 invalid lists are rejected at startup.
+
+> **Note:** When BITS is deployed as part of Polytope Server, the frontend
+> installs its own meter provider that renames these `bits.*` instruments to the
+> `polytope.broker.*` namespace (e.g. `bits_jobs_accepted_total` →
+> `polytope_broker_requests_accepted_total`). See the Polytope Server metrics
+> documentation for the full renamed catalogue and BOBS / worker metrics.
 
 ## Kubernetes deployment
 

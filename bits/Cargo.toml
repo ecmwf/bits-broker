@@ -11,6 +11,7 @@ path = "src/lib.rs"
 default = []
 tikv = ["dep:tikv-client"]
 nats = ["dep:async-nats"]
+metrics-prometheus = ["dep:opentelemetry_sdk", "dep:opentelemetry-prometheus", "dep:prometheus"]
 
 [[example]]
 name = "hello_bits"
@@ -39,6 +40,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tikv-client = { version = "0.3", optional = true }
 async-nats = { version = "0.38", optional = true }
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", optional = true }
+opentelemetry-prometheus = { version = "0.32", optional = true }
+prometheus = { version = "0.14", optional = true }
 rand = "0.8"
 
 [dev-dependencies]
@@ -51,3 +56,8 @@ harness = false
 [[bench]]
 name = "queues"
 harness = false
+
+[[bench]]
+name = "metrics"
+harness = false
+required-features = ["metrics-prometheus"]

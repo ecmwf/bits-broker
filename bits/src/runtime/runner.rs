@@ -9,6 +9,7 @@ use tracing::Instrument;
 use crate::actions::{TargetAction, TargetResult};
 use crate::db::{PersistenceStore, PersistentJobRecord};
 use crate::job::Job;
+use crate::metrics;
 use crate::result::JobResult;
 use crate::routing::switch::Switch;
 
@@ -35,6 +36,7 @@ pub(crate) fn spawn_job(
     broker_id: String,
     already_persisted: bool,
     in_flight: Arc<AtomicUsize>,
+    route_handle: Option<String>,
 ) {
     let span = tracing::info_span!("job", job.id = %job.id);
     tracing::info!(parent: &span, "job received");
@@ -85,6 +87,19 @@ pub(crate) fn spawn_job(
             };
 
             let ms = started.elapsed().as_millis();
+
+            let outcome = metrics::job_result_outcome(&result);
+            let duration_secs = (chrono::Utc::now() - job.created_at)
+                .num_milliseconds()
+                .max(0) as f64
+                / 1000.0;
+            metrics::record_job_finished(outcome);
+            metrics::record_job_duration(outcome, duration_secs);
+            if let Some(ref rh) = route_handle {
+                metrics::record_route_handle_job_finished(rh, outcome);
+                metrics::record_route_handle_job_duration(rh, outcome, duration_secs);
+            }
+
             match &result {
                 JobResult::Success { .. } => tracing::info!(duration_ms = ms, "job completed"),
                 JobResult::Redirect { .. } => tracing::info!(duration_ms = ms, "job redirected"),

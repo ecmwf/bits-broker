@@ -130,7 +130,11 @@ async fn request_id_generation_added_route_emits_configured_site_env_and_same_sl
         .expect_accepted("submit should not be rejected");
     let earliest = Utc::now();
     let handles = (0..8)
-        .map(|sequence| added.submit(Job::new(serde_json::json!({"sequence": sequence}))))
+        .map(|sequence| {
+            added
+                .submit(Job::new(serde_json::json!({"sequence": sequence})))
+                .expect_accepted("added route submit should not be rejected")
+        })
         .collect::<Vec<_>>();
     let latest = Utc::now();
 

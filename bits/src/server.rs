@@ -1,8 +1,10 @@
-//! Generic HTTP server for the bits broker.
+//! Generic HTTP server for the bits broker, exposing two endpoints (plus an
+//! optional metrics endpoint when the `metrics-prometheus` feature is enabled):
 //!
-//! Exposes a jobs endpoint:
-//!   POST /job          — submit a job; long-polls up to the configured timeout, then redirects
-//!   GET  /job/{id}     — reconnect after a poll redirect
+//! - `POST /job`    — submit a job; the server long-polls up to the configured
+//!                    timeout and returns a result or redirects the client.
+//! - `GET  /job/{id}` — reconnect after a poll redirect.
+//! - `GET  /metrics`  — Prometheus text exposition (requires `metrics-prometheus` feature).
 //!
 //! Usage from a binary crate:
 //! ```ignore
@@ -10,7 +12,6 @@
 //! let bits = Arc::new(bits);
 //! bits::server::serve(bits, server_config).await?;
 //! ```
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -214,6 +215,19 @@ pub async fn serve(
     serve_with_shutdown(bits, config, std::future::pending()).await
 }
 
+/// Feature-gated router exposing `GET /metrics` in the Prometheus text format.
+/// Kept separate so the core [`router`] and [`AppState`] stay untouched.
+#[cfg(feature = "metrics-prometheus")]
+fn metrics_router(handle: crate::metrics::PrometheusHandle) -> Router {
+    async fn render(State(handle): State<crate::metrics::PrometheusHandle>) -> Response {
+        let body = handle.render();
+        ([(header::CONTENT_TYPE, handle.content_type())], body).into_response()
+    }
+    Router::new()
+        .route("/metrics", get(render))
+        .with_state(handle)
+}
+
 /// Start the HTTP server with a graceful shutdown future.
 ///
 /// When `shutdown` completes, the server stops accepting new connections
@@ -227,6 +241,14 @@ pub async fn serve_with_shutdown(
     let routes = bits.route_names().join(", ");
 
     let app = router(bits, config.poll_timeout(), config.retry_after_secs);
+    // Metrics are process-global; pick up the handle installed by
+    // `metrics::init_prometheus` (if any) rather than threading it through the
+    // public signature, which would make the feature non-additive.
+    #[cfg(feature = "metrics-prometheus")]
+    let app = match crate::metrics::installed_handle() {
+        Some(handle) => app.merge(metrics_router(handle)),
+        None => app,
+    };
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&bind_addr).await?;
@@ -322,5 +344,39 @@ fn result_to_response(result: JobResult, retry_after_secs: u64) -> Response {
             "client disconnected",
             false,
         ),
+    }
+}
+
+#[cfg(all(test, feature = "metrics-prometheus"))]
+mod metrics_router_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_exposition() {
+        let handle = crate::metrics::init_prometheus(crate::metrics::HistogramBuckets::default());
+        let app = metrics_router(handle);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve metrics");
+        });
+
+        let resp = reqwest::get(format!("http://{addr}/metrics"))
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.contains("text/plain"),
+            "unexpected content-type: {content_type}"
+        );
+        let body = resp.text().await.expect("body");
+        assert!(!body.is_empty(), "metrics body should not be empty");
     }
 }

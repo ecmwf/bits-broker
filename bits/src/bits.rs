@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use dashmap::DashMap;
 
@@ -12,8 +12,8 @@ use crate::result::JobResult;
 use crate::route_handle::RouteHandle;
 use crate::routing::switch::Switch;
 use crate::runtime::maintenance::{ConnectedGuard, ShutdownSignal, start_sweeper};
-use crate::runtime::recovery::{LeaseLookup, decode_job_id, slot_from_job_id};
-use crate::runtime::runner::spawn_job;
+use crate::runtime::recovery::{LeaseLookup, slot_from_job_id};
+use crate::runtime::submission::{SubmissionAdmission, SubmitContext};
 
 /// Default reconnect buffer added on top of the poll timeout.
 const DEFAULT_RECONNECT_BUFFER: Duration = Duration::from_secs(5);
@@ -65,22 +65,12 @@ pub struct Bits {
     pub(crate) router: Arc<Switch>,
     #[allow(dead_code)]
     pub(crate) route_factory: RouteFactory,
-    pub(crate) jobs: Arc<DashMap<String, Arc<Job>>>,
-    pub(crate) broker_id: String,
-    pub(crate) site: String,
-    pub(crate) env: String,
-    pub(crate) broker_slot: u16,
+    pub(crate) submit_context: SubmitContext,
     pub(crate) internal_poll_base_url: String,
     pub(crate) internal_poll_timeout: Duration,
-    pub(crate) persist_after: Option<Duration>,
-    pub(crate) job_store: Option<Arc<dyn PersistenceStore>>,
     pub(crate) internal_client: reqwest::Client,
-    pub(crate) reconnect_buffer: Duration,
     pub(crate) shutdown: Arc<ShutdownSignal>,
-    pub(crate) in_flight: Arc<AtomicUsize>,
     pub(crate) added_routes: Arc<std::sync::RwLock<Vec<RouteHandle>>>,
-    job_count: Arc<AtomicUsize>,
-    max_jobs: usize,
     sweeper_handle: Option<std::thread::JoinHandle<()>>,
     heartbeat_handle: Option<std::thread::JoinHandle<()>>,
     cleanup_tx: Option<std::sync::mpsc::Sender<String>>,
@@ -108,43 +98,46 @@ impl Bits {
                 Some((site.to_string(), env.to_string(), slot.parse::<u16>().ok()?))
             })
             .unwrap_or_else(|| ("tst".to_string(), "tst".to_string(), 0));
-        let mut bits = Bits {
-            router: Arc::new(router),
-            route_factory: RouteFactory::default(),
+        let submit_context = SubmitContext {
             jobs: Arc::new(DashMap::new()),
+            job_count: job_count.clone(),
+            max_jobs: DEFAULT_MAX_JOBS,
             broker_id,
             site,
             env,
             broker_slot,
+            job_store,
+            persist_after,
+            reconnect_buffer: DEFAULT_RECONNECT_BUFFER,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut bits = Bits {
+            router: Arc::new(router),
+            route_factory: RouteFactory::default(),
+            submit_context,
             internal_poll_base_url,
             internal_poll_timeout,
-            persist_after,
-            job_store,
             internal_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("failed to build reqwest client"),
-            reconnect_buffer: DEFAULT_RECONNECT_BUFFER,
             shutdown: shutdown.clone(),
-            in_flight: Arc::new(AtomicUsize::new(0)),
             added_routes: Arc::new(std::sync::RwLock::new(vec![])),
-            job_count: job_count.clone(),
-            max_jobs: DEFAULT_MAX_JOBS,
             sweeper_handle: None,
             heartbeat_handle: None,
             cleanup_tx: None,
             cleanup_handle: None,
         };
-        if let Some(store) = &bits.job_store {
+        if let Some(store) = &bits.submit_context.job_store {
             let (tx, handle) = start_cleanup_worker(Arc::clone(store));
             bits.cleanup_tx = Some(tx);
             bits.cleanup_handle = Some(handle);
         }
         bits.sweeper_handle = Some(start_sweeper(
-            bits.jobs.clone(),
+            bits.submit_context.jobs.clone(),
             DEFAULT_SWEEP_INTERVAL,
-            bits.job_store.clone(),
+            bits.submit_context.job_store.clone(),
             shutdown,
             job_count,
         ));
@@ -174,45 +167,48 @@ impl Bits {
         let broker_id = format!("{}-{}-{}", parsed.site, parsed.env, parsed.broker_slot);
         let shutdown = Arc::new(ShutdownSignal::new());
         let job_count = Arc::new(AtomicUsize::new(0));
-        let mut bits = Bits {
-            router: Arc::new(parsed.router),
-            route_factory: parsed.route_factory,
+        let submit_context = SubmitContext {
             jobs: Arc::new(DashMap::new()),
+            job_count: job_count.clone(),
+            max_jobs: parsed.max_jobs,
             broker_id,
             site: parsed.site,
             env: parsed.env,
             broker_slot: parsed.broker_slot,
+            job_store: parsed.job_store,
+            persist_after: parsed.persist_after,
+            reconnect_buffer: parsed.reconnect_buffer,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut bits = Bits {
+            router: Arc::new(parsed.router),
+            route_factory: parsed.route_factory,
+            submit_context,
             internal_poll_base_url: parsed.internal_poll_endpoint,
             internal_poll_timeout: parsed.internal_poll_timeout,
-            persist_after: parsed.persist_after,
-            job_store: parsed.job_store,
             internal_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| ConfigError::validation("internal_client", e.to_string()))?,
-            reconnect_buffer: parsed.reconnect_buffer,
             shutdown: shutdown.clone(),
-            in_flight: Arc::new(AtomicUsize::new(0)),
             added_routes: Arc::new(std::sync::RwLock::new(vec![])),
-            job_count: job_count.clone(),
-            max_jobs: parsed.max_jobs,
             sweeper_handle: None,
             heartbeat_handle: None,
             cleanup_tx: None,
             cleanup_handle: None,
         };
 
-        if let Some(store) = &bits.job_store {
+        if let Some(store) = &bits.submit_context.job_store {
             let (tx, handle) = start_cleanup_worker(Arc::clone(store));
             bits.cleanup_tx = Some(tx);
             bits.cleanup_handle = Some(handle);
         }
 
         bits.sweeper_handle = Some(start_sweeper(
-            bits.jobs.clone(),
+            bits.submit_context.jobs.clone(),
             sweep_interval,
-            bits.job_store.clone(),
+            bits.submit_context.job_store.clone(),
             shutdown,
             job_count,
         ));
@@ -223,22 +219,22 @@ impl Bits {
 
     /// Returns the broker instance identifier.
     pub fn broker_id(&self) -> &str {
-        &self.broker_id
+        &self.submit_context.broker_id
     }
 
     /// Returns the validated site tag used for generated broker and request identifiers.
     pub fn site(&self) -> &str {
-        &self.site
+        &self.submit_context.site
     }
 
     /// Returns the validated environment tag used for generated broker and request identifiers.
     pub fn env(&self) -> &str {
-        &self.env
+        &self.submit_context.env
     }
 
     /// Returns the allocated broker slot for this process.
     pub fn broker_slot(&self) -> u16 {
-        self.broker_slot
+        self.submit_context.broker_slot
     }
 
     pub fn route_factory(&self) -> &RouteFactory {
@@ -296,15 +292,7 @@ impl Bits {
         let handle = RouteHandle {
             name: name.to_string(),
             router: Arc::new(switch),
-            jobs: self.jobs.clone(),
-            broker_id: self.broker_id.clone(),
-            site: self.site.clone(),
-            env: self.env.clone(),
-            broker_slot: self.broker_slot,
-            job_store: self.job_store.clone(),
-            persist_after: self.persist_after,
-            reconnect_buffer: self.reconnect_buffer,
-            in_flight: self.in_flight.clone(),
+            submit_context: self.submit_context.clone(),
         };
 
         // Store a clone of the handle for enumeration
@@ -325,69 +313,29 @@ impl Bits {
     /// Must be called from within a Tokio runtime (`#[tokio::main]` or `#[tokio::test]`).
     /// Panics if no runtime is available.
     pub fn submit(&self, job: Job) -> SubmitOutcome {
-        self.submit_with_state(job, false)
-    }
-
-    fn submit_with_state(&self, mut job: Job, already_persisted: bool) -> SubmitOutcome {
-        if decode_job_id(&job.id).is_err() {
-            job.id = self.new_job_id();
-        }
-        let job_id = job.id.clone();
-
-        if already_persisted {
-            // Recovery submits bypass the limit but still count so that
-            // remove_job decrements stay balanced.
-            self.job_count.fetch_add(1, Ordering::Relaxed);
-        } else {
-            // CAS loop: reserve a job slot before inserting into the map.
-            loop {
-                let current = self.job_count.load(Ordering::Relaxed);
-                if current >= self.max_jobs {
-                    tracing::warn!(
-                        max_jobs = self.max_jobs,
-                        current = current,
-                        "broker at capacity, rejecting job"
-                    );
-                    return SubmitOutcome::Overloaded;
-                }
-                if self
-                    .job_count
-                    .compare_exchange_weak(
-                        current,
-                        current + 1,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-        }
-
-        job.set_reconnect_deadline(Instant::now() + self.reconnect_buffer);
-
-        let job = Arc::new(job);
-        self.jobs.insert(job_id.clone(), job.clone());
-
-        spawn_job(
+        self.submit_context.submit(
             self.router.clone(),
             job,
-            self.job_store.clone(),
-            self.persist_after,
-            self.broker_id.clone(),
-            already_persisted,
-            self.in_flight.clone(),
-        );
+            SubmissionAdmission::EnforceLimit,
+            None,
+        )
+    }
 
-        SubmitOutcome::Accepted(JobHandle { id: job_id })
+    fn submit_with_state(&self, job: Job, already_persisted: bool) -> SubmitOutcome {
+        let admission = if already_persisted {
+            SubmissionAdmission::BypassLimitAlreadyPersisted
+        } else {
+            SubmissionAdmission::EnforceLimit
+        };
+        self.submit_context
+            .submit(self.router.clone(), job, admission, None)
     }
 
     /// Requests cancellation for a previously submitted job.
     ///
     /// Cancellation is best-effort and is observed at action boundaries.
     pub fn cancel(&self, id: &str) {
-        if let Some(job) = self.jobs.get(id) {
+        if let Some(job) = self.submit_context.jobs.get(id) {
             job.cancelled.store(true, Ordering::Release);
         }
     }
@@ -404,7 +352,7 @@ impl Bits {
             return PollOutcome::NotFound;
         };
 
-        if owner != self.broker_id {
+        if owner != self.submit_context.broker_id {
             match self.lookup_owner_lease(&owner).await {
                 LeaseLookup::Active(lease) => {
                     if let Some(outcome) = self.try_proxy_with_lease(&lease, id, timeout).await {
@@ -417,7 +365,7 @@ impl Bits {
             }
         }
 
-        let Some(store) = &self.job_store else {
+        let Some(store) = &self.submit_context.job_store else {
             return PollOutcome::NotFound;
         };
 
@@ -429,12 +377,31 @@ impl Bits {
                 // This broker won ownership and can recover from durable state.
                 // Re-submit restored work, then immediately continue as a local poll
                 // so this request can long-poll instead of forcing an instant reconnect.
-                self.submit_with_state(Job::restore(record), true);
+                match self.submit_with_state(Job::restore(record), true) {
+                    SubmitOutcome::Accepted(_) => {}
+                    SubmitOutcome::Overloaded => {
+                        // A concurrent recovery already inserted this job —
+                        // it is already being processed, so proceed to poll.
+                        tracing::debug!(
+                            job.id = id,
+                            "recovered job already present from concurrent recovery"
+                        );
+                    }
+                }
                 self.poll_local(id, timeout)
                     .await
                     .unwrap_or(PollOutcome::Pending { id: id.to_string() })
             }
             Ok(ClaimResult::Active { owner_broker_id }) => {
+                if owner_broker_id == self.submit_context.broker_id {
+                    // The DB says we own this job but it is not in memory.
+                    // Avoid a self-proxy loop; let the client retry.
+                    tracing::warn!(
+                        job.id = id,
+                        "job owned by this broker but not in memory, returning pending"
+                    );
+                    return PollOutcome::Pending { id: id.to_string() };
+                }
                 match self.lookup_owner_lease(&owner_broker_id).await {
                     // Ownership moved concurrently to another live broker.
                     // Proxy to that owner when reachable, otherwise keep client in pending loop.
@@ -448,7 +415,9 @@ impl Bits {
                 }
             }
             // No durable record exists for this id anymore.
-            Ok(ClaimResult::NotFound) if owner == self.broker_id => PollOutcome::NotFound,
+            Ok(ClaimResult::NotFound) if owner == self.submit_context.broker_id => {
+                PollOutcome::NotFound
+            }
             Ok(ClaimResult::NotFound) => PollOutcome::JobLost,
             Err(DbError::Conflict(message)) => {
                 // Rare optimistic-claim race. Keep response in pending loop so the
@@ -479,12 +448,12 @@ impl Bits {
     }
 
     async fn poll_local(&self, id: &str, timeout: Option<Duration>) -> Option<PollOutcome> {
-        let job = self.jobs.get(id).map(|r| r.clone())?;
+        let job = self.submit_context.jobs.get(id).map(|r| r.clone())?;
 
         let _guard = ConnectedGuard::new(
             job.active_pollers.clone(),
             job.reconnect_deadline_nanos.clone(),
-            self.reconnect_buffer,
+            self.submit_context.reconnect_buffer,
         );
 
         let notified = job.notify.notified();
@@ -492,7 +461,7 @@ impl Bits {
         notified.as_mut().enable();
 
         // Take the result while holding the result lock, then drop the guard
-        // before touching self.jobs. The sweeper's remove_if also locks
+        // before touching the jobs map. The sweeper's remove_if also locks
         // job.result under the DashMap shard lock; holding result across a
         // DashMap operation here would invert that order and risk deadlock.
         let taken = job.result.lock().unwrap_or_else(|p| p.into_inner()).take();
@@ -535,18 +504,13 @@ impl Bits {
     }
 
     fn remove_job(&self, id: &str) {
-        if self.jobs.remove(id).is_some() {
-            // Saturating decrement: RouteHandle submits bypass the counter,
-            // so their removal must not underflow.
-            let _ = self
-                .job_count
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+        if self.submit_context.jobs.remove(id).is_some() {
+            let _ = self.submit_context.job_count.fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |n| n.checked_sub(1),
+            );
         }
-    }
-
-    fn new_job_id(&self) -> String {
-        crate::request_id::encode(&self.site, &self.env, self.broker_slot, chrono::Utc::now())
-            .expect("runtime site/env/slot should encode as a request ID")
     }
 }
 
@@ -718,19 +682,23 @@ targets:
         )
         .unwrap();
 
-        let preserved = handle.submit(Job::new_with_id(
-            valid_id.clone(),
-            serde_json::json!({"case": "valid"}),
-        ));
-        let replaced = handle.submit(Job::new_with_id(
-            format!(
-                "{}-{}-{}~550e8400-e29b-41d4-a716-446655440000",
-                handle.site(),
-                handle.env(),
-                handle.broker_slot()
-            ),
-            serde_json::json!({"case": "legacy"}),
-        ));
+        let preserved = handle
+            .submit(Job::new_with_id(
+                valid_id.clone(),
+                serde_json::json!({"case": "valid"}),
+            ))
+            .expect_accepted("route handle submit should not be rejected");
+        let replaced = handle
+            .submit(Job::new_with_id(
+                format!(
+                    "{}-{}-{}~550e8400-e29b-41d4-a716-446655440000",
+                    handle.site(),
+                    handle.env(),
+                    handle.broker_slot()
+                ),
+                serde_json::json!({"case": "legacy"}),
+            ))
+            .expect_accepted("route handle submit should not be rejected");
 
         assert_eq!(preserved.id, valid_id);
         assert_ne!(
@@ -762,7 +730,9 @@ targets:
         let handle = bits.add_route("my_route", &route_val).expect("add_route");
 
         let job = Job::new(serde_json::json!({}));
-        let job_handle = handle.submit(job);
+        let job_handle = handle
+            .submit(job)
+            .expect_accepted("route handle submit should not be rejected");
 
         let outcome = bits
             .poll(&job_handle.id, Some(Duration::from_secs(5)))
@@ -794,8 +764,12 @@ targets:
             .add_route("route_b", &route_val_b)
             .expect("add_route_b");
 
-        let job_a = handle_a.submit(Job::new(serde_json::json!({"n": 1})));
-        let job_b = handle_b.submit(Job::new(serde_json::json!({"n": 2})));
+        let job_a = handle_a
+            .submit(Job::new(serde_json::json!({"n": 1})))
+            .expect_accepted("route handle submit should not be rejected");
+        let job_b = handle_b
+            .submit(Job::new(serde_json::json!({"n": 2})))
+            .expect_accepted("route handle submit should not be rejected");
 
         let outcome_a = bits.poll(&job_a.id, Some(Duration::from_secs(5))).await;
         let outcome_b = bits.poll(&job_b.id, Some(Duration::from_secs(5))).await;

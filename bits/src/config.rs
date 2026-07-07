@@ -111,6 +111,42 @@ impl Default for DispatcherSettings {
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetricsConfig {
+    #[serde(default)]
+    duration_buckets: Option<Vec<f64>>,
+    #[serde(default)]
+    queue_wait_buckets: Option<Vec<f64>>,
+}
+
+/// Validates a user-provided histogram bucket list as a strict superset of the
+/// SDK's own checks: rejects empty, non-finite, negative, and
+/// non-strictly-increasing (also catching duplicates).
+fn validate_buckets(field: &str, buckets: &[f64]) -> Result<(), BitsError> {
+    if buckets.is_empty() {
+        return Err(ConfigError::validation(field, "must not be empty").into());
+    }
+    let mut prev: Option<f64> = None;
+    for &b in buckets {
+        if !b.is_finite() {
+            return Err(
+                ConfigError::validation(field, "must be finite (no NaN or infinity)").into(),
+            );
+        }
+        if b < 0.0 {
+            return Err(ConfigError::validation(field, "must not be negative").into());
+        }
+        if let Some(p) = prev
+            && b <= p
+        {
+            return Err(ConfigError::validation(field, "must be strictly increasing").into());
+        }
+        prev = Some(b);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkerServerConfig {
@@ -289,6 +325,9 @@ pub struct Bootstrap {
     pub server_config: ServerConfig,
     /// Whether the input YAML contained a `server:` section.
     pub had_server_section: bool,
+    /// Histogram bucket boundaries resolved from the `metrics:` section.
+    #[cfg_attr(not(feature = "metrics-prometheus"), allow(dead_code))]
+    metrics_buckets: crate::metrics::HistogramBuckets,
 }
 
 impl Bootstrap {
@@ -301,6 +340,14 @@ impl Bootstrap {
     pub fn into_parts(self) -> Result<(Bits, ServerConfig), BitsError> {
         let bits = Bits::from_runtime_config(self.runtime_config)?;
         Ok((bits, self.server_config))
+    }
+
+    /// Returns the histogram bucket boundaries resolved from the `metrics:`
+    /// section (or defaults). Read this before `into_parts()`/`into_bits()`
+    /// consume the bootstrap, and pass it to
+    /// [`crate::metrics::init_prometheus`].
+    pub fn metrics_buckets(&self) -> crate::metrics::HistogramBuckets {
+        self.metrics_buckets.clone()
     }
 }
 
@@ -320,6 +367,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         "checks",
         "transforms",
         "targets",
+        "metrics",
     ];
     if let Some(map) = raw.as_object() {
         for key in map.keys() {
@@ -392,6 +440,29 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         })
         .transpose()?
         .unwrap_or_default();
+
+    let metrics_cfg: MetricsConfig = raw
+        .get("metrics")
+        .cloned()
+        .map(|v| {
+            serde_json::from_value(v).map_err(|e| ConfigError::Decode {
+                path: "metrics".to_string(),
+                target: "MetricsConfig".to_string(),
+                source: e,
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    let mut metrics_buckets = crate::metrics::HistogramBuckets::default();
+    if let Some(duration) = metrics_cfg.duration_buckets {
+        validate_buckets("metrics.duration_buckets", &duration)?;
+        metrics_buckets.duration = duration;
+    }
+    if let Some(queue_wait) = metrics_cfg.queue_wait_buckets {
+        validate_buckets("metrics.queue_wait_buckets", &queue_wait)?;
+        metrics_buckets.queue_wait = queue_wait;
+    }
 
     let poll_timeout =
         positive_duration_secs("server.poll_timeout_secs", server_config.poll_timeout_secs)?;
@@ -726,6 +797,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         },
         server_config,
         had_server_section,
+        metrics_buckets,
     })
 }
 
@@ -1420,6 +1492,87 @@ bits:
 
         assert!(matches!(err, crate::error::BitsError::Persistence(_)));
         assert_eq!(err.code(), "PERSISTENCE_BACKEND");
+    }
+
+    #[test]
+    fn metrics_section_custom_buckets_resolve() {
+        let config = r#"
+bits:
+  site: tst
+  env: dev
+metrics:
+  duration_buckets: [0.1, 0.2, 0.5]
+  queue_wait_buckets: [0.01, 0.02]
+"#;
+        let bootstrap =
+            crate::config::parse_bootstrap(config).expect("custom metrics buckets should parse");
+        let buckets = bootstrap.metrics_buckets();
+        assert_eq!(buckets.duration, vec![0.1, 0.2, 0.5]);
+        assert_eq!(buckets.queue_wait, vec![0.01, 0.02]);
+    }
+
+    #[test]
+    fn metrics_section_omitted_yields_defaults() {
+        let config = r#"
+bits:
+  site: tst
+  env: dev
+"#;
+        let bootstrap = crate::config::parse_bootstrap(config).expect("should parse");
+        let buckets = bootstrap.metrics_buckets();
+        let defaults = crate::metrics::HistogramBuckets::default();
+        assert_eq!(buckets.duration, defaults.duration);
+        assert_eq!(buckets.queue_wait, defaults.queue_wait);
+    }
+
+    #[test]
+    fn metrics_partial_section_falls_back_per_field() {
+        let config = r#"
+bits:
+  site: tst
+  env: dev
+metrics:
+  duration_buckets: [0.1, 0.2]
+"#;
+        let bootstrap = crate::config::parse_bootstrap(config).expect("should parse");
+        let buckets = bootstrap.metrics_buckets();
+        assert_eq!(buckets.duration, vec![0.1, 0.2]);
+        assert_eq!(
+            buckets.queue_wait,
+            crate::metrics::HistogramBuckets::default().queue_wait
+        );
+    }
+
+    #[test]
+    fn metrics_invalid_buckets_are_rejected() {
+        let cases = [
+            ("duration_buckets: []", "metrics.duration_buckets"),
+            ("duration_buckets: [-1.0, 2.0]", "metrics.duration_buckets"),
+            ("duration_buckets: [0.1, 0.1]", "metrics.duration_buckets"),
+            ("duration_buckets: [0.5, 0.2]", "metrics.duration_buckets"),
+            (
+                "queue_wait_buckets: [1.0, 0.5]",
+                "metrics.queue_wait_buckets",
+            ),
+        ];
+        for (line, field) in cases {
+            let config = format!("bits:\n  site: tst\n  env: dev\nmetrics:\n  {line}\n");
+            let err = crate::config::parse_bootstrap(&config)
+                .err()
+                .unwrap_or_else(|| panic!("{line} should be rejected"));
+            assert_eq!(err.code(), "CONFIG_VALIDATION", "unexpected error: {err}");
+            assert!(
+                err.to_string().contains(field),
+                "error should identify {field}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_buckets_rejects_non_finite() {
+        assert!(super::validate_buckets("metrics.duration_buckets", &[f64::NAN]).is_err());
+        assert!(super::validate_buckets("metrics.duration_buckets", &[f64::INFINITY]).is_err());
+        assert!(super::validate_buckets("metrics.duration_buckets", &[0.1, 0.2]).is_ok());
     }
 
     #[tokio::test]

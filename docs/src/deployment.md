@@ -219,6 +219,93 @@ backend bits_backend
 Standard TCP health checks on the HTTP port are sufficient. BITS does not yet
 expose dedicated health endpoints, planned for a future release.
 
+## Metrics
+
+When built with the `metrics-prometheus` feature (enabled by default in the
+`bits-server` binary), the broker exposes a Prometheus scrape endpoint on the
+same host/port as the job API:
+
+```
+GET /metrics
+```
+
+The response is the Prometheus text exposition format
+(`Content-Type: text/plain; version=0.0.4`). Scrape it directly:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+### Sample Prometheus scrape config
+
+```yaml
+scrape_configs:
+  - job_name: bits
+    metrics_path: /metrics
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      # Keep only bits broker pods, scrape the http port directly by pod IP.
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        regex: bits-broker
+        action: keep
+      - source_labels: [__address__]
+        regex: (.+):\d+
+        replacement: ${1}:8080
+        target_label: __address__
+```
+
+In Kubernetes, Prometheus scrapes pods directly by pod IP, so the load-balancer
+sticky-routing concern for `/job` does not apply to scrapes. There is no need
+for a separate metrics port — `/metrics` shares the job port (default `8080`).
+
+### Exposed metrics
+
+Monotonic counters render with a `_total` suffix (added by the exporter);
+histograms render as `_bucket`/`_sum`/`_count` series.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `bits_jobs_accepted_total` | counter | — |
+| `bits_jobs_finished_total` | counter | `outcome` |
+| `bits_job_duration_seconds` | histogram | `outcome` |
+| `bits_route_handle_jobs_accepted_total` | counter | `route_handle` |
+| `bits_route_handle_jobs_finished_total` | counter | `route_handle`, `outcome` |
+| `bits_route_handle_job_duration_seconds` | histogram | `route_handle`, `outcome` |
+| `bits_dispatcher_queue_depth` | up-down counter | — |
+| `bits_dispatcher_queue_wait_seconds` | histogram | — |
+
+The `outcome` label takes one of: `success`, `redirect`, `error`, `failed`,
+`overloaded`, `cancelled`, `client_gone`.
+
+Every series also carries an `otel_scope_name="bits"` label, and the exporter
+emits a `target_info` gauge, both added by the OpenTelemetry Prometheus
+exporter.
+
+### Configuring histogram buckets
+
+Histogram bucket boundaries (in seconds) are config-driven via an optional
+top-level `metrics:` section. Both fields are optional; omitted fields fall
+back to the defaults shown here:
+
+```yaml
+metrics:
+  # Boundaries for the job-duration histograms
+  # (bits_job_duration_seconds + the route_handle variant).
+  duration_buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 60, 120]
+  # Boundaries for the dispatcher queue-wait histogram.
+  queue_wait_buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30]
+```
+
+Bucket lists must be non-empty, finite, non-negative, and strictly increasing;
+invalid lists are rejected at startup.
+
+> **Note:** When BITS is deployed as part of Polytope Server, the frontend
+> installs its own meter provider that renames these `bits.*` instruments to the
+> `polytope.broker.*` namespace (e.g. `bits_jobs_accepted_total` →
+> `polytope_broker_requests_accepted_total`). See the Polytope Server metrics
+> documentation for the full renamed catalogue and BOBS / worker metrics.
+
 ## Kubernetes deployment
 
 ### Graceful shutdown

@@ -30,8 +30,12 @@ targets:
         .add_route("route_b", &route_b_val)
         .expect("add route_b");
 
-    let job_a = handle_a.submit(Job::new(serde_json::json!({"route": "a"})));
-    let job_b = handle_b.submit(Job::new(serde_json::json!({"route": "b"})));
+    let job_a = handle_a
+        .submit(Job::new(serde_json::json!({"route": "a"})))
+        .expect_accepted("route_a submit should not be rejected");
+    let job_b = handle_b
+        .submit(Job::new(serde_json::json!({"route": "b"})))
+        .expect_accepted("route_b submit should not be rejected");
 
     let outcome_a = bits.poll(&job_a.id, Some(Duration::from_secs(5))).await;
     let outcome_b = bits.poll(&job_b.id, Some(Duration::from_secs(5))).await;

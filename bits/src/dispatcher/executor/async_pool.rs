@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::dispatcher::queue::Queue;
 use crate::dispatcher::{Executor, PendingMap};
+use crate::metrics;
 
 /// Runs work futures on a pool of Tokio tasks.
 ///
@@ -35,10 +36,11 @@ impl<T: Send + 'static> Executor<T> for AsyncPoolExecutor {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .remove(&job.id);
-                    let Some((_guard, work, reply_tx, permit)) = item else {
+                    let Some((_guard, work, reply_tx, permit, enqueued_at)) = item else {
                         continue;
                     };
                     drop(permit);
+                    metrics::record_queue_dequeued(enqueued_at);
 
                     if reply_tx.is_closed() {
                         continue;

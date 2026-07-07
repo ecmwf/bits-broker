@@ -12,6 +12,8 @@ pub mod dispatcher;
 pub mod error;
 /// Job model and lifecycle state.
 pub mod job;
+/// Job lifecycle metrics (OpenTelemetry).
+pub mod metrics;
 /// Public request ID encoding and decoding helpers.
 pub mod request_id;
 /// Terminal job results returned to clients.

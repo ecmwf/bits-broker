@@ -244,7 +244,8 @@ bits:
   site: bol
   env: dev
   worker_server:
-    bind: "0.0.0.0:9001"   # single shared server for all remote pools
+    host: "0.0.0.0"
+    port: 9001   # single shared server for all remote pools
 
 targets:
   mars:
@@ -313,11 +314,37 @@ and returns a URL the client fetches directly, keeping BITS out of the data path
 
 ---
 
+## Observability
+
+BITS records job-lifecycle and dispatcher metrics through the OpenTelemetry **global** meter.
+The instrumentation lives in the core library and is always compiled; with no meter provider
+installed the instruments are no-ops (tests, or embedding hosts that bring their own provider).
+
+- **Instruments** — job counters (accepted / finished by `outcome`), job-duration histograms,
+  and dispatcher queue depth / wait time, each also emitted per route handle.
+- **Opt-in Prometheus exporter** — the `metrics-prometheus` cargo feature installs an
+  `SdkMeterProvider` backed by a Prometheus reader and exposes a scrapeable `GET /metrics` on
+  the same HTTP server as the job API. The feature is **additive**: the server picks up the
+  handle installed by `metrics::init_prometheus` from a process-global `OnceLock`, so enabling
+  the feature never changes the public `serve` signatures.
+- **Config-driven histogram buckets** — a top-level `metrics:` section sets `duration_buckets`
+  and `queue_wait_buckets` (seconds), with sensible defaults. Boundaries are applied at meter
+  provider construction via SDK **Views** keyed by instrument name, so the core instrument
+  definitions stay free of exporter concerns. Bucket lists are validated at parse time
+  (non-empty, finite, non-negative, strictly increasing).
+- **Naming** — counter instruments are named without a `.total` suffix; the Prometheus exporter
+  appends `_total`. Every series also carries an `otel_scope_name="bits"` label.
+
+Metrics are process-global by design, consistent with the OpenTelemetry global meter provider.
+An embedding host may install its own provider instead of the built-in exporter.
+
+---
+
 ## Distributed Broker
 
 Multiple broker instances each hold a shard of the dispatcher:
 
-- Brokers **lease resource quotas** from a central Postgres DB atomically. Local quota
+- Brokers **lease resource quotas** from a shared persistence backend (NATS or TiKV) atomically. Local quota
   reservations avoid per-job DB queries. On broker crash, unreleased reservations expire by TTL.
 - **Persistent job ownership** uses owner-aware durable records plus broker lease TTL. Reclaim is
   allowed only after owner lease expiry/missing and uses ownership-aware claim semantics.

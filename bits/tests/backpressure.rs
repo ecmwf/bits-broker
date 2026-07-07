@@ -269,6 +269,63 @@ routes:
 }
 
 #[tokio::test]
+async fn route_handle_submit_returns_overloaded_at_max_jobs() {
+    let _ = common::TargetDummyDelay::new(500);
+    let config = r#"
+bits:
+  site: tst
+  env: dev
+  max_jobs: 1
+targets:
+  slow:
+    type: dummy_dispatch
+    duration_ms: 500
+"#;
+    let bits = parse_bootstrap(config)
+        .expect("parse")
+        .into_bits()
+        .expect("build");
+    let route = serde_json::json!([{"added": ["target::slow"]}]);
+    let handle = bits.add_route("added", &route).expect("add route");
+
+    let first = handle.submit(Job::new(serde_json::json!({})));
+    assert!(matches!(first, SubmitOutcome::Accepted(_)));
+
+    let second = handle.submit(Job::new(serde_json::json!({})));
+    assert!(matches!(second, SubmitOutcome::Overloaded));
+}
+
+#[tokio::test]
+async fn bits_and_route_handle_share_max_jobs_counter() {
+    let _ = common::TargetDummyDelay::new(500);
+    let config = r#"
+bits:
+  site: tst
+  env: dev
+  max_jobs: 1
+targets:
+  slow:
+    type: dummy_dispatch
+    duration_ms: 500
+routes:
+  - default:
+      - target::slow
+"#;
+    let bits = parse_bootstrap(config)
+        .expect("parse")
+        .into_bits()
+        .expect("build");
+    let route = serde_json::json!([{"added": ["target::slow"]}]);
+    let handle = bits.add_route("added", &route).expect("add route");
+
+    let first = bits.submit(Job::new(serde_json::json!({})));
+    assert!(matches!(first, SubmitOutcome::Accepted(_)));
+
+    let second = handle.submit(Job::new(serde_json::json!({})));
+    assert!(matches!(second, SubmitOutcome::Overloaded));
+}
+
+#[tokio::test]
 async fn max_jobs_counter_recovers_after_completion() {
     let _ = common::TargetDummyDelay::new(0);
     let config = r#"
@@ -349,6 +406,41 @@ async fn permit_freed_on_dequeue_not_completion() {
     let _ = block_tx.send(());
     assert!(blocking.await.is_ok());
     assert!(probe.await.is_ok());
+}
+
+#[tokio::test]
+async fn duplicate_job_id_returns_overloaded() {
+    let _ = common::TargetDummyDelay::new(500);
+    let config = r#"
+bits:
+  site: tst
+  env: dev
+  max_jobs: 10
+routes:
+  - default:
+      - target::dummy_dispatch:
+          duration_ms: 500
+          concurrency: 1
+"#;
+    let bits = parse_bootstrap(config)
+        .expect("parse")
+        .into_bits()
+        .expect("build");
+
+    let valid_id = bits::request_id::encode("tst", "dev", 0, chrono::Utc::now())
+        .expect("encode valid BITS ID");
+
+    let first = bits.submit(Job::new_with_id(valid_id.clone(), serde_json::json!({})));
+    assert!(
+        matches!(first, SubmitOutcome::Accepted(_)),
+        "first submit with a valid BITS ID should be accepted"
+    );
+
+    let second = bits.submit(Job::new_with_id(valid_id.clone(), serde_json::json!({})));
+    assert!(
+        matches!(second, SubmitOutcome::Overloaded),
+        "second submit with the same job ID must be rejected as Overloaded"
+    );
 }
 
 #[tokio::test]

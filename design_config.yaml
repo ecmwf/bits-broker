@@ -17,6 +17,11 @@
 #   thread_pool   — offload to dedicated OS threads (CPU/blocking work)
 #   remote_pool   — hand off to external workers via HTTP long-poll
 #                   (only valid with target::remote)
+#
+# metrics:
+#   duration_buckets   — histogram boundaries (seconds) for job-duration metrics
+#   queue_wait_buckets — histogram boundaries (seconds) for dispatcher queue-wait
+#                        (both optional; sensible defaults are used when omitted)
 
 bits:
   site: bol
@@ -24,6 +29,12 @@ bits:
   worker_server:
     host: "0.0.0.0"
     port: 9001
+
+# Optional. Histogram bucket boundaries for the Prometheus /metrics endpoint
+# (requires the `metrics-prometheus` feature). Values shown are the defaults.
+metrics:
+  duration_buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 60, 120]
+  queue_wait_buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30]
 
 checks:
 

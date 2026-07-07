@@ -8,6 +8,6 @@ name = "bits-server"
 path = "src/main.rs"
 
 [dependencies]
-bits = { path = "../bits" }
+bits = { path = "../bits", features = ["metrics-prometheus"] }
 tokio = { version = "1.46.1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

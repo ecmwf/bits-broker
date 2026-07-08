@@ -152,6 +152,50 @@ routes:
     );
 }
 
+#[tokio::test]
+async fn config_accepts_per_target_user_limit_on_registry_targets() {
+    // Mirrors the location-config shape: named registry targets each carry their
+    // OWN dispatcher.user_limit, so the cap is per-target (bits scopes the limit
+    // by the registry entry name). This is what makes different targets have
+    // different, independent limits.
+    let yaml = r#"
+bits:
+  site: tst
+  env: dev
+  worker_server:
+    port: 9001
+    advertised_addr: "127.0.0.1:9001"
+targets:
+  mars_pool:
+    type: remote
+    dispatcher:
+      queue: cost_weighted
+      executor:
+        type: remote_pool
+        heartbeat_timeout_secs: 60
+      user_limit:
+        max: 3
+  mars_area_pool:
+    type: remote
+    dispatcher:
+      queue: cost_weighted
+      executor:
+        type: remote_pool
+        heartbeat_timeout_secs: 60
+      user_limit:
+        max: 2
+routes:
+  - mars:
+      - target::mars_pool
+  - area:
+      - target::mars_area_pool
+"#;
+    assert!(
+        parse_bootstrap(yaml).is_ok(),
+        "per-target user_limit on registry targets should parse"
+    );
+}
+
 #[test]
 fn config_rejects_zero_max() {
     let yaml = r#"

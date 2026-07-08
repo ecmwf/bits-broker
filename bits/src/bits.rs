@@ -376,7 +376,11 @@ impl Bits {
             .map(|entry| {
                 let job = entry.value();
                 let result = job.result.lock().unwrap_or_else(|p| p.into_inner());
-                let mut status = if job.is_cancelled() { "failed" } else { "queued" };
+                let mut status = if job.is_cancelled() {
+                    "failed"
+                } else {
+                    "queued"
+                };
                 let mut location = None;
                 let mut content_type = None;
                 let mut content_length = None;
@@ -882,7 +886,9 @@ targets:
         assert!(matches!(snapshot.status, "queued" | "processed" | "failed"));
 
         // Snapshotting must not consume a ready result; polling remains valid.
-        let outcome = bits.poll(&job_handle.id, Some(Duration::from_secs(5))).await;
+        let outcome = bits
+            .poll(&job_handle.id, Some(Duration::from_secs(5)))
+            .await;
         assert!(matches!(
             outcome,
             crate::PollOutcome::Ready(_) | crate::PollOutcome::Pending { .. }

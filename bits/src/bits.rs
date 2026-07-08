@@ -383,7 +383,7 @@ impl Bits {
                         // A concurrent recovery already inserted this job —
                         // it is already being processed, so proceed to poll.
                         tracing::debug!(
-                            job.id = id,
+                            request.id = id,
                             "recovered job already present from concurrent recovery"
                         );
                     }
@@ -397,7 +397,7 @@ impl Bits {
                     // The DB says we own this job but it is not in memory.
                     // Avoid a self-proxy loop; let the client retry.
                     tracing::warn!(
-                        job.id = id,
+                        request.id = id,
                         "job owned by this broker but not in memory, returning pending"
                     );
                     return PollOutcome::Pending { id: id.to_string() };
@@ -422,17 +422,17 @@ impl Bits {
             Err(DbError::Conflict(message)) => {
                 // Rare optimistic-claim race. Keep response in pending loop so the
                 // next poll can observe the winning owner.
-                tracing::warn!(job.id = %id, error = %message, "claim conflict");
+                tracing::warn!(request.id = %id, error = %message, "claim conflict");
                 PollOutcome::Pending { id: id.to_string() }
             }
             Err(DbError::Backend(message)) => {
                 // Backend remained unavailable after in-poll backoff retries.
                 // Return pending so client retries on the next poll interval.
-                tracing::warn!(job.id = %id, error = %message, "claim backend unavailable after retries");
+                tracing::warn!(request.id = %id, error = %message, "claim backend unavailable after retries");
                 PollOutcome::Pending { id: id.to_string() }
             }
             Err(err @ DbError::SlotExhausted { .. }) => {
-                tracing::error!(job.id = %id, error = %err, "broker slot space exhausted during claim");
+                tracing::error!(request.id = %id, error = %err, "broker slot space exhausted during claim");
                 PollOutcome::Pending { id: id.to_string() }
             }
         }
@@ -533,7 +533,7 @@ fn start_cleanup_worker(
             };
             while let Ok(job_id) = rx.recv() {
                 if let Err(err) = runtime.block_on(store.delete_job(&job_id)) {
-                    tracing::warn!(job.id = %job_id, error = %err, "durable record cleanup failed");
+                    tracing::warn!(request.id = %job_id, error = %err, "durable record cleanup failed");
                 }
             }
         })

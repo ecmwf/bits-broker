@@ -59,7 +59,7 @@ impl Bits {
                         return Err(DbError::Backend(message));
                     }
                     tracing::warn!(
-                        job.id = %id,
+                        request.id = %id,
                         backoff_ms = sleep_for.as_millis(),
                         "claim backend error; retrying"
                     );
@@ -93,12 +93,12 @@ impl Bits {
 
         match durable_job_present(store.as_ref(), id).await {
             Ok(true) => {
-                tracing::warn!(job.id = %id, "proxy owner returned 404 while durable record still exists");
+                tracing::warn!(request.id = %id, "proxy owner returned 404 while durable record still exists");
                 PollOutcome::Pending { id: id.to_string() }
             }
             Ok(false) => PollOutcome::NotFound,
             Err(err) => {
-                tracing::warn!(job.id = %id, error = %err, "failed to verify durable record after owner 404");
+                tracing::warn!(request.id = %id, error = %err, "failed to verify durable record after owner 404");
                 PollOutcome::Pending { id: id.to_string() }
             }
         }
@@ -119,7 +119,7 @@ impl Bits {
                 // Timeouts are expected when the owner broker is still
                 // long-polling and the caller's poll budget expires first.
                 tracing::debug!(
-                    job.id = %id,
+                    request.id = %id,
                     owner_broker = %lease.broker_id,
                     error = %err,
                     "proxy request to owner broker timed out"
@@ -128,7 +128,7 @@ impl Bits {
             }
             Err(err) => {
                 tracing::warn!(
-                    job.id = %id,
+                    request.id = %id,
                     owner_broker = %lease.broker_id,
                     url = %url,
                     error = %err,
@@ -145,7 +145,7 @@ impl Bits {
                     Ok(s) => s.to_string(),
                     Err(err) => {
                         tracing::warn!(
-                            job.id = %id,
+                            request.id = %id,
                             error = %err,
                             "content-type header has invalid value; using default"
                         );
@@ -179,7 +179,7 @@ impl Bits {
                 .unwrap_or_default()
                 .to_string();
             if location.is_empty() {
-                tracing::warn!(job.id = %id, status = %status, "proxy redirect with empty Location");
+                tracing::warn!(request.id = %id, status = %status, "proxy redirect with empty Location");
                 return Some(PollOutcome::Pending { id: id.to_string() });
             }
             let last_segment = location
@@ -210,18 +210,18 @@ impl Bits {
             return Some(PollOutcome::Ready(JobResult::Cancelled));
         }
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            tracing::warn!(job.id = %id, status = %status, "proxy auth error from owner");
+            tracing::warn!(request.id = %id, status = %status, "proxy auth error from owner");
             return Some(PollOutcome::Pending { id: id.to_string() });
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            tracing::warn!(job.id = %id, "proxy throttled by owner");
+            tracing::warn!(request.id = %id, "proxy throttled by owner");
             return Some(PollOutcome::Pending { id: id.to_string() });
         }
         if status.is_server_error() {
             return Some(PollOutcome::Pending { id: id.to_string() });
         }
 
-        tracing::warn!(job.id = %id, status = %status, "proxy received unexpected status");
+        tracing::warn!(request.id = %id, status = %status, "proxy received unexpected status");
         Some(PollOutcome::Pending { id: id.to_string() })
     }
 

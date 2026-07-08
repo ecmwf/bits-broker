@@ -223,7 +223,7 @@ async fn handle_get_work(
         DispatchGuard::Cancelled => {
             if job.is_cancelled() {
                 if reply_tx.send(Err(ActionError::Cancelled)).is_err() {
-                    tracing::debug!(job.id = %job.id, "cancelled job: caller already dropped");
+                    tracing::debug!(request.id = %job.id, "cancelled job: caller already dropped");
                 }
                 return Err(StatusCode::NO_CONTENT);
             }
@@ -231,13 +231,13 @@ async fn handle_get_work(
         DispatchGuard::CancelledOrClientGone => {
             if job.is_cancelled() {
                 if reply_tx.send(Err(ActionError::Cancelled)).is_err() {
-                    tracing::debug!(job.id = %job.id, "cancelled job: caller already dropped");
+                    tracing::debug!(request.id = %job.id, "cancelled job: caller already dropped");
                 }
                 return Err(StatusCode::NO_CONTENT);
             }
             if !job.client_present() {
                 if reply_tx.send(Err(ActionError::ClientGone)).is_err() {
-                    tracing::debug!(job.id = %job.id, "client gone: caller already dropped");
+                    tracing::debug!(request.id = %job.id, "client gone: caller already dropped");
                 }
                 return Err(StatusCode::NO_CONTENT);
             }
@@ -332,7 +332,7 @@ async fn handle_complete_data(
                     Ok(s) => s.to_string(),
                     Err(err) => {
                         tracing::warn!(
-                            job.id = %job_id,
+                            request.id = %job_id,
                             error = %err,
                             "content-type header has invalid value; using default"
                         );
@@ -347,7 +347,7 @@ async fn handle_complete_data(
                         Ok(n) if n >= 0 => n,
                         Ok(n) => {
                             tracing::warn!(
-                                job.id = %job_id,
+                                request.id = %job_id,
                                 raw_value = n,
                                 "content-length header is negative; using default"
                             );
@@ -355,7 +355,7 @@ async fn handle_complete_data(
                         }
                         Err(err) => {
                             tracing::warn!(
-                                job.id = %job_id,
+                                request.id = %job_id,
                                 raw_value = %s,
                                 error = %err,
                                 "content-length header is not a valid number; using default"
@@ -365,7 +365,7 @@ async fn handle_complete_data(
                     },
                     Err(err) => {
                         tracing::warn!(
-                            job.id = %job_id,
+                            request.id = %job_id,
                             error = %err,
                             "content-length header has invalid value; using default"
                         );

@@ -38,7 +38,7 @@ pub(crate) fn spawn_job(
     in_flight: Arc<AtomicUsize>,
     route_handle: Option<String>,
 ) {
-    let span = tracing::info_span!("job", job.id = %job.id);
+    let span = tracing::info_span!("job", request.id = %job.id);
     tracing::info!(parent: &span, "job received");
 
     let _guard = InFlightGuard::new(in_flight);
@@ -76,7 +76,7 @@ pub(crate) fn spawn_job(
                             };
                             match store.upsert_job(record).await {
                                 Ok(_) => job.persisted.store(true, Ordering::Release),
-                                Err(err) => tracing::warn!(job.id = %job.id, error = %err, "delayed persist failed"),
+                                Err(err) => tracing::warn!(request.id = %job.id, error = %err, "delayed persist failed"),
                             }
                         }
                         (&mut dispatch_fut).await.unwrap_or_else(|p| handle_action_panic(&job.id, p))
@@ -125,7 +125,7 @@ fn handle_action_panic(job_id: &str, panic_payload: Box<dyn std::any::Any + Send
     } else {
         "unknown panic".to_string()
     };
-    tracing::error!(job.id = %job_id, reason = %detail, "action panicked");
+    tracing::error!(request.id = %job_id, reason = %detail, "action panicked");
     JobResult::Failed {
         reason: "internal server error".to_string(),
     }

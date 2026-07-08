@@ -134,7 +134,7 @@ pub(crate) fn start_sweeper(
                     && let (Some(store), Some(rt)) = (&job_store, &runtime)
                     && let Err(err) = rt.block_on(store.delete_job(&id))
                 {
-                    tracing::warn!(job.id = %id, error = %err, "sweeper durable cleanup failed");
+                    tracing::warn!(request.id = %id, error = %err, "sweeper durable cleanup failed");
                 }
             }
 

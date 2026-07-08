@@ -34,7 +34,7 @@ where
         };
         write!(writer, "{colour}\x1b[1m{label}\x1b[0m  ")?;
 
-        // Span fields (e.g. job.id=...) in bright cyan, from outermost to innermost
+        // Span fields (e.g. request.id=...) in bright cyan, from outermost to innermost
         if let Some(scope) = ctx.event_scope() {
             for span in scope.from_root() {
                 let ext = span.extensions();

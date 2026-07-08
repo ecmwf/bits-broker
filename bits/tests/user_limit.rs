@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 
 fn user_job(name: &str) -> Job {
     let mut job = Job::new(serde_json::json!({}));
-    *job.user_mut() = serde_json::json!({ "auth": { "username": name } });
+    *job.user_mut() = serde_json::json!({ "auth": { "realm": "test", "username": name } });
     job
 }
 
@@ -41,10 +41,7 @@ fn limited_dispatcher(max: usize) -> Dispatcher<CheckResult> {
     .expect("dispatcher config should not error")
     .expect("dispatcher should be created")
     .with_user_limit(
-        Some(UserLimitConfig {
-            max,
-            key: vec!["/auth/username".to_string()],
-        }),
+        Some(UserLimitConfig { max }),
         "test-scope",
         "broker-0",
         None,
@@ -105,8 +102,8 @@ async fn rejects_when_user_at_cap_and_recovers_after_completion() {
 
 #[tokio::test]
 async fn unidentifiable_user_is_not_limited_fail_open() {
-    // max = 1, yet two jobs with no /auth/username must both be admitted:
-    // an unkeyable (anonymous) request is never limited.
+    // max = 1, yet two jobs with no /auth/{realm,username} must both be
+    // admitted: an unidentifiable (anonymous) request is never limited.
     let dispatcher = limited_dispatcher(1);
 
     let (tx1, rx1) = oneshot::channel();
@@ -148,7 +145,6 @@ routes:
         dispatcher:
           user_limit:
             max: 5
-            key: ["/auth/realm", "/auth/username"]
 "#;
     assert!(
         parse_bootstrap(yaml).is_ok(),
@@ -169,7 +165,6 @@ routes:
         dispatcher:
           user_limit:
             max: 0
-            key: ["/auth/username"]
 "#;
     let err = match parse_bootstrap(yaml) {
         Ok(_) => panic!("zero max must be rejected"),
@@ -177,55 +172,6 @@ routes:
     };
     assert!(
         err.to_string().contains("dispatcher.user_limit.max"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn config_rejects_missing_key() {
-    let yaml = r#"
-bits:
-  site: tst
-  env: dev
-routes:
-  - default:
-      - target::http:
-          url: "http://localhost:9999"
-        dispatcher:
-          user_limit:
-            max: 5
-"#;
-    let err = match parse_bootstrap(yaml) {
-        Ok(_) => panic!("missing key must be rejected"),
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string().contains("dispatcher.user_limit.key"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn config_rejects_non_pointer_key() {
-    let yaml = r#"
-bits:
-  site: tst
-  env: dev
-routes:
-  - default:
-      - target::http:
-          url: "http://localhost:9999"
-        dispatcher:
-          user_limit:
-            max: 5
-            key: ["auth/username"]
-"#;
-    let err = match parse_bootstrap(yaml) {
-        Ok(_) => panic!("non-pointer key must be rejected"),
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string().contains("dispatcher.user_limit.key"),
         "unexpected error: {err}"
     );
 }

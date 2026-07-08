@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use bits::Job;
 use bits::actions::{ActionError, CheckResult};
+use bits::db::PersistenceStore;
 use bits::db::nats::NatsStore;
-use bits::db::{BrokerLeaseStore, PersistenceStore, UserLimitStore};
 use bits::dispatcher::{DispatchGuard, Dispatcher, ExecutorKind, QueueKind, UserLimitConfig};
 use futures::future::BoxFuture;
 use tokio::sync::oneshot;
@@ -37,8 +37,14 @@ fn store() -> Arc<dyn PersistenceStore> {
 
 fn user_job(name: &str) -> Job {
     let mut job = Job::new(serde_json::json!({}));
-    *job.user_mut() = serde_json::json!({ "auth": { "username": name } });
+    *job.user_mut() = serde_json::json!({ "auth": { "realm": "test", "username": name } });
     job
+}
+
+/// The identity key the dispatcher derives for `user_job(name)`: realm "test" +
+/// US separator + username. Must match `UserLimiter::user_key` (realm, username).
+fn identity(name: &str) -> String {
+    format!("test\u{1f}{name}")
 }
 
 fn broker(store: Arc<dyn PersistenceStore>, id: &str, max: usize) -> Dispatcher<CheckResult> {
@@ -53,15 +59,7 @@ fn broker(store: Arc<dyn PersistenceStore>, id: &str, max: usize) -> Dispatcher<
     )
     .expect("dispatcher config")
     .expect("dispatcher")
-    .with_user_limit(
-        Some(UserLimitConfig {
-            max,
-            key: vec!["/auth/username".to_string()],
-        }),
-        SCOPE,
-        id,
-        Some(store),
-    )
+    .with_user_limit(Some(UserLimitConfig { max }), SCOPE, id, Some(store))
 }
 
 fn held(rx: oneshot::Receiver<()>) -> BoxFuture<'static, Result<CheckResult, ActionError>> {
@@ -183,7 +181,7 @@ async fn nats_strict_cap_synced_across_replicas() {
     });
 
     // Wait until both are admitted (visible in the shared store).
-    wait_for_count(&store, "alice", 2).await;
+    wait_for_count(&store, &identity("alice"), 2).await;
 
     // A 3rd alice job on either replica exceeds this dispatcher's cap of 2.
     let rejected = a
@@ -203,7 +201,7 @@ async fn nats_strict_cap_synced_across_replicas() {
     let _ = tx2.send(());
     assert!(h1.await.unwrap().is_ok());
     assert!(h2.await.unwrap().is_ok());
-    wait_for_count(&store, "alice", 0).await;
+    wait_for_count(&store, &identity("alice"), 0).await;
 
     // Admission recovers.
     let readmit = a

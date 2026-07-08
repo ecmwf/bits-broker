@@ -90,14 +90,13 @@ pub trait Executor<T: Send + 'static>: Send + Sync {
 /// per-user fair scheduling / de-weighting is a separate future change to the
 /// queue itself; this is a simple hard admission cap.)
 ///
-/// The user identity is derived by reading each JSON pointer in `key` from
-/// `job.user` and concatenating the results. A job whose user is missing any
-/// key component is treated as unidentifiable and is NOT limited (fail-open),
-/// so an anonymous/unkeyed request is never wrongly rejected.
+/// The user identity is always `(realm, username)`, read from `job.user.auth`.
+/// A job whose user lacks either is unidentifiable and is NOT limited
+/// (fail-open), so an anonymous/unauthenticated request is never wrongly
+/// rejected.
 #[derive(Debug, Clone)]
 pub struct UserLimitConfig {
     pub max: usize,
-    pub key: Vec<String>,
 }
 
 /// How long a lazy-mode broker trusts a cached per-dispatcher count before refreshing.
@@ -116,7 +115,6 @@ const STRICT_MAX_THRESHOLD: usize = 3;
 /// tolerating brief over-use.
 pub(crate) struct UserLimiter {
     max: usize,
-    key: Vec<String>,
     scope: String,
     broker_id: String,
     counts: DashMap<String, usize>,
@@ -134,7 +132,6 @@ impl UserLimiter {
     ) -> Self {
         Self {
             max: cfg.max,
-            key: cfg.key,
             scope,
             broker_id,
             counts: DashMap::new(),
@@ -147,18 +144,13 @@ impl UserLimiter {
         self.max <= STRICT_MAX_THRESHOLD
     }
 
-    /// Resolve the per-user key from `job.user`, or `None` if any component is
-    /// absent/null (unidentifiable user -> not limited).
+    /// Resolve the per-user identity `realm\u{1f}username` from `job.user`, or
+    /// `None` if either is absent/non-string (unidentifiable user -> not
+    /// limited, fail-open). The identity is always (realm, username) by design.
     fn user_key(&self, user: &serde_json::Value) -> Option<String> {
-        let mut parts = Vec::with_capacity(self.key.len());
-        for ptr in &self.key {
-            match user.pointer(ptr)? {
-                serde_json::Value::String(s) => parts.push(s.clone()),
-                serde_json::Value::Null => return None,
-                other => parts.push(other.to_string()),
-            }
-        }
-        Some(parts.join("\u{1f}"))
+        let realm = user.pointer("/auth/realm").and_then(|v| v.as_str())?;
+        let username = user.pointer("/auth/username").and_then(|v| v.as_str())?;
+        Some(format!("{realm}\u{1f}{username}"))
     }
 
     /// Atomically admit one job locally if under the cap. Ok(new count) or

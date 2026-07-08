@@ -38,20 +38,12 @@ fn broker(
     )
     .expect("dispatcher config should not error")
     .expect("dispatcher should be created")
-    .with_user_limit(
-        Some(UserLimitConfig {
-            max,
-            key: vec!["/auth/username".to_string()],
-        }),
-        SCOPE,
-        broker_id,
-        Some(store),
-    )
+    .with_user_limit(Some(UserLimitConfig { max }), SCOPE, broker_id, Some(store))
 }
 
 fn user_job(name: &str) -> Job {
     let mut job = Job::new(serde_json::json!({}));
-    *job.user_mut() = serde_json::json!({ "auth": { "username": name } });
+    *job.user_mut() = serde_json::json!({ "auth": { "realm": "test", "username": name } });
     job
 }
 

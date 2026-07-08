@@ -1086,35 +1086,8 @@ fn parse_user_limit(value: &serde_json::Value) -> Result<UserLimitConfig, BitsEr
         )
     })?;
 
-    let key_array = obj.get("key").and_then(|k| k.as_array()).ok_or_else(|| {
-        ConfigError::validation(
-            "dispatcher.user_limit.key",
-            "must be an array of JSON pointer strings (e.g. [\"/auth/realm\", \"/auth/username\"])",
-        )
-    })?;
-    if key_array.is_empty() {
-        return Err(
-            ConfigError::validation("dispatcher.user_limit.key", "must not be empty").into(),
-        );
-    }
-    let key: Vec<String> = key_array
-        .iter()
-        .map(|entry| {
-            let p = entry.as_str().ok_or_else(|| {
-                ConfigError::validation("dispatcher.user_limit.key", "entries must be strings")
-            })?;
-            if !p.starts_with('/') {
-                return Err(ConfigError::validation(
-                    "dispatcher.user_limit.key",
-                    format!("'{p}' must be a JSON pointer starting with '/'"),
-                )
-                .into());
-            }
-            Ok(p.to_string())
-        })
-        .collect::<Result<_, BitsError>>()?;
-
-    Ok(UserLimitConfig { max, key })
+    // The user identity is always (realm, username); it is not configurable.
+    Ok(UserLimitConfig { max })
 }
 
 fn parse_dispatcher_fields(

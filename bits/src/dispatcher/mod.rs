@@ -103,15 +103,15 @@ pub struct UserLimitConfig {
 /// How long a lazy-mode broker trusts a cached per-dispatcher count before refreshing.
 const LAZY_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 /// Limits at or below this use strict cross-broker enforcement; above it, lazy.
-const STRICT_MAX_THRESHOLD: usize = 10;
+const STRICT_MAX_THRESHOLD: usize = 3;
 
 /// Tracks per-user queued-or-in-flight counts for a single dispatcher.
 ///
 /// The cap is always PER-DISPATCHER (per route target) and per-user — never a
 /// global tally across dispatchers. With no store it is broker-local only. With
 /// a store it synchronises that per-dispatcher count across the dispatcher's
-/// broker replicas: **strict** (`max <= 10`) consults the store on every admit
-/// and enforces the cap by cross-replica FIFO rank; **lazy** (`max > 10`) gates
+/// broker replicas: **strict** (`max <= 3`) consults the store on every admit
+/// and enforces the cap by cross-replica FIFO rank; **lazy** (`max > 3`) gates
 /// on the local count and reconciles a cached per-dispatcher count periodically,
 /// tolerating brief over-use.
 pub(crate) struct UserLimiter {

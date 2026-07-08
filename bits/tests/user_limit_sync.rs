@@ -162,7 +162,7 @@ async fn reclaim_removes_dead_broker_entries_only() {
 
 #[tokio::test]
 async fn lazy_mode_enforces_local_cap() {
-    // max > 10 -> lazy mode. A single broker still enforces the cap via the
+    // max > 3 (here 12) -> lazy mode. A single broker still enforces the cap via the
     // local gate (and the periodically-reconciled per-dispatcher view).
     let store: Arc<dyn PersistenceStore> = Arc::new(MemoryStore::new());
     let a = broker(store.clone(), "broker-a", 12);

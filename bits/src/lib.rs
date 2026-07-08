@@ -33,7 +33,7 @@ pub use actions::registry::{
     RuntimeActionFactory, create_action, list_actions, register_runtime_action,
 };
 pub use actions::*;
-pub use bits::{Bits, DEFAULT_MAX_JOBS, JobHandle, PollOutcome, SubmitOutcome};
+pub use bits::{ActiveJobSnapshot, Bits, DEFAULT_MAX_JOBS, JobHandle, PollOutcome, SubmitOutcome};
 pub use config::{Bootstrap, RouteFactory, parse_bootstrap};
 pub use db::*;
 pub use error::{BitsError, ConfigError, RoutingError, WorkerServerError};

@@ -100,21 +100,48 @@ pub struct UserLimitConfig {
     pub key: Vec<String>,
 }
 
+/// How long a lazy-mode broker trusts a cached global count before refreshing.
+const LAZY_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+/// Limits at or below this use strict cross-broker enforcement; above it, lazy.
+const STRICT_MAX_THRESHOLD: usize = 10;
+
 /// Tracks per-user queued-or-in-flight counts for a single dispatcher.
-#[derive(Debug)]
+///
+/// With no store this is broker-local only. With a store it also synchronises
+/// cross-broker: **strict** (`max <= 10`) consults the store on every admit and
+/// enforces a global FIFO cap; **lazy** (`max > 10`) gates on the local count
+/// and reconciles a cached global count periodically, tolerating brief over-use.
 pub(crate) struct UserLimiter {
     max: usize,
     key: Vec<String>,
+    scope: String,
+    broker_id: String,
     counts: DashMap<String, usize>,
+    store: Option<Arc<dyn crate::db::PersistenceStore>>,
+    /// Lazy mode: user -> (last global count, when it was refreshed).
+    cached_global: DashMap<String, (usize, Instant)>,
 }
 
 impl UserLimiter {
-    fn new(cfg: UserLimitConfig) -> Self {
+    fn new(
+        cfg: UserLimitConfig,
+        scope: String,
+        broker_id: String,
+        store: Option<Arc<dyn crate::db::PersistenceStore>>,
+    ) -> Self {
         Self {
             max: cfg.max,
             key: cfg.key,
+            scope,
+            broker_id,
             counts: DashMap::new(),
+            store,
+            cached_global: DashMap::new(),
         }
+    }
+
+    fn strict(&self) -> bool {
+        self.max <= STRICT_MAX_THRESHOLD
     }
 
     /// Resolve the per-user key from `job.user`, or `None` if any component is
@@ -131,9 +158,9 @@ impl UserLimiter {
         Some(parts.join("\u{1f}"))
     }
 
-    /// Atomically admit one job for `key` if under the cap. On success returns
-    /// the new count; on rejection returns the current (at-cap) count.
-    fn try_admit(&self, key: &str) -> Result<usize, usize> {
+    /// Atomically admit one job locally if under the cap. Ok(new count) or
+    /// Err(current at-cap count).
+    fn try_admit_local(&self, key: &str) -> Result<usize, usize> {
         let mut slot = self.counts.entry(key.to_string()).or_insert(0);
         if *slot >= self.max {
             Err(*slot)
@@ -143,25 +170,151 @@ impl UserLimiter {
         }
     }
 
-    /// Release one job for `key`, dropping the entry at zero to bound map growth.
-    fn release(&self, key: &str) {
+    /// Increment the local count without checking the cap (used when a store is
+    /// the authority for admission but we still track a local estimate).
+    fn incr_local(&self, key: &str) {
+        *self.counts.entry(key.to_string()).or_insert(0) += 1;
+    }
+
+    /// Release one local slot for `key`, dropping the entry at zero.
+    fn release_local(&self, key: &str) {
         if let Some(mut slot) = self.counts.get_mut(key) {
             *slot = slot.saturating_sub(1);
         }
         self.counts.remove_if(key, |_, v| *v == 0);
     }
+
+    fn guard(self: &Arc<Self>, key: &str, job_id: &str) -> UserLimitGuard {
+        UserLimitGuard {
+            limiter: Arc::clone(self),
+            key: key.to_string(),
+            job_id: job_id.to_string(),
+        }
+    }
+
+    /// Admit one job for `user_key`, returning a guard on success or `None` when
+    /// over the cap. Store errors fail OPEN (admit) — availability over strictness.
+    async fn admit(self: &Arc<Self>, user_key: &str, job_id: &str) -> Option<UserLimitGuard> {
+        let Some(store) = self.store.clone() else {
+            // Broker-local only.
+            return self
+                .try_admit_local(user_key)
+                .ok()
+                .map(|_| self.guard(user_key, job_id));
+        };
+
+        if self.strict() {
+            // Strict: the store is authoritative via a global FIFO rank.
+            let reserved = match store
+                .reserve_user_slot(&self.scope, user_key, job_id, &self.broker_id)
+                .await
+            {
+                Ok(seq) => Some(seq),
+                Err(err) => {
+                    tracing::warn!(error = %err, scope = %self.scope, "user-limit reserve failed; failing open");
+                    None
+                }
+            };
+            // From here the guard owns both the local count and the store entry,
+            // so every exit path (rejection or a dropped future) releases them.
+            self.incr_local(user_key);
+            let guard = self.guard(user_key, job_id);
+            let Some(seq) = reserved else {
+                return Some(guard); // fail open: reserve failed
+            };
+            let entries = match store.list_user_slots(&self.scope, user_key).await {
+                Ok(entries) => entries,
+                Err(err) => {
+                    tracing::warn!(error = %err, scope = %self.scope, "user-limit list failed; failing open");
+                    return Some(guard);
+                }
+            };
+            // Rank our entry among all in-flight entries by (seq, job_id): the
+            // first `max` survive, the rest back out. Deterministic across
+            // brokers, so exactly `max` are admitted globally.
+            let mut ordered: Vec<(u64, &str)> =
+                entries.iter().map(|e| (e.seq, e.job_id.as_str())).collect();
+            ordered.sort_unstable();
+            let rank = ordered
+                .iter()
+                .position(|(s, jid)| *s == seq && *jid == job_id)
+                .unwrap_or(0);
+            if rank < self.max {
+                Some(guard)
+            } else {
+                drop(guard); // releases the local count and the store entry
+                None
+            }
+        } else {
+            // Lazy: local gate first (local <= global, so a full local count
+            // means definitely full), then a periodically-refreshed global view.
+            if self.try_admit_local(user_key).is_err() {
+                return None;
+            }
+            // Guard owns the local increment + store release from here on.
+            let guard = self.guard(user_key, job_id);
+            if let Err(err) = store
+                .reserve_user_slot(&self.scope, user_key, job_id, &self.broker_id)
+                .await
+            {
+                tracing::warn!(error = %err, scope = %self.scope, "user-limit reserve failed; failing open");
+                return Some(guard);
+            }
+            let fresh = self
+                .cached_global
+                .get(user_key)
+                .map(|v| v.1.elapsed() < LAZY_RECONCILE_INTERVAL);
+            let global = if fresh == Some(true) {
+                self.cached_global.get(user_key).map(|v| v.0).unwrap_or(0)
+            } else {
+                match store.list_user_slots(&self.scope, user_key).await {
+                    Ok(entries) => {
+                        self.cached_global
+                            .insert(user_key.to_string(), (entries.len(), Instant::now()));
+                        entries.len()
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, scope = %self.scope, "user-limit list failed; failing open");
+                        return Some(guard);
+                    }
+                }
+            };
+            if global > self.max {
+                drop(guard); // releases the local count and the store entry
+                None
+            } else {
+                Some(guard)
+            }
+        }
+    }
 }
 
 /// RAII guard that releases a user's admission slot when the work future
 /// resolves or is dropped (completion, error, cancellation, or dispatcher drain).
+///
+/// The local slot is released synchronously; the shared-store entry is released
+/// on a spawned task (fire-and-forget). The reclaim sweeper is the backstop if
+/// that release is lost (e.g. broker crash).
 pub(crate) struct UserLimitGuard {
     limiter: Arc<UserLimiter>,
     key: String,
+    job_id: String,
 }
 
 impl Drop for UserLimitGuard {
     fn drop(&mut self) {
-        self.limiter.release(&self.key);
+        self.limiter.release_local(&self.key);
+        if let Some(store) = &self.limiter.store {
+            let store = Arc::clone(store);
+            let scope = self.limiter.scope.clone();
+            let key = self.key.clone();
+            let job_id = self.job_id.clone();
+            tokio::spawn(async move {
+                if let Err(err) = store.release_user_slot(&scope, &key, &job_id).await {
+                    tracing::warn!(error = %err, scope = %scope, "user-limit release failed (reclaim sweeper is the backstop)");
+                }
+            });
+        }
     }
 }
 
@@ -324,9 +477,25 @@ impl<T: Send + 'static> Dispatcher<T> {
         })
     }
 
-    /// Attach (or clear) a hard per-user admission cap. See [`UserLimitConfig`].
-    pub fn with_user_limit(mut self, cfg: Option<UserLimitConfig>) -> Self {
-        self.user_limiter = cfg.map(|c| Arc::new(UserLimiter::new(c)));
+    /// Attach (or clear) a per-user admission cap. `scope` is the shared key for
+    /// cross-broker accounting (targets cached by name share a scope, hence a
+    /// limit); `broker_id` tags this broker's entries; `store`, when present,
+    /// enables cross-broker strict/lazy sync. See [`UserLimitConfig`].
+    pub fn with_user_limit(
+        mut self,
+        cfg: Option<UserLimitConfig>,
+        scope: &str,
+        broker_id: &str,
+        store: Option<Arc<dyn crate::db::PersistenceStore>>,
+    ) -> Self {
+        self.user_limiter = cfg.map(|c| {
+            Arc::new(UserLimiter::new(
+                c,
+                scope.to_string(),
+                broker_id.to_string(),
+                store,
+            ))
+        });
         self
     }
 
@@ -349,18 +518,16 @@ impl<T: Send + 'static> Dispatcher<T> {
         let deadline_nanos = job.reconnect_deadline_nanos.clone();
         Box::pin(async move {
             // Hard per-user admission cap: reject when the user already has
-            // `max` jobs queued or in-flight on this dispatcher. The guard is
-            // moved into the work future below so the slot is held for the
-            // whole queued+in-flight span and released on any exit path.
+            // `max` jobs queued or in-flight (broker-local, and cross-broker via
+            // the store when configured). The guard is moved into the work
+            // future below so the slot is held for the whole queued+in-flight
+            // span and released on any exit path.
             let user_guard = match (&user_limiter, &user_key) {
-                (Some(limiter), Some(key)) => match limiter.try_admit(key) {
-                    Ok(_) => Some(UserLimitGuard {
-                        limiter: Arc::clone(limiter),
-                        key: key.clone(),
-                    }),
-                    Err(current) => {
+                (Some(limiter), Some(key)) => match limiter.admit(key, &job_to_enqueue.id).await {
+                    Some(guard) => Some(guard),
+                    None => {
                         return Err(ActionError::UserLimitExceeded(format!(
-                            "user already has {current} job(s) queued or in-flight (limit {})",
+                            "user is at the per-user limit ({}) for this route",
                             limiter.max
                         )));
                     }

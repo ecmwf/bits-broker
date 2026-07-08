@@ -137,6 +137,21 @@ pub(crate) fn start_sweeper(
                     tracing::warn!(job.id = %id, error = %err, "sweeper durable cleanup failed");
                 }
             }
+
+            // Reclaim per-user admission slots left behind by dead brokers (a
+            // broker that crashed without releasing its guard). Owner liveness
+            // is derived from broker leases inside the store.
+            if let (Some(store), Some(rt)) = (&job_store, &runtime) {
+                match rt.block_on(store.reclaim_user_slots()) {
+                    Ok(n) if n > 0 => {
+                        tracing::debug!(reclaimed = n, "sweeper reclaimed user-limit slots")
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::debug!(error = %err, "sweeper user-limit reclaim failed")
+                    }
+                }
+            }
         }
     })
 }

@@ -29,6 +29,21 @@ pub struct BrokerLeaseRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One in-flight job counted against a per-user admission limit, shared across
+/// brokers via the persistence store. Keyed by (scope, user, job_id); `scope` is
+/// the dispatcher's shared name (targets cached by name share a scope), `seq` is
+/// a globally-monotonic ordinal for strict FIFO ranking, and `owner_broker_id`
+/// allows reclaim of a dead broker's entries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserLimitEntry {
+    pub scope: String,
+    pub user: String,
+    pub job_id: String,
+    pub owner_broker_id: String,
+    pub seq: u64,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ClaimResult {
     NotFound,
@@ -213,14 +228,125 @@ where
     }
 }
 
+/// Cross-broker per-user admission accounting.
+///
+/// Backs the dispatcher's per-user limit so a user's global in-flight count is
+/// visible across brokers (strict enforcement for small limits; lazy reconcile
+/// for large ones). Like [`BrokerSlotStore`] this is provided by a blanket impl
+/// that dispatches to the concrete backend via downcast; backends expose
+/// inherent `*_memory` / `*_nats` methods.
+#[async_trait]
+pub trait UserLimitStore: Send + Sync {
+    /// Record one in-flight job for `(scope, user)`, returning a
+    /// globally-monotonic `seq` for strict FIFO ranking. Idempotent per
+    /// `job_id`: re-reserving an existing job returns its existing `seq`.
+    async fn reserve_user_slot(
+        &self,
+        scope: &str,
+        user: &str,
+        job_id: &str,
+        owner_broker_id: &str,
+    ) -> Result<u64, DbError>;
+
+    /// Release the in-flight record for `(scope, user, job_id)`. Idempotent.
+    async fn release_user_slot(&self, scope: &str, user: &str, job_id: &str)
+    -> Result<(), DbError>;
+
+    /// List current in-flight entries for `(scope, user)` (unordered).
+    async fn list_user_slots(
+        &self,
+        scope: &str,
+        user: &str,
+    ) -> Result<Vec<UserLimitEntry>, DbError>;
+
+    /// Remove entries whose owner broker no longer holds a live lease; returns
+    /// the number removed. Backstop for brokers that died without releasing.
+    async fn reclaim_user_slots(&self) -> Result<u64, DbError>;
+}
+
+#[async_trait]
+impl<T> UserLimitStore for T
+where
+    T: JobStore + BrokerLeaseStore + Send + Sync + 'static,
+{
+    async fn reserve_user_slot(
+        &self,
+        scope: &str,
+        user: &str,
+        job_id: &str,
+        owner_broker_id: &str,
+    ) -> Result<u64, DbError> {
+        if let Some(m) = (self as &dyn std::any::Any).downcast_ref::<memory::MemoryStore>() {
+            return m.reserve_user_slot_memory(scope, user, job_id, owner_broker_id);
+        }
+        #[cfg(feature = "nats")]
+        if let Some(n) = (self as &dyn std::any::Any).downcast_ref::<nats::NatsStore>() {
+            return n
+                .reserve_user_slot_nats(scope, user, job_id, owner_broker_id)
+                .await;
+        }
+        Err(DbError::Backend(
+            "user-limit store not implemented for this persistence backend".to_string(),
+        ))
+    }
+
+    async fn release_user_slot(
+        &self,
+        scope: &str,
+        user: &str,
+        job_id: &str,
+    ) -> Result<(), DbError> {
+        if let Some(m) = (self as &dyn std::any::Any).downcast_ref::<memory::MemoryStore>() {
+            return m.release_user_slot_memory(scope, user, job_id);
+        }
+        #[cfg(feature = "nats")]
+        if let Some(n) = (self as &dyn std::any::Any).downcast_ref::<nats::NatsStore>() {
+            return n.release_user_slot_nats(scope, user, job_id).await;
+        }
+        Err(DbError::Backend(
+            "user-limit store not implemented for this persistence backend".to_string(),
+        ))
+    }
+
+    async fn list_user_slots(
+        &self,
+        scope: &str,
+        user: &str,
+    ) -> Result<Vec<UserLimitEntry>, DbError> {
+        if let Some(m) = (self as &dyn std::any::Any).downcast_ref::<memory::MemoryStore>() {
+            return m.list_user_slots_memory(scope, user);
+        }
+        #[cfg(feature = "nats")]
+        if let Some(n) = (self as &dyn std::any::Any).downcast_ref::<nats::NatsStore>() {
+            return n.list_user_slots_nats(scope, user).await;
+        }
+        Err(DbError::Backend(
+            "user-limit store not implemented for this persistence backend".to_string(),
+        ))
+    }
+
+    async fn reclaim_user_slots(&self) -> Result<u64, DbError> {
+        if let Some(m) = (self as &dyn std::any::Any).downcast_ref::<memory::MemoryStore>() {
+            return m.reclaim_user_slots_memory();
+        }
+        #[cfg(feature = "nats")]
+        if let Some(n) = (self as &dyn std::any::Any).downcast_ref::<nats::NatsStore>() {
+            return n.reclaim_user_slots_nats().await;
+        }
+        Err(DbError::Backend(
+            "user-limit store not implemented for this persistence backend".to_string(),
+        ))
+    }
+}
+
 /// Composite persistence capability used by the broker runtime.
 ///
 /// Any backend that implements `JobStore`, `BrokerLeaseStore`, and
 /// `BrokerSlotStore` automatically implements `PersistenceStore` via the
-/// blanket impl below.
-pub trait PersistenceStore: JobStore + BrokerLeaseStore + BrokerSlotStore {}
+/// blanket impl below (`UserLimitStore` is likewise provided by a blanket impl).
+pub trait PersistenceStore: JobStore + BrokerLeaseStore + BrokerSlotStore + UserLimitStore {}
 
-impl<T: JobStore + BrokerLeaseStore + BrokerSlotStore> PersistenceStore for T {}
+impl<T: JobStore + BrokerLeaseStore + BrokerSlotStore + UserLimitStore> PersistenceStore for T {}
 
 pub async fn durable_job_present(
     store: &dyn PersistenceStore,

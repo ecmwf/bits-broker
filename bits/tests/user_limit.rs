@@ -40,10 +40,15 @@ fn limited_dispatcher(max: usize) -> Dispatcher<CheckResult> {
     )
     .expect("dispatcher config should not error")
     .expect("dispatcher should be created")
-    .with_user_limit(Some(UserLimitConfig {
-        max,
-        key: vec!["/auth/username".to_string()],
-    }))
+    .with_user_limit(
+        Some(UserLimitConfig {
+            max,
+            key: vec!["/auth/username".to_string()],
+        }),
+        "test-scope",
+        "broker-0",
+        None,
+    )
 }
 
 #[tokio::test]
@@ -106,8 +111,16 @@ async fn unidentifiable_user_is_not_limited_fail_open() {
 
     let (tx1, rx1) = oneshot::channel();
     let (tx2, rx2) = oneshot::channel();
-    let a = dispatcher.dispatch(&Job::new(serde_json::json!({})), DispatchGuard::None, held_work(rx1));
-    let b = dispatcher.dispatch(&Job::new(serde_json::json!({})), DispatchGuard::None, held_work(rx2));
+    let a = dispatcher.dispatch(
+        &Job::new(serde_json::json!({})),
+        DispatchGuard::None,
+        held_work(rx1),
+    );
+    let b = dispatcher.dispatch(
+        &Job::new(serde_json::json!({})),
+        DispatchGuard::None,
+        held_work(rx2),
+    );
     tokio::pin!(a);
     tokio::pin!(b);
     assert!(matches!(poll!(a.as_mut()), Poll::Pending));
@@ -137,7 +150,10 @@ routes:
             max: 5
             key: ["/auth/realm", "/auth/username"]
 "#;
-    assert!(parse_bootstrap(yaml).is_ok(), "valid user_limit should parse");
+    assert!(
+        parse_bootstrap(yaml).is_ok(),
+        "valid user_limit should parse"
+    );
 }
 
 #[test]

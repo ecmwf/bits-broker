@@ -8,16 +8,18 @@ use tokio::sync::OnceCell;
 
 use crate::db::{
     BrokerLeaseRecord, BrokerLeaseStore, ClaimResult, DbError, JobStore, PersistentJobRecord,
+    UserLimitEntry,
 };
 
 pub struct NatsStore {
     url: String,
     jobs_bucket: String,
     leases_bucket: String,
+    user_limits_bucket: String,
     lease_ttl: Duration,
     num_replicas: usize,
     connect_timeout: Duration,
-    stores: OnceCell<(kv::Store, kv::Store)>,
+    stores: OnceCell<(kv::Store, kv::Store, kv::Store)>,
 }
 
 impl NatsStore {
@@ -29,10 +31,12 @@ impl NatsStore {
         num_replicas: usize,
         connect_timeout: Duration,
     ) -> Self {
+        let user_limits_bucket = format!("{leases_bucket}-userlimits");
         Self {
             url,
             jobs_bucket,
             leases_bucket,
+            user_limits_bucket,
             lease_ttl,
             num_replicas,
             connect_timeout,
@@ -40,7 +44,7 @@ impl NatsStore {
         }
     }
 
-    async fn stores(&self) -> Result<&(kv::Store, kv::Store), DbError> {
+    async fn stores(&self) -> Result<&(kv::Store, kv::Store, kv::Store), DbError> {
         let timeout = self.connect_timeout;
         self.stores
             .get_or_try_init(|| async {
@@ -76,7 +80,22 @@ impl NatsStore {
                     .await
                     .map_err(|e| DbError::Backend(format!("leases bucket: {e}")))?;
 
-                    Ok((jobs, leases))
+                    // Per-user admission entries. Memory storage (server-side,
+                    // survives broker restarts); reclaimed via broker leases.
+                    let user_limits = Self::get_or_create_bucket(
+                        &js,
+                        kv::Config {
+                            bucket: self.user_limits_bucket.clone(),
+                            history: 1,
+                            num_replicas: self.num_replicas,
+                            storage: async_nats::jetstream::stream::StorageType::Memory,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|e| DbError::Backend(format!("user-limits bucket: {e}")))?;
+
+                    Ok((jobs, leases, user_limits))
                 })
                 .await
                 .map_err(|_| {
@@ -122,6 +141,175 @@ impl NatsStore {
 
     async fn leases(&self) -> Result<&kv::Store, DbError> {
         Ok(&self.stores().await?.1)
+    }
+
+    async fn user_limits(&self) -> Result<&kv::Store, DbError> {
+        Ok(&self.stores().await?.2)
+    }
+
+    /// Hex-encode a key component so arbitrary scope/user/job_id strings (which
+    /// may contain characters invalid in NATS KV keys, e.g. the \u{1f} user-key
+    /// separator) produce a safe, dotless token.
+    fn hex_token(s: &str) -> String {
+        use std::fmt::Write;
+        let mut out = String::with_capacity(s.len() * 2);
+        for b in s.bytes() {
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    }
+
+    fn user_slot_key(scope: &str, user: &str, job_id: &str) -> String {
+        format!(
+            "ul.{}.{}.{}",
+            Self::hex_token(scope),
+            Self::hex_token(user),
+            Self::hex_token(job_id)
+        )
+    }
+
+    fn user_slot_prefix(scope: &str, user: &str) -> String {
+        format!("ul.{}.{}.", Self::hex_token(scope), Self::hex_token(user))
+    }
+
+    pub(crate) async fn reserve_user_slot_nats(
+        &self,
+        scope: &str,
+        user: &str,
+        job_id: &str,
+        owner_broker_id: &str,
+    ) -> Result<u64, DbError> {
+        let store = self.user_limits().await?;
+        let key = Self::user_slot_key(scope, user, job_id);
+        // Idempotent: an existing entry keeps its original creation revision (seq).
+        if let Some(e) = store
+            .entry(&key)
+            .await
+            .map_err(|e| DbError::Backend(format!("get user slot: {e}")))?
+            && e.operation == kv::Operation::Put
+        {
+            return Ok(e.revision);
+        }
+        let entry = UserLimitEntry {
+            scope: scope.to_string(),
+            user: user.to_string(),
+            job_id: job_id.to_string(),
+            owner_broker_id: owner_broker_id.to_string(),
+            seq: 0, // authoritative seq is the KV revision, read back on list
+            created_at: Utc::now(),
+        };
+        match store.create(&key, Self::serialize(&entry)?).await {
+            Ok(revision) => Ok(revision),
+            Err(e) if matches!(e.kind(), kv::CreateErrorKind::AlreadyExists) => {
+                // Concurrent create won; return the winner's revision.
+                let existing = store
+                    .entry(&key)
+                    .await
+                    .map_err(|e| DbError::Backend(format!("get user slot after race: {e}")))?;
+                Ok(existing.map(|en| en.revision).unwrap_or(0))
+            }
+            Err(e) => Err(DbError::Backend(format!("create user slot: {e}"))),
+        }
+    }
+
+    pub(crate) async fn release_user_slot_nats(
+        &self,
+        scope: &str,
+        user: &str,
+        job_id: &str,
+    ) -> Result<(), DbError> {
+        let store = self.user_limits().await?;
+        store
+            .purge(&Self::user_slot_key(scope, user, job_id))
+            .await
+            .map_err(|e| DbError::Backend(format!("purge user slot: {e}")))?;
+        Ok(())
+    }
+
+    pub(crate) async fn list_user_slots_nats(
+        &self,
+        scope: &str,
+        user: &str,
+    ) -> Result<Vec<UserLimitEntry>, DbError> {
+        use futures::StreamExt;
+        let store = self.user_limits().await?;
+        let prefix = Self::user_slot_prefix(scope, user);
+        let mut keys = store
+            .keys()
+            .await
+            .map_err(|e| DbError::Backend(format!("list user slots: {e}")))?;
+        let mut out = Vec::new();
+        while let Some(k) = keys.next().await {
+            let k = k.map_err(|e| DbError::Backend(format!("user slot key: {e}")))?;
+            if !k.starts_with(&prefix) {
+                continue;
+            }
+            if let Some(e) = store
+                .entry(&k)
+                .await
+                .map_err(|e| DbError::Backend(format!("get user slot entry: {e}")))?
+                && e.operation == kv::Operation::Put
+            {
+                let mut ent: UserLimitEntry = Self::deserialize(&e.value)?;
+                ent.seq = e.revision; // globally-monotonic creation order
+                out.push(ent);
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) async fn reclaim_user_slots_nats(&self) -> Result<u64, DbError> {
+        use futures::StreamExt;
+        let now = Utc::now();
+        // Live owners = brokers with an unexpired lease.
+        let leases = self.leases().await?;
+        let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut lkeys = leases
+            .keys()
+            .await
+            .map_err(|e| DbError::Backend(format!("list leases: {e}")))?;
+        while let Some(k) = lkeys.next().await {
+            let k = k.map_err(|e| DbError::Backend(format!("lease key: {e}")))?;
+            if let Some(e) = leases
+                .entry(&k)
+                .await
+                .map_err(|e| DbError::Backend(format!("get lease entry: {e}")))?
+                && e.operation == kv::Operation::Put
+            {
+                let rec: BrokerLeaseRecord = Self::deserialize(&e.value)?;
+                if rec.lease_until > now {
+                    live.insert(rec.broker_id);
+                }
+            }
+        }
+
+        let ul = self.user_limits().await?;
+        let mut removed = 0u64;
+        let mut ukeys = ul
+            .keys()
+            .await
+            .map_err(|e| DbError::Backend(format!("list user slots for reclaim: {e}")))?;
+        while let Some(k) = ukeys.next().await {
+            let k = k.map_err(|e| DbError::Backend(format!("user slot key: {e}")))?;
+            if !k.starts_with("ul.") {
+                continue;
+            }
+            if let Some(e) = ul
+                .entry(&k)
+                .await
+                .map_err(|e| DbError::Backend(format!("get user slot entry: {e}")))?
+                && e.operation == kv::Operation::Put
+            {
+                let ent: UserLimitEntry = Self::deserialize(&e.value)?;
+                if !live.contains(&ent.owner_broker_id) {
+                    ul.purge(&k)
+                        .await
+                        .map_err(|e| DbError::Backend(format!("purge reclaimed slot: {e}")))?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
     }
 
     fn serialize<T: serde::Serialize>(value: &T) -> Result<bytes::Bytes, DbError> {

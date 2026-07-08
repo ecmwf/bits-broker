@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -7,6 +8,7 @@ use chrono::Utc;
 
 use crate::db::{
     BrokerLeaseRecord, BrokerLeaseStore, ClaimResult, DbError, JobStore, PersistentJobRecord,
+    UserLimitEntry,
 };
 use crate::request_id;
 
@@ -14,6 +16,10 @@ pub struct MemoryStore {
     jobs: Mutex<HashMap<String, PersistentJobRecord>>,
     brokers: Mutex<HashMap<String, BrokerLeaseRecord>>,
     broker_slots: Mutex<HashMap<(String, String), u32>>,
+    /// (scope, user) -> job_id -> entry. Per-user in-flight admission records.
+    user_slots: Mutex<HashMap<(String, String), HashMap<String, UserLimitEntry>>>,
+    /// Monotonic source for `UserLimitEntry::seq` (strict FIFO ranking).
+    user_seq: AtomicU64,
 }
 
 impl MemoryStore {
@@ -22,6 +28,8 @@ impl MemoryStore {
             jobs: Mutex::new(HashMap::new()),
             brokers: Mutex::new(HashMap::new()),
             broker_slots: Mutex::new(HashMap::new()),
+            user_slots: Mutex::new(HashMap::new()),
+            user_seq: AtomicU64::new(0),
         }
     }
 }
@@ -158,6 +166,89 @@ impl MemoryStore {
         let allocated_slot = *next_slot as u16;
         *next_slot += 1;
         Ok(allocated_slot)
+    }
+
+    pub(crate) fn reserve_user_slot_memory(
+        &self,
+        scope: &str,
+        user: &str,
+        job_id: &str,
+        owner_broker_id: &str,
+    ) -> Result<u64, DbError> {
+        let mut map = self.user_slots.lock().unwrap_or_else(|p| p.into_inner());
+        let entries = map
+            .entry((scope.to_string(), user.to_string()))
+            .or_default();
+        if let Some(existing) = entries.get(job_id) {
+            return Ok(existing.seq);
+        }
+        let seq = self.user_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        entries.insert(
+            job_id.to_string(),
+            UserLimitEntry {
+                scope: scope.to_string(),
+                user: user.to_string(),
+                job_id: job_id.to_string(),
+                owner_broker_id: owner_broker_id.to_string(),
+                seq,
+                created_at: Utc::now(),
+            },
+        );
+        Ok(seq)
+    }
+
+    pub(crate) fn release_user_slot_memory(
+        &self,
+        scope: &str,
+        user: &str,
+        job_id: &str,
+    ) -> Result<(), DbError> {
+        let mut map = self.user_slots.lock().unwrap_or_else(|p| p.into_inner());
+        let key = (scope.to_string(), user.to_string());
+        if let Some(entries) = map.get_mut(&key) {
+            entries.remove(job_id);
+            if entries.is_empty() {
+                map.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn list_user_slots_memory(
+        &self,
+        scope: &str,
+        user: &str,
+    ) -> Result<Vec<UserLimitEntry>, DbError> {
+        let map = self.user_slots.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(map
+            .get(&(scope.to_string(), user.to_string()))
+            .map(|entries| entries.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    pub(crate) fn reclaim_user_slots_memory(&self) -> Result<u64, DbError> {
+        let now = Utc::now();
+        let live: std::collections::HashSet<String> = self
+            .brokers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .filter(|b| b.lease_until > now)
+            .map(|b| b.broker_id.clone())
+            .collect();
+        let mut map = self.user_slots.lock().unwrap_or_else(|p| p.into_inner());
+        let mut removed = 0u64;
+        map.retain(|_, entries| {
+            entries.retain(|_, e| {
+                let keep = live.contains(&e.owner_broker_id);
+                if !keep {
+                    removed += 1;
+                }
+                keep
+            });
+            !entries.is_empty()
+        });
+        Ok(removed)
     }
 }
 

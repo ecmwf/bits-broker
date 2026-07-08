@@ -81,6 +81,8 @@ pub struct RouteFactory {
     registries: Registries,
     resolved_targets: Mutex<HashMap<String, ResolvedTarget>>,
     worker_server: Option<Arc<WorkerServer>>,
+    job_store: Option<Arc<dyn PersistenceStore>>,
+    broker_id: String,
 }
 
 type ResolvedTarget = (
@@ -93,6 +95,8 @@ struct ParseContext {
     registries: Registries,
     resolved_targets: RefCell<HashMap<String, ResolvedTarget>>,
     worker_server: Option<Arc<WorkerServer>>,
+    job_store: Option<Arc<dyn PersistenceStore>>,
+    broker_id: String,
 }
 
 struct DispatcherSettings {
@@ -248,11 +252,15 @@ impl RouteFactory {
         registries: Registries,
         resolved_targets: HashMap<String, ResolvedTarget>,
         worker_server: Option<Arc<WorkerServer>>,
+        job_store: Option<Arc<dyn PersistenceStore>>,
+        broker_id: String,
     ) -> Self {
         Self {
             registries,
             resolved_targets: Mutex::new(resolved_targets),
             worker_server,
+            job_store,
+            broker_id,
         }
     }
 
@@ -271,6 +279,8 @@ impl RouteFactory {
             registries: self.registries.clone(),
             resolved_targets: RefCell::new(cached_targets),
             worker_server: self.worker_server.clone(),
+            job_store: self.job_store.clone(),
+            broker_id: self.broker_id.clone(),
         };
 
         let routes = parse_routes(value, name, &parse_ctx)?;
@@ -767,6 +777,8 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
         },
         HashMap::new(),
         worker_server.clone(),
+        job_store.clone(),
+        format!("{site}-{env}-{broker_slot}"),
     );
 
     let branches = if let Some(routes_val) = raw.get("routes") {
@@ -1057,19 +1069,21 @@ fn parse_user_limit(value: &serde_json::Value) -> Result<UserLimitConfig, BitsEr
         .as_object()
         .ok_or_else(|| ConfigError::validation("dispatcher.user_limit", "must be an object"))?;
 
-    let max = obj
-        .get("max")
-        .and_then(|m| m.as_u64())
-        .ok_or_else(|| {
-            ConfigError::validation("dispatcher.user_limit.max", "must be a positive integer")
-        })?;
+    let max = obj.get("max").and_then(|m| m.as_u64()).ok_or_else(|| {
+        ConfigError::validation("dispatcher.user_limit.max", "must be a positive integer")
+    })?;
     if max == 0 {
-        return Err(
-            ConfigError::validation("dispatcher.user_limit.max", "must be greater than zero").into(),
-        );
+        return Err(ConfigError::validation(
+            "dispatcher.user_limit.max",
+            "must be greater than zero",
+        )
+        .into());
     }
     let max = usize::try_from(max).map_err(|_| {
-        ConfigError::validation("dispatcher.user_limit.max", "value too large for this platform")
+        ConfigError::validation(
+            "dispatcher.user_limit.max",
+            "value too large for this platform",
+        )
     })?;
 
     let key_array = obj.get("key").and_then(|k| k.as_array()).ok_or_else(|| {
@@ -1279,7 +1293,14 @@ fn attach_dispatcher(
                 settings.queue_capacity,
             )
             .map_err(|e| ConfigError::validation("dispatcher", e))?
-            .map(|d| d.with_user_limit(user_limit.clone()));
+            .map(|d| {
+                d.with_user_limit(
+                    user_limit.clone(),
+                    entry_name,
+                    &ctx.broker_id,
+                    ctx.job_store.clone(),
+                )
+            });
             Ok(Action::Check(check, dispatcher, silent))
         }
         Action::Transform(transform, _, _) => {
@@ -1291,7 +1312,14 @@ fn attach_dispatcher(
                 settings.queue_capacity,
             )
             .map_err(|e| ConfigError::validation("dispatcher", e))?
-            .map(|d| d.with_user_limit(user_limit.clone()));
+            .map(|d| {
+                d.with_user_limit(
+                    user_limit.clone(),
+                    entry_name,
+                    &ctx.broker_id,
+                    ctx.job_store.clone(),
+                )
+            });
             Ok(Action::Transform(transform, dispatcher, silent))
         }
         Action::Target(target, _, _) => {
@@ -1308,7 +1336,14 @@ fn attach_dispatcher(
                 settings.queue_capacity,
             )
             .map_err(|e| ConfigError::validation("dispatcher", e))?
-            .map(|d| d.with_user_limit(user_limit.clone()));
+            .map(|d| {
+                d.with_user_limit(
+                    user_limit.clone(),
+                    entry_name,
+                    &ctx.broker_id,
+                    ctx.job_store.clone(),
+                )
+            });
             Ok(Action::Target(target, dispatcher, silent))
         }
         _ if has_dispatcher => Err(ConfigError::validation(
@@ -1332,7 +1367,13 @@ impl Clone for Registries {
 
 impl Default for RouteFactory {
     fn default() -> Self {
-        Self::from_parts(Registries::default(), HashMap::new(), None)
+        Self::from_parts(
+            Registries::default(),
+            HashMap::new(),
+            None,
+            None,
+            String::new(),
+        )
     }
 }
 

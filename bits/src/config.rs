@@ -13,7 +13,7 @@ use crate::actions::{TargetAction, TargetResult};
 use crate::bits::DEFAULT_MAX_JOBS;
 use crate::db::PersistenceStore;
 use crate::dispatcher::{
-    DEFAULT_QUEUE_CAPACITY, Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig,
+    DEFAULT_QUEUE_CAPACITY, Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig, UserLimitConfig,
 };
 use crate::error::{BitsError, ConfigError, RoutingError, WorkerServerError};
 use crate::routing::{Route, switch::Switch};
@@ -99,6 +99,7 @@ struct DispatcherSettings {
     queue: Option<QueueKind>,
     executor: Option<ExecutorKind>,
     queue_capacity: usize,
+    user_limit: Option<UserLimitConfig>,
 }
 
 impl Default for DispatcherSettings {
@@ -107,6 +108,7 @@ impl Default for DispatcherSettings {
             queue: None,
             executor: None,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            user_limit: None,
         }
     }
 }
@@ -1050,6 +1052,57 @@ fn validate_inline_action(
     }
 }
 
+fn parse_user_limit(value: &serde_json::Value) -> Result<UserLimitConfig, BitsError> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| ConfigError::validation("dispatcher.user_limit", "must be an object"))?;
+
+    let max = obj
+        .get("max")
+        .and_then(|m| m.as_u64())
+        .ok_or_else(|| {
+            ConfigError::validation("dispatcher.user_limit.max", "must be a positive integer")
+        })?;
+    if max == 0 {
+        return Err(
+            ConfigError::validation("dispatcher.user_limit.max", "must be greater than zero").into(),
+        );
+    }
+    let max = usize::try_from(max).map_err(|_| {
+        ConfigError::validation("dispatcher.user_limit.max", "value too large for this platform")
+    })?;
+
+    let key_array = obj.get("key").and_then(|k| k.as_array()).ok_or_else(|| {
+        ConfigError::validation(
+            "dispatcher.user_limit.key",
+            "must be an array of JSON pointer strings (e.g. [\"/auth/realm\", \"/auth/username\"])",
+        )
+    })?;
+    if key_array.is_empty() {
+        return Err(
+            ConfigError::validation("dispatcher.user_limit.key", "must not be empty").into(),
+        );
+    }
+    let key: Vec<String> = key_array
+        .iter()
+        .map(|entry| {
+            let p = entry.as_str().ok_or_else(|| {
+                ConfigError::validation("dispatcher.user_limit.key", "entries must be strings")
+            })?;
+            if !p.starts_with('/') {
+                return Err(ConfigError::validation(
+                    "dispatcher.user_limit.key",
+                    format!("'{p}' must be a JSON pointer starting with '/'"),
+                )
+                .into());
+            }
+            Ok(p.to_string())
+        })
+        .collect::<Result<_, BitsError>>()?;
+
+    Ok(UserLimitConfig { max, key })
+}
+
 fn parse_dispatcher_fields(
     dispatcher: Option<&serde_json::Value>,
 ) -> Result<DispatcherSettings, BitsError> {
@@ -1096,6 +1149,9 @@ fn parse_dispatcher_fields(
                     "value too large for this platform",
                 )
             })?;
+        }
+        if let Some(v) = map.get("user_limit") {
+            settings.user_limit = Some(parse_user_limit(v)?);
         }
         if map.contains_key("concurrency") {
             return Err(ConfigError::validation(
@@ -1204,6 +1260,13 @@ fn attach_dispatcher(
         .into());
     }
 
+    // A user_limit needs a dispatcher to enforce on; if none was configured
+    // explicitly, default to a fifo queue so the admission cap still applies.
+    if settings.user_limit.is_some() && settings.queue.is_none() && settings.executor.is_none() {
+        settings.queue = Some(QueueKind::Fifo);
+    }
+    let user_limit = settings.user_limit.clone();
+
     let has_dispatcher = settings.queue.is_some() || settings.executor.is_some();
 
     match action {
@@ -1215,7 +1278,8 @@ fn attach_dispatcher(
                 None,
                 settings.queue_capacity,
             )
-            .map_err(|e| ConfigError::validation("dispatcher", e))?;
+            .map_err(|e| ConfigError::validation("dispatcher", e))?
+            .map(|d| d.with_user_limit(user_limit.clone()));
             Ok(Action::Check(check, dispatcher, silent))
         }
         Action::Transform(transform, _, _) => {
@@ -1226,7 +1290,8 @@ fn attach_dispatcher(
                 None,
                 settings.queue_capacity,
             )
-            .map_err(|e| ConfigError::validation("dispatcher", e))?;
+            .map_err(|e| ConfigError::validation("dispatcher", e))?
+            .map(|d| d.with_user_limit(user_limit.clone()));
             Ok(Action::Transform(transform, dispatcher, silent))
         }
         Action::Target(target, _, _) => {
@@ -1242,7 +1307,8 @@ fn attach_dispatcher(
                 ctx.worker_server.clone(),
                 settings.queue_capacity,
             )
-            .map_err(|e| ConfigError::validation("dispatcher", e))?;
+            .map_err(|e| ConfigError::validation("dispatcher", e))?
+            .map(|d| d.with_user_limit(user_limit.clone()));
             Ok(Action::Target(target, dispatcher, silent))
         }
         _ if has_dispatcher => Err(ConfigError::validation(

@@ -8,6 +8,8 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -76,6 +78,94 @@ pub trait Executor<T: Send + 'static>: Send + Sync {
 }
 
 // ================================
+//   Per-user admission limit
+// ================================
+
+/// Config for a hard per-user cap on jobs admitted to a dispatcher.
+///
+/// Counts jobs that are queued OR in-flight for this dispatcher (from
+/// `dispatch` until the work future resolves or is dropped). When a user is
+/// already at `max`, further dispatches for that user are rejected with
+/// [`ActionError::UserLimitExceeded`] rather than queued. (More sophisticated
+/// per-user fair scheduling / de-weighting is a separate future change to the
+/// queue itself; this is a simple hard admission cap.)
+///
+/// The user identity is derived by reading each JSON pointer in `key` from
+/// `job.user` and concatenating the results. A job whose user is missing any
+/// key component is treated as unidentifiable and is NOT limited (fail-open),
+/// so an anonymous/unkeyed request is never wrongly rejected.
+#[derive(Debug, Clone)]
+pub struct UserLimitConfig {
+    pub max: usize,
+    pub key: Vec<String>,
+}
+
+/// Tracks per-user queued-or-in-flight counts for a single dispatcher.
+#[derive(Debug)]
+pub(crate) struct UserLimiter {
+    max: usize,
+    key: Vec<String>,
+    counts: DashMap<String, usize>,
+}
+
+impl UserLimiter {
+    fn new(cfg: UserLimitConfig) -> Self {
+        Self {
+            max: cfg.max,
+            key: cfg.key,
+            counts: DashMap::new(),
+        }
+    }
+
+    /// Resolve the per-user key from `job.user`, or `None` if any component is
+    /// absent/null (unidentifiable user -> not limited).
+    fn user_key(&self, user: &serde_json::Value) -> Option<String> {
+        let mut parts = Vec::with_capacity(self.key.len());
+        for ptr in &self.key {
+            match user.pointer(ptr)? {
+                serde_json::Value::String(s) => parts.push(s.clone()),
+                serde_json::Value::Null => return None,
+                other => parts.push(other.to_string()),
+            }
+        }
+        Some(parts.join("\u{1f}"))
+    }
+
+    /// Atomically admit one job for `key` if under the cap. On success returns
+    /// the new count; on rejection returns the current (at-cap) count.
+    fn try_admit(&self, key: &str) -> Result<usize, usize> {
+        let mut slot = self.counts.entry(key.to_string()).or_insert(0);
+        if *slot >= self.max {
+            Err(*slot)
+        } else {
+            *slot += 1;
+            Ok(*slot)
+        }
+    }
+
+    /// Release one job for `key`, dropping the entry at zero to bound map growth.
+    fn release(&self, key: &str) {
+        if let Some(mut slot) = self.counts.get_mut(key) {
+            *slot = slot.saturating_sub(1);
+        }
+        self.counts.remove_if(key, |_, v| *v == 0);
+    }
+}
+
+/// RAII guard that releases a user's admission slot when the work future
+/// resolves or is dropped (completion, error, cancellation, or dispatcher drain).
+pub(crate) struct UserLimitGuard {
+    limiter: Arc<UserLimiter>,
+    key: String,
+}
+
+impl Drop for UserLimitGuard {
+    fn drop(&mut self) {
+        self.limiter.release(&self.key);
+    }
+}
+
+// ================================
 //   Dispatcher
 // ================================
 
@@ -93,6 +183,8 @@ pub struct Dispatcher<T: Send + 'static> {
     pending: Arc<PendingMap<T>>,
     admission: Arc<Semaphore>,
     closing: Arc<AtomicBool>,
+    /// Optional hard per-user admission cap (queued + in-flight).
+    user_limiter: Option<Arc<UserLimiter>>,
 }
 
 impl<T: Send + 'static> Clone for Dispatcher<T> {
@@ -102,6 +194,7 @@ impl<T: Send + 'static> Clone for Dispatcher<T> {
             pending: Arc::clone(&self.pending),
             admission: Arc::clone(&self.admission),
             closing: Arc::clone(&self.closing),
+            user_limiter: self.user_limiter.clone(),
         }
     }
 }
@@ -227,7 +320,14 @@ impl<T: Send + 'static> Dispatcher<T> {
             pending,
             admission,
             closing: Arc::new(AtomicBool::new(false)),
+            user_limiter: None,
         })
+    }
+
+    /// Attach (or clear) a hard per-user admission cap. See [`UserLimitConfig`].
+    pub fn with_user_limit(mut self, cfg: Option<UserLimitConfig>) -> Self {
+        self.user_limiter = cfg.map(|c| Arc::new(UserLimiter::new(c)));
+        self
     }
 
     pub fn dispatch(
@@ -241,11 +341,33 @@ impl<T: Send + 'static> Dispatcher<T> {
         let queue = Arc::clone(&self.queue);
         let admission = Arc::clone(&self.admission);
         let closing = Arc::clone(&self.closing);
+        let user_limiter = self.user_limiter.clone();
+        let user_key = user_limiter.as_ref().and_then(|l| l.user_key(&job.user));
         let job_to_enqueue = job.clone();
         let cancelled = job.cancelled.clone();
         let pollers = job.active_pollers.clone();
         let deadline_nanos = job.reconnect_deadline_nanos.clone();
         Box::pin(async move {
+            // Hard per-user admission cap: reject when the user already has
+            // `max` jobs queued or in-flight on this dispatcher. The guard is
+            // moved into the work future below so the slot is held for the
+            // whole queued+in-flight span and released on any exit path.
+            let user_guard = match (&user_limiter, &user_key) {
+                (Some(limiter), Some(key)) => match limiter.try_admit(key) {
+                    Ok(_) => Some(UserLimitGuard {
+                        limiter: Arc::clone(limiter),
+                        key: key.clone(),
+                    }),
+                    Err(current) => {
+                        return Err(ActionError::UserLimitExceeded(format!(
+                            "user already has {current} job(s) queued or in-flight (limit {})",
+                            limiter.max
+                        )));
+                    }
+                },
+                _ => None,
+            };
+
             let permit = match admission.try_acquire_owned() {
                 Ok(p) => p,
                 Err(tokio::sync::TryAcquireError::NoPermits) => {
@@ -263,6 +385,9 @@ impl<T: Send + 'static> Dispatcher<T> {
             }
 
             let guarded_work: BoxFuture<'static, Result<T, ActionError>> = Box::pin(async move {
+                // Held for the queued + in-flight span; releases the per-user
+                // slot when work completes, errors, is cancelled, or is dropped.
+                let _user_guard = user_guard;
                 match guard {
                     DispatchGuard::None => {}
                     DispatchGuard::Cancelled => {

@@ -30,6 +30,9 @@ pub enum ActionError {
     ResourceError(String),
     Cancelled,
     ClientGone,
+    /// The per-user admission limit for this dispatcher is already reached
+    /// (the user has too many jobs queued or in-flight on this route).
+    UserLimitExceeded(String),
 }
 
 impl std::fmt::Display for ActionError {
@@ -45,6 +48,7 @@ impl std::fmt::Display for ActionError {
             ActionError::ClientGone => {
                 write!(f, "Client disconnected before data could be delivered")
             }
+            ActionError::UserLimitExceeded(msg) => write!(f, "User limit exceeded: {}", msg),
         }
     }
 }
@@ -62,6 +66,7 @@ impl ActionError {
             ActionError::ResourceError(_) => "ACTION_RESOURCE",
             ActionError::Cancelled => "ACTION_CANCELLED",
             ActionError::ClientGone => "ACTION_CLIENT_GONE",
+            ActionError::UserLimitExceeded(_) => "ACTION_USER_LIMIT",
         }
     }
 

@@ -1,8 +1,10 @@
-//! Cross-broker per-user admission limit: strict global cap, per-user
-//! isolation, recovery, reclaim, and lazy local enforcement.
+//! Per-dispatcher, per-user admission limit synchronised across a dispatcher's
+//! broker replicas: strict cap, per-user isolation, recovery, reclaim, and lazy
+//! local enforcement. The cap is per (dispatcher, user) — never a global tally.
 //!
-//! Two `Dispatcher`s that share ONE `MemoryStore` but carry different
-//! `broker_id`s stand in for two brokers behind the same route.
+//! Two `Dispatcher`s that share ONE `MemoryStore` and ONE `scope` but carry
+//! different `broker_id`s stand in for two replicas of the SAME dispatcher
+//! (one route target running on two brokers).
 
 use std::sync::Arc;
 use std::task::Poll;
@@ -65,12 +67,12 @@ fn instant() -> BoxFuture<'static, Result<CheckResult, ActionError>> {
 }
 
 #[tokio::test]
-async fn strict_cap_is_global_across_brokers() {
+async fn strict_cap_synced_across_replicas() {
     let store: Arc<dyn PersistenceStore> = Arc::new(MemoryStore::new());
     let a = broker(store.clone(), "broker-a", 2);
     let b = broker(store.clone(), "broker-b", 2);
 
-    // One alice job in-flight on each broker => 2 globally (the cap).
+    // One alice job in-flight on each replica => 2 for this dispatcher (the cap).
     let (tx1, rx1) = oneshot::channel();
     let (tx2, rx2) = oneshot::channel();
     let j1 = a.dispatch(&user_job("alice"), DispatchGuard::None, held(rx1));
@@ -80,20 +82,20 @@ async fn strict_cap_is_global_across_brokers() {
     assert!(matches!(poll!(j1.as_mut()), Poll::Pending));
     assert!(matches!(poll!(j2.as_mut()), Poll::Pending));
 
-    // A 3rd alice job on EITHER broker exceeds the GLOBAL cap of 2.
+    // A 3rd alice job on EITHER replica exceeds this dispatcher's cap of 2.
     let on_a = a
         .dispatch(&user_job("alice"), DispatchGuard::None, instant())
         .await;
     assert!(
         matches!(on_a, Err(ActionError::UserLimitExceeded(_))),
-        "3rd alice on broker-a must be globally rejected, got {on_a:?}"
+        "3rd alice on broker-a must be rejected (cap synced across replicas), got {on_a:?}"
     );
     let on_b = b
         .dispatch(&user_job("alice"), DispatchGuard::None, instant())
         .await;
     assert!(
         matches!(on_b, Err(ActionError::UserLimitExceeded(_))),
-        "3rd alice on broker-b must be globally rejected, got {on_b:?}"
+        "3rd alice on broker-b must be rejected (cap synced across replicas), got {on_b:?}"
     );
 
     // A different user is unaffected by alice's usage.
@@ -105,8 +107,8 @@ async fn strict_cap_is_global_across_brokers() {
         "bob must be admitted"
     );
 
-    // Complete one alice job; its slot frees globally (allow the spawned
-    // store-release task to run).
+    // Complete one alice job; its slot frees for the dispatcher (allow the
+    // spawned store-release task to run).
     let _ = tx1.send(());
     assert!(j1.await.is_ok());
     for _ in 0..8 {
@@ -161,7 +163,7 @@ async fn reclaim_removes_dead_broker_entries_only() {
 #[tokio::test]
 async fn lazy_mode_enforces_local_cap() {
     // max > 10 -> lazy mode. A single broker still enforces the cap via the
-    // local gate (and the periodically-reconciled global view).
+    // local gate (and the periodically-reconciled per-dispatcher view).
     let store: Arc<dyn PersistenceStore> = Arc::new(MemoryStore::new());
     let a = broker(store.clone(), "broker-a", 12);
 

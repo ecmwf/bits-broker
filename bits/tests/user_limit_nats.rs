@@ -9,11 +9,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bits::Job;
 use bits::actions::{ActionError, CheckResult};
 use bits::db::nats::NatsStore;
 use bits::db::{BrokerLeaseStore, PersistenceStore, UserLimitStore};
 use bits::dispatcher::{DispatchGuard, Dispatcher, ExecutorKind, QueueKind, UserLimitConfig};
-use bits::Job;
 use futures::future::BoxFuture;
 use tokio::sync::oneshot;
 
@@ -98,7 +98,7 @@ async fn nats_store_reserve_list_release_and_seq_monotonic() {
         .reserve_user_slot(SCOPE, "alice", "job-2", "broker-b")
         .await
         .unwrap();
-    assert!(s2 > s1, "seq must be globally monotonic ({s1} then {s2})");
+    assert!(s2 > s1, "seq must be store-monotonic ({s1} then {s2})");
 
     // Idempotent: re-reserving the same job returns its original seq.
     let s1_again = store
@@ -117,7 +117,13 @@ async fn nats_store_reserve_list_release_and_seq_monotonic() {
     assert_eq!(entries[1].owner_broker_id, "broker-b");
 
     // A different user is a separate namespace.
-    assert!(store.list_user_slots(SCOPE, "bob").await.unwrap().is_empty());
+    assert!(
+        store
+            .list_user_slots(SCOPE, "bob")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     store
         .release_user_slot(SCOPE, "alice", "job-1")
@@ -146,7 +152,10 @@ async fn nats_reclaim_removes_dead_broker_entries_only() {
         .unwrap();
 
     let removed = store.reclaim_user_slots().await.unwrap();
-    assert_eq!(removed, 1, "only the dead broker's entry should be reclaimed");
+    assert_eq!(
+        removed, 1,
+        "only the dead broker's entry should be reclaimed"
+    );
 
     let remaining = store.list_user_slots(SCOPE, "carol").await.unwrap();
     assert_eq!(remaining.len(), 1);
@@ -154,23 +163,29 @@ async fn nats_reclaim_removes_dead_broker_entries_only() {
 }
 
 #[tokio::test]
-async fn nats_strict_cap_is_global_across_brokers() {
+async fn nats_strict_cap_synced_across_replicas() {
     let store = store();
     let a = broker(store.clone(), "broker-a", 2);
     let b = broker(store.clone(), "broker-b", 2);
 
-    // One held alice job on each broker => 2 in-flight globally (the cap).
+    // One held alice job on each replica => 2 in-flight for this dispatcher (cap).
     let (tx1, rx1) = oneshot::channel();
     let (tx2, rx2) = oneshot::channel();
     let a2 = a.clone();
     let b2 = b.clone();
-    let h1 = tokio::spawn(async move { a2.dispatch(&user_job("alice"), DispatchGuard::None, held(rx1)).await });
-    let h2 = tokio::spawn(async move { b2.dispatch(&user_job("alice"), DispatchGuard::None, held(rx2)).await });
+    let h1 = tokio::spawn(async move {
+        a2.dispatch(&user_job("alice"), DispatchGuard::None, held(rx1))
+            .await
+    });
+    let h2 = tokio::spawn(async move {
+        b2.dispatch(&user_job("alice"), DispatchGuard::None, held(rx2))
+            .await
+    });
 
     // Wait until both are admitted (visible in the shared store).
     wait_for_count(&store, "alice", 2).await;
 
-    // A 3rd alice job on either broker exceeds the GLOBAL cap of 2.
+    // A 3rd alice job on either replica exceeds this dispatcher's cap of 2.
     let rejected = a
         .dispatch(
             &user_job("alice"),
@@ -180,10 +195,10 @@ async fn nats_strict_cap_is_global_across_brokers() {
         .await;
     assert!(
         matches!(rejected, Err(ActionError::UserLimitExceeded(_))),
-        "3rd alice must be globally rejected over NATS, got {rejected:?}"
+        "3rd alice must be rejected over NATS (cap synced across replicas), got {rejected:?}"
     );
 
-    // Complete the two held jobs; their slots free globally.
+    // Complete the two held jobs; their slots free for the dispatcher.
     let _ = tx1.send(());
     let _ = tx2.send(());
     assert!(h1.await.unwrap().is_ok());
@@ -198,5 +213,8 @@ async fn nats_strict_cap_is_global_across_brokers() {
             Box::pin(async { Ok(CheckResult::Pass) }),
         )
         .await;
-    assert!(readmit.is_ok(), "alice should be admitted again, got {readmit:?}");
+    assert!(
+        readmit.is_ok(),
+        "alice should be admitted again, got {readmit:?}"
+    );
 }

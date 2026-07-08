@@ -251,7 +251,7 @@ impl NatsStore {
                 && e.operation == kv::Operation::Put
             {
                 let mut ent: UserLimitEntry = Self::deserialize(&e.value)?;
-                ent.seq = e.revision; // globally-monotonic creation order
+                ent.seq = e.revision; // store-monotonic creation order
                 out.push(ent);
             }
         }

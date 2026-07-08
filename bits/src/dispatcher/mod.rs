@@ -100,17 +100,20 @@ pub struct UserLimitConfig {
     pub key: Vec<String>,
 }
 
-/// How long a lazy-mode broker trusts a cached global count before refreshing.
+/// How long a lazy-mode broker trusts a cached per-dispatcher count before refreshing.
 const LAZY_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 /// Limits at or below this use strict cross-broker enforcement; above it, lazy.
 const STRICT_MAX_THRESHOLD: usize = 10;
 
 /// Tracks per-user queued-or-in-flight counts for a single dispatcher.
 ///
-/// With no store this is broker-local only. With a store it also synchronises
-/// cross-broker: **strict** (`max <= 10`) consults the store on every admit and
-/// enforces a global FIFO cap; **lazy** (`max > 10`) gates on the local count
-/// and reconciles a cached global count periodically, tolerating brief over-use.
+/// The cap is always PER-DISPATCHER (per route target) and per-user — never a
+/// global tally across dispatchers. With no store it is broker-local only. With
+/// a store it synchronises that per-dispatcher count across the dispatcher's
+/// broker replicas: **strict** (`max <= 10`) consults the store on every admit
+/// and enforces the cap by cross-replica FIFO rank; **lazy** (`max > 10`) gates
+/// on the local count and reconciles a cached per-dispatcher count periodically,
+/// tolerating brief over-use.
 pub(crate) struct UserLimiter {
     max: usize,
     key: Vec<String>,
@@ -118,8 +121,8 @@ pub(crate) struct UserLimiter {
     broker_id: String,
     counts: DashMap<String, usize>,
     store: Option<Arc<dyn crate::db::PersistenceStore>>,
-    /// Lazy mode: user -> (last global count, when it was refreshed).
-    cached_global: DashMap<String, (usize, Instant)>,
+    /// Lazy mode: user -> (last synced per-dispatcher count, when refreshed).
+    cached_count: DashMap<String, (usize, Instant)>,
 }
 
 impl UserLimiter {
@@ -136,7 +139,7 @@ impl UserLimiter {
             broker_id,
             counts: DashMap::new(),
             store,
-            cached_global: DashMap::new(),
+            cached_count: DashMap::new(),
         }
     }
 
@@ -204,7 +207,7 @@ impl UserLimiter {
         };
 
         if self.strict() {
-            // Strict: the store is authoritative via a global FIFO rank.
+            // Strict: the store is authoritative via a cross-replica FIFO rank.
             let reserved = match store
                 .reserve_user_slot(&self.scope, user_key, job_id, &self.broker_id)
                 .await
@@ -229,9 +232,10 @@ impl UserLimiter {
                     return Some(guard);
                 }
             };
-            // Rank our entry among all in-flight entries by (seq, job_id): the
-            // first `max` survive, the rest back out. Deterministic across
-            // brokers, so exactly `max` are admitted globally.
+            // Rank our entry among this dispatcher's in-flight entries for the
+            // user by (seq, job_id): the first `max` survive, the rest back out.
+            // Deterministic across the dispatcher's replicas, so exactly `max`
+            // are admitted for this (dispatcher, user) — not a global tally.
             let mut ordered: Vec<(u64, &str)> =
                 entries.iter().map(|e| (e.seq, e.job_id.as_str())).collect();
             ordered.sort_unstable();
@@ -246,8 +250,9 @@ impl UserLimiter {
                 None
             }
         } else {
-            // Lazy: local gate first (local <= global, so a full local count
-            // means definitely full), then a periodically-refreshed global view.
+            // Lazy: local gate first (local <= synced count, so a full local
+            // count means definitely full), then a periodically-refreshed
+            // per-dispatcher view from the store.
             if self.try_admit_local(user_key).is_err() {
                 return None;
             }
@@ -261,15 +266,15 @@ impl UserLimiter {
                 return Some(guard);
             }
             let fresh = self
-                .cached_global
+                .cached_count
                 .get(user_key)
                 .map(|v| v.1.elapsed() < LAZY_RECONCILE_INTERVAL);
-            let global = if fresh == Some(true) {
-                self.cached_global.get(user_key).map(|v| v.0).unwrap_or(0)
+            let synced = if fresh == Some(true) {
+                self.cached_count.get(user_key).map(|v| v.0).unwrap_or(0)
             } else {
                 match store.list_user_slots(&self.scope, user_key).await {
                     Ok(entries) => {
-                        self.cached_global
+                        self.cached_count
                             .insert(user_key.to_string(), (entries.len(), Instant::now()));
                         entries.len()
                     }
@@ -279,7 +284,7 @@ impl UserLimiter {
                     }
                 }
             };
-            if global > self.max {
+            if synced > self.max {
                 drop(guard); // releases the local count and the store entry
                 None
             } else {

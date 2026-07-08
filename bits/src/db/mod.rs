@@ -29,11 +29,13 @@ pub struct BrokerLeaseRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-/// One in-flight job counted against a per-user admission limit, shared across
-/// brokers via the persistence store. Keyed by (scope, user, job_id); `scope` is
-/// the dispatcher's shared name (targets cached by name share a scope), `seq` is
-/// a globally-monotonic ordinal for strict FIFO ranking, and `owner_broker_id`
-/// allows reclaim of a dead broker's entries.
+/// One in-flight job counted against a per-dispatcher, per-user admission limit,
+/// synchronised across the dispatcher's broker replicas via the persistence
+/// store. Keyed by (scope, user, job_id); `scope` is the dispatcher's config
+/// entry name (targets cached by name share a scope, i.e. one dispatcher), `seq`
+/// is a store-monotonic ordinal for strict FIFO ranking, and `owner_broker_id`
+/// allows reclaim of a dead broker's entries. The count is never aggregated
+/// across dispatchers — it is not a global tally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserLimitEntry {
     pub scope: String,
@@ -228,18 +230,20 @@ where
     }
 }
 
-/// Cross-broker per-user admission accounting.
+/// Per-dispatcher, per-user admission accounting, synchronised across replicas.
 ///
-/// Backs the dispatcher's per-user limit so a user's global in-flight count is
-/// visible across brokers (strict enforcement for small limits; lazy reconcile
-/// for large ones). Like [`BrokerSlotStore`] this is provided by a blanket impl
-/// that dispatches to the concrete backend via downcast; backends expose
+/// Backs the dispatcher's per-user limit so a user's in-flight count for a given
+/// dispatcher (`scope`) is consistent across that dispatcher's broker replicas
+/// (strict enforcement for small limits; lazy reconcile for large ones). The
+/// count is scoped per dispatcher and never aggregated across dispatchers — it
+/// is not a global tally. Like [`BrokerSlotStore`] this is provided by a blanket
+/// impl that dispatches to the concrete backend via downcast; backends expose
 /// inherent `*_memory` / `*_nats` methods.
 #[async_trait]
 pub trait UserLimitStore: Send + Sync {
-    /// Record one in-flight job for `(scope, user)`, returning a
-    /// globally-monotonic `seq` for strict FIFO ranking. Idempotent per
-    /// `job_id`: re-reserving an existing job returns its existing `seq`.
+    /// Record one in-flight job for `(scope, user)`, returning a store-monotonic
+    /// `seq` for strict FIFO ranking. Idempotent per `job_id`: re-reserving an
+    /// existing job returns its existing `seq`.
     async fn reserve_user_slot(
         &self,
         scope: &str,

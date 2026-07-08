@@ -10,7 +10,15 @@ pub enum JobResult {
         stream: ByteStream,
     },
     /// Job should be redirected to another location.
-    Redirect { location: String, message: String },
+    Redirect {
+        location: String,
+        message: String,
+        /// Content type of the object at `location`, when known. Surfaced in the
+        /// v1 redirect body for backwards compatibility with the Python server.
+        content_type: Option<String>,
+        /// Byte length of the object at `location`, when known.
+        content_length: Option<u64>,
+    },
     /// Job-level error (invalid request, etc.).
     Error { message: String },
     /// System-level failure (routing failed, network error, etc.).
@@ -29,7 +37,9 @@ impl std::fmt::Debug for JobResult {
             JobResult::Success {
                 content_type, size, ..
             } => write!(f, "Success({} bytes, {})", size, content_type),
-            JobResult::Redirect { location, message } => {
+            JobResult::Redirect {
+                location, message, ..
+            } => {
                 write!(f, "Redirect({}, {})", location, message)
             }
             JobResult::Error { message } => write!(f, "Error({})", message),
@@ -71,6 +81,8 @@ mod tests {
         let result = JobResult::Redirect {
             location: "https://example.com".to_string(),
             message: "Redirecting to example.com".to_string(),
+            content_type: None,
+            content_length: None,
         };
         assert_eq!(
             format!("{:?}", result),

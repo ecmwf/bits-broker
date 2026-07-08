@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
-use opentelemetry::{KeyValue, global};
+use opentelemetry::{global, KeyValue};
 
 use crate::result::JobResult;
 
@@ -277,7 +277,7 @@ mod prometheus_export {
 }
 
 #[cfg(feature = "metrics-prometheus")]
-pub use prometheus_export::{PrometheusHandle, init_prometheus, installed_handle};
+pub use prometheus_export::{init_prometheus, installed_handle, PrometheusHandle};
 
 #[cfg(test)]
 mod tests {
@@ -298,6 +298,8 @@ mod tests {
                 JobResult::Redirect {
                     location: String::new(),
                     message: String::new(),
+                    content_type: None,
+                    content_length: None,
                 },
                 "redirect",
             ),

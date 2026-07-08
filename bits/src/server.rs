@@ -319,8 +319,25 @@ fn result_to_response(result: JobResult, retry_after_secs: u64) -> Response {
             Body::from_stream(stream),
         )
             .into_response(),
-        JobResult::Redirect { location, .. } => {
-            (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
+        JobResult::Redirect {
+            location,
+            content_type,
+            content_length,
+            ..
+        } => {
+            // Carry the object's content metadata alongside the redirect so a
+            // proxying broker can reconstruct the v1 redirect body without an
+            // extra round-trip (see runtime::recovery::try_proxy_with_lease).
+            let mut builder = Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header(header::LOCATION, location);
+            if let Some(ct) = content_type {
+                builder = builder.header("x-polytope-content-type", ct);
+            }
+            if let Some(cl) = content_length {
+                builder = builder.header("x-polytope-content-length", cl.to_string());
+            }
+            builder.body(Body::empty()).unwrap()
         }
         JobResult::Error { message } => {
             json_error(StatusCode::BAD_REQUEST, CODE_JOB_ERROR, message, false)

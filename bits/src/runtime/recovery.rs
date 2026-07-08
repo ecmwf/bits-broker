@@ -192,9 +192,24 @@ impl Bits {
             if last_segment == id {
                 return Some(PollOutcome::Pending { id: id.to_string() });
             }
+            // Recover the object's content metadata from the owner broker's
+            // response headers so the v1 redirect body keeps parity across a
+            // cross-broker proxy hop.
+            let content_type = response
+                .headers()
+                .get("x-polytope-content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let content_length = response
+                .headers()
+                .get("x-polytope-content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
             return Some(PollOutcome::Ready(JobResult::Redirect {
                 location,
                 message: "proxied redirect".into(),
+                content_type,
+                content_length,
             }));
         }
 

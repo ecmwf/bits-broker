@@ -88,6 +88,8 @@ impl TargetAction for ScriptedTarget {
                 Ok(TargetResult::Complete(JobResult::Redirect {
                     location: location.clone(),
                     message: message.clone(),
+                    content_type: None,
+                    content_length: None,
                 }))
             }
             TargetBehavior::Error { delay, message } => {

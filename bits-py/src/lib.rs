@@ -565,6 +565,10 @@ impl TargetAction for PyTargetAdapter {
                 Ok(TargetResult::Complete(JobResult::Redirect {
                     location: r.location.clone(),
                     message: r.message.clone(),
+                    // Python dispatchers don't surface content metadata; the
+                    // BOBS/S3 worker delivery path is where it originates.
+                    content_type: None,
+                    content_length: None,
                 }))
             } else if let Ok(e) = obj.extract::<PyRef<PyError>>() {
                 Ok(TargetResult::Complete(JobResult::Error {
@@ -797,11 +801,22 @@ async fn job_result_to_py(result: JobResult) -> PyResult<Py<PyAny>> {
                 Ok(payload.into_any().unbind())
             })
         }
-        JobResult::Redirect { location, message } => Python::attach(|py| {
+        JobResult::Redirect {
+            location,
+            message,
+            content_type,
+            content_length,
+        } => Python::attach(|py| {
             let payload = PyDict::new(py);
             payload.set_item("status", "redirect")?;
             payload.set_item("location", location)?;
             payload.set_item("message", message)?;
+            if let Some(content_type) = content_type {
+                payload.set_item("content_type", content_type)?;
+            }
+            if let Some(content_length) = content_length {
+                payload.set_item("content_length", content_length)?;
+            }
             Ok(payload.into_any().unbind())
         }),
         JobResult::Error { message } => Python::attach(|py| {

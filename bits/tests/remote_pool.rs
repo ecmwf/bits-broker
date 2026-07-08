@@ -416,7 +416,9 @@ async fn worker_requests_redirect() {
     assert_eq!(done.status(), 200);
 
     match bits.poll(&handle.id, Some(Duration::from_secs(5))).await {
-        PollOutcome::Ready(JobResult::Redirect { location, message }) => {
+        PollOutcome::Ready(JobResult::Redirect {
+            location, message, ..
+        }) => {
             assert!(location.contains("example-bucket.s3.amazonaws.com/object"));
             assert_eq!(message, "Download from object storage");
         }

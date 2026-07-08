@@ -43,6 +43,8 @@ impl TargetAction for TargetDummyDelay {
         Ok(TargetResult::Complete(JobResult::Redirect {
             location: String::new(),
             message: format!("dummy dispatch complete for job {}", job.id),
+            content_type: None,
+            content_length: None,
         }))
     }
 }

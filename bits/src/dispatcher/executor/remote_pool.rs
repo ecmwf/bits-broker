@@ -99,6 +99,8 @@ enum WorkerOutcome {
     Redirect {
         location: String,
         message: String,
+        content_type: Option<String>,
+        content_length: Option<u64>,
     },
     Reject {
         reason: String,
@@ -159,6 +161,10 @@ struct RedirectRequest {
     location: String,
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    content_length: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -269,12 +275,17 @@ async fn handle_get_work(
                     size,
                     stream,
                 })),
-                WorkerOutcome::Redirect { location, message } => {
-                    Ok(TargetResult::Complete(JobResult::Redirect {
-                        location,
-                        message,
-                    }))
-                }
+                WorkerOutcome::Redirect {
+                    location,
+                    message,
+                    content_type,
+                    content_length,
+                } => Ok(TargetResult::Complete(JobResult::Redirect {
+                    location,
+                    message,
+                    content_type,
+                    content_length,
+                })),
                 WorkerOutcome::Reject { reason } => Ok(TargetResult::Reject {
                     reason,
                     silent: true,
@@ -419,6 +430,8 @@ async fn handle_complete_redirect(
                 .send(WorkerOutcome::Redirect {
                     location: req.location,
                     message: req.message,
+                    content_type: req.content_type,
+                    content_length: req.content_length,
                 })
                 .is_err()
             {

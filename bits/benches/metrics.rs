@@ -58,6 +58,8 @@ impl TargetAction for NoopTarget {
         Ok(TargetResult::Complete(JobResult::Redirect {
             location: String::new(),
             message: String::new(),
+            content_type: None,
+            content_length: None,
         }))
     }
 }

@@ -357,9 +357,12 @@ impl Bits {
     /// Requests cancellation for a previously submitted job.
     ///
     /// Cancellation is best-effort and is observed at action boundaries.
-    pub fn cancel(&self, id: &str) {
+    pub fn cancel(&self, id: &str) -> bool {
         if let Some(job) = self.submit_context.jobs.get(id) {
             job.cancelled.store(true, Ordering::Release);
+            true
+        } else {
+            false
         }
     }
 

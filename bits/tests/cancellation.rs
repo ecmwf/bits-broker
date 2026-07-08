@@ -67,7 +67,7 @@ routes:
         PollOutcome::Ready(JobResult::Redirect { .. })
     ));
 
-    bits.cancel(&handle.id);
+    assert!(!bits.cancel(&handle.id));
 
     let outcome = bits
         .poll(&handle.id, Some(Duration::from_millis(100)))
@@ -101,8 +101,8 @@ routes:
         .submit(Job::new(serde_json::json!({})))
         .expect_accepted("submit should not be rejected");
 
-    bits.cancel(&handle.id);
-    bits.cancel(&handle.id);
+    assert!(bits.cancel(&handle.id));
+    assert!(bits.cancel(&handle.id));
 
     let outcome = bits.poll(&handle.id, Some(Duration::from_secs(2))).await;
     assert!(matches!(outcome, PollOutcome::Ready(JobResult::Cancelled)));
@@ -124,5 +124,5 @@ routes:
 "#;
 
     let bits = Bits::from_config(config).unwrap();
-    bits.cancel("does-not-exist");
+    assert!(!bits.cancel("does-not-exist"));
 }

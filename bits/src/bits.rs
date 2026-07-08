@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use serde_json::Value;
 
 use crate::config::{RouteFactory, RuntimeConfig, parse_bootstrap};
 use crate::db::{ClaimResult, DbError, PersistenceStore};
@@ -58,6 +60,27 @@ impl SubmitOutcome {
             SubmitOutcome::Overloaded => panic!("{msg}"),
         }
     }
+}
+
+/// Non-consuming snapshot of a job currently known to this broker.
+///
+/// This is intentionally best-effort and process-local: it reports jobs still
+/// present in the broker's in-memory map without polling them, so ready results
+/// are not consumed. It is useful for legacy/status endpoints that need an
+/// approximate view of active requests.
+#[derive(Debug, Clone)]
+pub struct ActiveJobSnapshot {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub original_request: Value,
+    pub request: Value,
+    pub user: Value,
+    pub metadata: Value,
+    pub status: &'static str,
+    pub location: Option<String>,
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+    pub user_message: Option<String>,
 }
 
 /// Main broker runtime used to submit, cancel, and poll jobs.
@@ -338,6 +361,86 @@ impl Bits {
         if let Some(job) = self.submit_context.jobs.get(id) {
             job.cancelled.store(true, Ordering::Release);
         }
+    }
+
+    /// Returns a non-consuming, process-local snapshot of jobs currently known
+    /// to this broker. Ready results are inspected but left in place for the
+    /// next real poller to consume.
+    pub fn active_jobs(&self) -> Vec<ActiveJobSnapshot> {
+        self.submit_context
+            .jobs
+            .iter()
+            .map(|entry| {
+                let job = entry.value();
+                let result = job.result.lock().unwrap_or_else(|p| p.into_inner());
+                let mut status = if job.is_cancelled() { "failed" } else { "queued" };
+                let mut location = None;
+                let mut content_type = None;
+                let mut content_length = None;
+                let mut user_message = None;
+
+                match result.as_ref() {
+                    Some(JobResult::Success {
+                        content_type: ct,
+                        size,
+                        ..
+                    }) => {
+                        status = "processed";
+                        content_type = Some(ct.clone());
+                        if *size >= 0 {
+                            content_length = Some(*size as u64);
+                        }
+                    }
+                    Some(JobResult::Redirect {
+                        location: loc,
+                        message,
+                        content_type: ct,
+                        content_length: cl,
+                    }) => {
+                        status = "processed";
+                        location = Some(loc.clone());
+                        user_message = Some(message.clone());
+                        content_type = ct.clone();
+                        content_length = *cl;
+                    }
+                    Some(JobResult::Error { message }) => {
+                        status = "failed";
+                        user_message = Some(message.clone());
+                    }
+                    Some(JobResult::Failed { reason }) => {
+                        status = "failed";
+                        user_message = Some(reason.clone());
+                    }
+                    Some(JobResult::Overloaded { reason }) => {
+                        status = "failed";
+                        user_message = Some(reason.clone());
+                    }
+                    Some(JobResult::Cancelled) => {
+                        status = "failed";
+                        user_message = Some("Request cancelled".to_string());
+                    }
+                    Some(JobResult::ClientGone) => {
+                        status = "failed";
+                        user_message = Some("request abandoned: client disconnected".to_string());
+                    }
+                    None => {}
+                }
+
+                ActiveJobSnapshot {
+                    id: job.id.clone(),
+                    created_at: job.created_at,
+                    original_request: job.original_request.as_ref().clone(),
+                    request: job.request.clone(),
+                    user: job.user.as_ref().clone(),
+                    metadata: job.metadata.as_ref().clone(),
+                    status,
+                    location,
+                    content_type,
+                    content_length,
+                    user_message,
+                }
+            })
+            .collect()
     }
 
     /// Waits for a job result or reports that the caller should retry later.
@@ -737,6 +840,46 @@ targets:
         let outcome = bits
             .poll(&job_handle.id, Some(Duration::from_secs(5)))
             .await;
+        assert!(matches!(
+            outcome,
+            crate::PollOutcome::Ready(_) | crate::PollOutcome::Pending { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn active_jobs_reports_submitted_jobs_without_consuming_results() {
+        let config = r#"
+bits:
+  site: tst
+  env: dev
+targets:
+  my_target:
+    type: http
+    url: http://127.0.0.1:1
+"#;
+        let bits = Bits::from_config(config).expect("should build");
+        let route_val = serde_json::json!([{"my_route": ["target::my_target"]}]);
+        let handle = bits.add_route("my_route", &route_val).expect("add_route");
+
+        let mut job = Job::new(serde_json::json!({"param": "t"}));
+        job.user_mut()["auth"] = serde_json::json!({"username": "alice", "realm": "ecmwf"});
+        job.metadata_mut()["collection"] = serde_json::json!("my_route");
+        let job_handle = handle
+            .submit(job)
+            .expect_accepted("route handle submit should not be rejected");
+
+        let snapshot = bits
+            .active_jobs()
+            .into_iter()
+            .find(|job| job.id == job_handle.id)
+            .expect("submitted job should be present in active snapshot");
+        assert_eq!(snapshot.request, serde_json::json!({"param": "t"}));
+        assert_eq!(snapshot.user["auth"]["username"], "alice");
+        assert_eq!(snapshot.metadata["collection"], "my_route");
+        assert!(matches!(snapshot.status, "queued" | "processed" | "failed"));
+
+        // Snapshotting must not consume a ready result; polling remains valid.
+        let outcome = bits.poll(&job_handle.id, Some(Duration::from_secs(5))).await;
         assert!(matches!(
             outcome,
             crate::PollOutcome::Ready(_) | crate::PollOutcome::Pending { .. }

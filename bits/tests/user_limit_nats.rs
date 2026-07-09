@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! NATS-backed validation of the cross-broker per-user limit.
 //!
 //! Requires a JetStream-enabled NATS server (set BITS_NATS_URL, default

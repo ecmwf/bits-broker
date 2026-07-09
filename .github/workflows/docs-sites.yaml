@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Builds mdBook docs and publishes them to ECMWF Sites:
 # - PRs get preview publish/unpublish under `bits/pull-requests`.
 # - Pushes to `main`/tags publish canonical docs under `bits`.

@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Broker Leases
 
 Each persistent BITS instance registers itself in the shared store so peer brokers can locate it for [internal poll proxying](persistence-poll-recovery.md). This registration is a broker lease.

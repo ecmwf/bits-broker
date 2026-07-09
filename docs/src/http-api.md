@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # HTTP Server API
 
 BITS is a library first. The core API (`Bits::submit()`, `Bits::poll()`,

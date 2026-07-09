@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Poll Proxying and Recovery
 
 When a poll request arrives for a job that is not in local memory, the broker follows a lease-gated sequence to locate the result or recover the job.

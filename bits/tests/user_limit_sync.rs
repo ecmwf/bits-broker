@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-dispatcher, per-user admission limit synchronised across a dispatcher's
 //! broker replicas: strict cap, per-user isolation, recovery, reclaim, and lazy
 //! local enforcement. The cap is per (dispatcher, user) — never a global tally.

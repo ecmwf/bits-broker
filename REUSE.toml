@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+#
+# SPDX-License-Identifier: Apache-2.0
+
+version = 1
+
+# Human-facing LICENSE and NOTICE files (outside LICENSES/) and metadata files
+# that carry no comment syntax.
+[[annotations]]
+path = ["LICENSE", "NOTICE", "CITATION.cff"]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 European Centre for Medium-Range Weather Forecasts (ECMWF)"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Generated lockfile (carries an auto-generated "do not edit" banner).
+[[annotations]]
+path = "Cargo.lock"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 European Centre for Medium-Range Weather Forecasts (ECMWF)"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Third-party documentation assets vendored by mdBook preprocessors.
+[[annotations]]
+path = "docs/mermaid.min.js"
+precedence = "closest"
+SPDX-FileCopyrightText = "2014-2022 Knut Sveidqvist and Mermaid contributors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["docs/mermaid-init.js", "docs/theme/mermaid.css"]
+precedence = "closest"
+SPDX-FileCopyrightText = "The mdbook-mermaid authors"
+SPDX-License-Identifier = "MPL-2.0"
+
+[[annotations]]
+path = ["docs/theme/tabs.css", "docs/theme/tabs.js"]
+precedence = "closest"
+SPDX-FileCopyrightText = "The mdbook-tabs authors"
+SPDX-License-Identifier = "MIT"

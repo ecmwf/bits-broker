@@ -1,19 +1,23 @@
+<!--
+SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 <div align="center">
 
 # BITS
 
 **Broker for Intelligent Task Scheduling**
 
-[![Static Badge](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity/sandbox_badge.svg)](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity#sandbox)
+[![Static Badge](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity/incubating_badge.svg)](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity#incubating)
 [![Rust](https://img.shields.io/badge/rust-stable-blue)]()
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 </div>
 
 > \[!IMPORTANT\]
-> This software is **Sandbox** and subject to ECMWF's guidelines on [Software Maturity](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity).
-
-
+> This software is **Incubating** and subject to ECMWF's guidelines on [Software Maturity](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity).
 
 > A policy-aware job broker that classifies, transforms, and dispatches requests across distributed infrastructure — with queuing, persistence, and fault recovery built in.
 
@@ -34,7 +38,6 @@
 - 🔌 **Pluggable actions** — additional actions can be created in Rust or Python.
 
 - 📊 **Observable** — OpenTelemetry instrumentation with an opt-in, scrapeable Prometheus `/metrics` endpoint and configurable histogram buckets.
-
 
 ---
 
@@ -222,7 +225,7 @@ routes:
 ```
 
 | Field | Values | Default |
-|-------|--------|---------|
+| ------- | -------- | --------- |
 | `queue` | `fifo`, `cost_weighted`, `age_priority` | `fifo` |
 | `executor.type` | `async_pool`, `thread_pool`, `remote_pool`* | `async_pool` |
 | `executor.concurrency` | positive integer | 256 |
@@ -287,3 +290,7 @@ You can also run it manually:
 ```bash
 pre-commit run --all-files
 ```
+
+## License
+
+[Apache License 2.0](LICENSE) In applying this licence, ECMWF does not waive the privileges and immunities granted to it by virtue of its status as an intergovernmental organisation nor does it submit to any jurisdiction.

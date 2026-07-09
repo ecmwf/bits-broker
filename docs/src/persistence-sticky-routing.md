@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Sticky Routing
 
 BITS request IDs are opaque public strings. Internally, BITS can decode a request ID to obtain a site, environment, and broker slot. Those fields form an owner hint, not a user-facing routing contract.

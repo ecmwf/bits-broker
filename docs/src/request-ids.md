@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Request IDs
 
 BITS request IDs are public, opaque identifiers returned to clients when a job is still running. Clients should store and replay the full string, but should not parse it or use it for routing decisions.

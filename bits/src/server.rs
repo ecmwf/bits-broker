@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Generic HTTP server for the bits broker, exposing two endpoints (plus an
 //! optional metrics endpoint when the `metrics-prometheus` feature is enabled):
 //!

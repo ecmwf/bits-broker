@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Writing Custom Actions
 
 Actions are the extension point for adding new behaviour to BITS pipelines. You can add custom

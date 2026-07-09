@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+title: "bits-broker"
+abstract: "A policy-aware job broker that classifies, transforms, and dispatches requests across distributed infrastructure, with queuing, persistence, and fault recovery."
+authors:
+  - name: "European Centre for Medium-Range Weather Forecasts (ECMWF)"
+    website: "https://www.ecmwf.int"
+version: "0.1.0"
+date-released: "2026-07-09"
+repository-code: "https://github.com/ecmwf/bits-broker"
+url: "https://github.com/ecmwf/bits-broker"
+license: Apache-2.0
+keywords:
+  - "job-broker"
+  - "task-scheduling"
+  - "distributed-systems"
+  - "rust"

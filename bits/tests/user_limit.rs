@@ -561,7 +561,7 @@ routes:
 
 #[tokio::test]
 async fn config_accepts_zero_role_ceiling() {
-    // A role ceiling of 0 is a valid explicit deny for that role.
+    // A role ceiling of 0 is valid (under most-generous-wins it only matters when no higher default applies).
     let yaml = r#"
 bits:
   site: tst

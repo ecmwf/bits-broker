@@ -194,10 +194,10 @@ dispatcher:
 - `realms.<realm>.roles.<role>` (optional) — ceiling for that role **within that
   realm only**, matched against entries of the user's `auth.roles` array.
 - A bare `user_limit: { max: N }` keeps its simple meaning: a single global cap.
-- A ceiling of `0` is valid and means **deny all jobs** for the matched user.
+- A resolved ceiling of `0` is valid and means **deny all jobs** for that user.
   Combined with most-generous-wins, this expresses "deny by default, allow
   certain roles": e.g. `max: 0` at the top with `roles: { admin: 100 }` under a
-  realm denies everyone except that realm's `admin`s.
+  realm denies everyone except that realm's `admin`s (role ceilings never lower a cap).
 
 **Precedence — most generous applicable limit wins.** For a job in realm `R`
 with roles `{r1, r2, …}`, the effective ceiling is the **maximum** over the

@@ -145,11 +145,70 @@ async fn dispatch(router: &Switch, job: Job) -> JobResult {
             tracing::warn!(error = %reason, "dispatch rejected: queue full");
             JobResult::Overloaded { reason }
         }
+        Err(crate::actions::ActionError::UserLimitExceeded(reason)) => {
+            tracing::warn!(error = %reason, "dispatch rejected: user limit exceeded");
+            JobResult::Overloaded { reason }
+        }
         Err(err) => {
             tracing::error!(error = %err, "dispatch failed");
             JobResult::Failed {
                 reason: "internal server error".to_string(),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::dispatch;
+    use crate::actions::{Action, ActionError, TargetAction, TargetResult};
+    use crate::job::Job;
+    use crate::result::JobResult;
+    use crate::routing::Route;
+    use crate::routing::switch::Switch;
+
+    struct AlwaysUserLimitExceeded;
+
+    #[async_trait]
+    impl TargetAction for AlwaysUserLimitExceeded {
+        async fn dispatch(&self, _job: &Job) -> Result<TargetResult, ActionError> {
+            Err(ActionError::UserLimitExceeded(
+                "user is at the per-user limit (6) for this route".to_string(),
+            ))
+        }
+    }
+
+    /// A user-limit rejection is a "try again later" signal, not a system
+    /// failure: it must surface as `JobResult::Overloaded` (retryable, 529 +
+    /// Retry-After at the HTTP layer) rather than falling through to the
+    /// generic `JobResult::Failed` ("internal server error", non-retryable).
+    #[tokio::test]
+    async fn user_limit_exceeded_maps_to_overloaded_not_failed() {
+        let switch = Switch::new(vec![Route::new(
+            "default".to_string(),
+            vec![Action::Target(
+                Arc::new(AlwaysUserLimitExceeded),
+                None,
+                None,
+            )],
+        )]);
+
+        let job = Job::new(serde_json::json!({}));
+        job.set_reconnect_deadline_for_test(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+
+        let result = dispatch(&switch, job).await;
+
+        match result {
+            JobResult::Overloaded { reason } => {
+                assert!(reason.contains("per-user limit"));
+            }
+            other => panic!("expected JobResult::Overloaded, got {other:?}"),
         }
     }
 }

@@ -45,3 +45,9 @@ jobs:
         run: |
           unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
           cargo test --workspace --exclude bits-py -- --test-threads=1
+
+      - name: Compile-check nats-gated tests
+        # The `nats` feature is off by default, so `nats`-gated test files
+        # (e.g. user_limit_nats.rs) are normally excluded from the build and
+        # would not catch API changes. This compiles them without a server.
+        run: cargo test -p bits --features nats --no-run

@@ -87,7 +87,7 @@ pub struct ServerConfig {
     #[serde(default = "default_poll_timeout_secs")]
     pub poll_timeout_secs: f64,
 
-    /// Value for the Retry-After header on 529 overload responses.
+    /// Value for the Retry-After header on 529 overload and 429 rate-limit responses.
     #[serde(default = "default_retry_after_secs")]
     pub retry_after_secs: u64,
 }
@@ -140,6 +140,7 @@ pub const CODE_JOB_FAILED: &str = "JOB_FAILED";
 pub const CODE_ACTION_CANCELLED: &str = "ACTION_CANCELLED";
 pub const CODE_ACTION_CLIENT_GONE: &str = "ACTION_CLIENT_GONE";
 pub const CODE_QUEUE_FULL: &str = "QUEUE_FULL";
+pub const CODE_USER_LIMIT_EXCEEDED: &str = "USER_LIMIT_EXCEEDED";
 
 #[derive(serde::Serialize)]
 struct ErrorBody {
@@ -177,6 +178,22 @@ fn overloaded_response(reason: &str, retry_after_secs: u64) -> Response {
         [(header::RETRY_AFTER, retry_after_secs.to_string())],
         axum::Json(ErrorBody {
             code: CODE_QUEUE_FULL,
+            message: reason.to_string(),
+            retryable: true,
+        }),
+    )
+        .into_response()
+}
+
+/// Returns an HTTP 429 (Too Many Requests) response with a Retry-After header.
+/// Used for per-caller admission limits (e.g. per-user/per-realm/per-role
+/// route caps), as distinct from [`overloaded_response`]'s system-wide 529.
+fn rate_limited_response(reason: &str, retry_after_secs: u64) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, retry_after_secs.to_string())],
+        axum::Json(ErrorBody {
+            code: CODE_USER_LIMIT_EXCEEDED,
             message: reason.to_string(),
             retryable: true,
         }),
@@ -353,6 +370,7 @@ fn result_to_response(result: JobResult, retry_after_secs: u64) -> Response {
             false,
         ),
         JobResult::Overloaded { reason } => overloaded_response(&reason, retry_after_secs),
+        JobResult::RateLimited { reason } => rate_limited_response(&reason, retry_after_secs),
         JobResult::Cancelled => json_error(
             StatusCode::GONE,
             CODE_ACTION_CANCELLED,

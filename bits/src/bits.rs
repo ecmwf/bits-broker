@@ -426,6 +426,10 @@ impl Bits {
                         status = "failed";
                         user_message = Some(reason.clone());
                     }
+                    Some(JobResult::RateLimited { reason }) => {
+                        status = "failed";
+                        user_message = Some(reason.clone());
+                    }
                     Some(JobResult::Cancelled) => {
                         status = "failed";
                         user_message = Some("Request cancelled".to_string());

@@ -563,6 +563,49 @@ routes:
 }
 
 #[tokio::test]
+async fn user_limit_exceeded_returns_http_429_with_retry_after() {
+    let _ = common::TargetAlwaysUserLimitExceeded;
+
+    let config = r#"
+bits:
+  site: tst
+  env: dev
+routes:
+  - default:
+      - target::always_user_limit_exceeded: ~
+"#;
+    let server = start_server(config, Duration::from_secs(5)).await;
+    let port = server.port;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/job"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        resp.headers().get("retry-after").unwrap().to_str().unwrap(),
+        bits::server::DEFAULT_RETRY_AFTER_SECS.to_string()
+    );
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], bits::server::CODE_USER_LIMIT_EXCEEDED);
+    assert_eq!(
+        body["message"],
+        "user is at the per-user limit (6) for this route"
+    );
+    assert_eq!(body["retryable"], true);
+}
+
+#[tokio::test]
 async fn job_lost_returns_json_error_body() {
     let store = Arc::new(MemoryStore::new());
     let owner_id = broker_identity("tst", "hsv", 1);

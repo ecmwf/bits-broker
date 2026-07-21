@@ -118,6 +118,9 @@ async fn main() -> Result<(), bits::BitsError> {
             JobResult::Overloaded { reason } => {
                 println!("overloaded: {}", reason);
             }
+            JobResult::RateLimited { reason } => {
+                println!("rate limited: {}", reason);
+            }
             JobResult::Cancelled | JobResult::ClientGone => {
                 println!("cancelled");
             }

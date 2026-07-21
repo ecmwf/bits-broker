@@ -841,6 +841,12 @@ async fn job_result_to_py(result: JobResult) -> PyResult<Py<PyAny>> {
             payload.set_item("reason", reason)?;
             Ok(payload.into_any().unbind())
         }),
+        JobResult::RateLimited { reason } => Python::attach(|py| {
+            let payload = PyDict::new(py);
+            payload.set_item("status", "rate_limited")?;
+            payload.set_item("reason", reason)?;
+            Ok(payload.into_any().unbind())
+        }),
         JobResult::Cancelled => Python::attach(|py| {
             let payload = PyDict::new(py);
             payload.set_item("status", "cancelled")?;

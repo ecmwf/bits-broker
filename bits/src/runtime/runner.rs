@@ -110,6 +110,7 @@ pub(crate) fn spawn_job(
                 JobResult::Error { message } => tracing::warn!(duration_ms = ms, error = %message, "job error"),
                 JobResult::Failed { reason } => tracing::error!(duration_ms = ms, reason = %reason, "job failed"),
                 JobResult::Overloaded { reason } => tracing::warn!(duration_ms = ms, reason = %reason, "job rejected: overloaded"),
+                JobResult::RateLimited { reason } => tracing::warn!(duration_ms = ms, reason = %reason, "job rejected: rate limited"),
                 JobResult::Cancelled => tracing::info!(duration_ms = ms, "job cancelled"),
                 JobResult::ClientGone => tracing::info!(duration_ms = ms, "job abandoned: client gone"),
             }
@@ -147,7 +148,7 @@ async fn dispatch(router: &Switch, job: Job) -> JobResult {
         }
         Err(crate::actions::ActionError::UserLimitExceeded(reason)) => {
             tracing::warn!(error = %reason, "dispatch rejected: user limit exceeded");
-            JobResult::Overloaded { reason }
+            JobResult::RateLimited { reason }
         }
         Err(err) => {
             tracing::error!(error = %err, "dispatch failed");
@@ -183,11 +184,12 @@ mod tests {
     }
 
     /// A user-limit rejection is a "try again later" signal, not a system
-    /// failure: it must surface as `JobResult::Overloaded` (retryable, 529 +
+    /// failure: it must surface as `JobResult::RateLimited` (retryable, 429 +
     /// Retry-After at the HTTP layer) rather than falling through to the
-    /// generic `JobResult::Failed` ("internal server error", non-retryable).
+    /// generic `JobResult::Failed` ("internal server error", non-retryable),
+    /// and distinct from `JobResult::Overloaded` (system-wide 529 backpressure).
     #[tokio::test]
-    async fn user_limit_exceeded_maps_to_overloaded_not_failed() {
+    async fn user_limit_exceeded_maps_to_rate_limited_not_failed() {
         let switch = Switch::new(vec![Route::new(
             "default".to_string(),
             vec![Action::Target(
@@ -205,10 +207,10 @@ mod tests {
         let result = dispatch(&switch, job).await;
 
         match result {
-            JobResult::Overloaded { reason } => {
+            JobResult::RateLimited { reason } => {
                 assert!(reason.contains("per-user limit"));
             }
-            other => panic!("expected JobResult::Overloaded, got {other:?}"),
+            other => panic!("expected JobResult::RateLimited, got {other:?}"),
         }
     }
 }

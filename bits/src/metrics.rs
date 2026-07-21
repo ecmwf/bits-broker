@@ -96,6 +96,7 @@ pub fn job_result_outcome(result: &JobResult) -> &'static str {
         JobResult::Error { .. } => "error",
         JobResult::Failed { .. } => "failed",
         JobResult::Overloaded { .. } => "overloaded",
+        JobResult::RateLimited { .. } => "rate_limited",
         JobResult::Cancelled => "cancelled",
         JobResult::ClientGone => "client_gone",
     }
@@ -324,6 +325,12 @@ mod tests {
                     reason: String::new(),
                 },
                 "overloaded",
+            ),
+            (
+                JobResult::RateLimited {
+                    reason: String::new(),
+                },
+                "rate_limited",
             ),
             (JobResult::Cancelled, "cancelled"),
             (JobResult::ClientGone, "client_gone"),

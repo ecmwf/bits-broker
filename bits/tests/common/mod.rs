@@ -5,6 +5,7 @@
 pub mod check_always_reject;
 pub mod check_dummy_delay;
 pub mod recovery;
+pub mod target_always_user_limit_exceeded;
 pub mod target_dummy_delay;
 pub mod target_panicking;
 pub mod transform_dummy_cost;
@@ -13,6 +14,8 @@ pub mod transform_dummy_cost;
 pub use check_always_reject::CheckAlwaysReject;
 #[allow(unused_imports)]
 pub use check_dummy_delay::CheckDummyDelay;
+#[allow(unused_imports)]
+pub use target_always_user_limit_exceeded::TargetAlwaysUserLimitExceeded;
 #[allow(unused_imports)]
 pub use target_dummy_delay::TargetDummyDelay;
 #[allow(unused_imports)]

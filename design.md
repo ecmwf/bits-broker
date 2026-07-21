@@ -276,6 +276,41 @@ other executor paired with `remote`, or `remote_pool` paired with a non-`remote`
 rejected at config parse time. `bits.worker_server` must be configured whenever any `remote`
 target is present.
 
+### Per-user limits
+
+A dispatcher may enforce a hard per-user admission cap (jobs queued or in-flight
+for that dispatcher). Accounting is per `(dispatcher, realm, username)` — never a
+global tally. The identity is `(realm, username)` from `job.user.auth`; the
+ceiling **value** is derived from the job's realm and its **realm-scoped roles**
+(`job.user.auth.roles`):
+
+```yaml
+dispatcher:
+  queue: cost_weighted
+  executor:
+    type: async_pool
+  user_limit:
+    max: 4                  # global default when the user's realm has no block
+    realms:
+      ecmwf:
+        max: 20             # realm default (ecmwf users with no matching role)
+        roles:
+          premium: 100      # ceiling for role 'premium' within realm ecmwf
+          admin: 1000
+```
+
+The effective cap is the **maximum over the applicable candidates** (global
+`max`, `realms[R].max`, and `realms[R].roles[ri]` for each of the user's roles):
+"most generous applicable limit wins". Roles only match within the user's own
+realm block. Resolution is fail-open: an unidentifiable user, a realm with no
+block and no global default, or a role-only realm block with no matching role are
+all left uncapped. Strict cross-broker enforcement vs. lazy local enforcement is
+chosen per-user from the resolved cap (`<= 3` strict, `> 3` lazy). A bare
+`user_limit: { max: N }` keeps its simple single-cap meaning. A ceiling of `0` is
+valid and denies all jobs for the matched user, so `max: 0` with a positive role
+ceiling expresses "deny by default, allow certain roles". Unknown keys inside a
+`user_limit` block are rejected (fail-open makes silent typos dangerous).
+
 ---
 
 ## Persistence

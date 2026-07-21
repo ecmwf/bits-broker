@@ -98,9 +98,34 @@ pub trait Executor<T: Send + 'static>: Send + Sync {
 /// A job whose user lacks either is unidentifiable and is NOT limited
 /// (fail-open), so an anonymous/unauthenticated request is never wrongly
 /// rejected.
-#[derive(Debug, Clone)]
+///
+/// The effective ceiling is **identity-derived**: the value is the maximum over
+/// the applicable candidates — the global `default` (YAML `max`), the user's
+/// realm `default`, and the ceiling for each of the user's realm-scoped roles
+/// ([`RealmLimit::roles`]). Roles are scoped
+/// to their realm: a role only matches within the user's own realm block.
+///
+/// The YAML key `max` maps to the `default` field at each level.
+#[derive(Debug, Clone, Default)]
 pub struct UserLimitConfig {
-    pub max: usize,
+    /// Global default ceiling, applied when the user's realm has no block (YAML
+    /// key `max`). `None` means no global ceiling; `0` denies all jobs for a
+    /// matched user (useful as a deny-by-default floor that roles can raise).
+    pub default: Option<usize>,
+    /// Per-realm ceiling blocks, keyed by realm name.
+    pub realms: HashMap<String, RealmLimit>,
+}
+
+/// A per-realm ceiling block: an optional realm-level default and per-role
+/// ceilings scoped to this realm.
+#[derive(Debug, Clone, Default)]
+pub struct RealmLimit {
+    /// Realm-level default ceiling (YAML key `max`), applied to users in this
+    /// realm that have no matching role. `None` means no realm default; `0`
+    /// denies all jobs unless a matching role raises the ceiling.
+    pub default: Option<usize>,
+    /// Ceiling by role name, scoped to this realm.
+    pub roles: HashMap<String, usize>,
 }
 
 /// How long a lazy-mode broker trusts a cached per-dispatcher count before refreshing.
@@ -118,7 +143,7 @@ const STRICT_MAX_THRESHOLD: usize = 3;
 /// on the local count and reconciles a cached per-dispatcher count periodically,
 /// tolerating brief over-use.
 pub(crate) struct UserLimiter {
-    max: usize,
+    cfg: UserLimitConfig,
     scope: String,
     broker_id: String,
     counts: DashMap<String, usize>,
@@ -135,7 +160,7 @@ impl UserLimiter {
         store: Option<Arc<dyn crate::db::PersistenceStore>>,
     ) -> Self {
         Self {
-            max: cfg.max,
+            cfg,
             scope,
             broker_id,
             counts: DashMap::new(),
@@ -144,24 +169,56 @@ impl UserLimiter {
         }
     }
 
-    fn strict(&self) -> bool {
-        self.max <= STRICT_MAX_THRESHOLD
+    /// Whether the resolved `max` uses strict cross-broker enforcement. Derived
+    /// per-user from the resolved ceiling (not a per-dispatcher property).
+    ///
+    /// Note: because the ceiling is identity-derived and roles are NOT part of
+    /// the store key `(scope, realm, username)`, if a user's roles change the
+    /// resolved ceiling across this threshold, the same `user_key` may be
+    /// enforced strictly for one job and lazily for another. This is tolerated:
+    /// both modes bias toward availability (fail-open) and the mismatch only
+    /// relaxes strictness briefly; it never over-counts a user's true identity.
+    fn strict(max: usize) -> bool {
+        max <= STRICT_MAX_THRESHOLD
     }
 
-    /// Resolve the per-user identity `realm\u{1f}username` from `job.user`, or
-    /// `None` if either is absent/non-string (unidentifiable user -> not
-    /// limited, fail-open). The identity is always (realm, username) by design.
-    fn user_key(&self, user: &serde_json::Value) -> Option<String> {
+    /// Resolve the per-user identity `realm\u{1f}username` and the effective
+    /// ceiling for `user`, or `None` when the user is unidentifiable
+    /// (missing/non-string `realm` or `username`) or when no ceiling applies
+    /// (fail-open — not limited).
+    ///
+    /// The effective ceiling is the maximum over the applicable candidates: the
+    /// global default, the user's realm default, and the ceiling for each of
+    /// the user's realm-scoped roles. Role lookup is confined to the user's own
+    /// realm block; roles under any other realm are never considered. Malformed
+    /// or missing roles are treated as no-match and never panic.
+    fn resolve(&self, user: &serde_json::Value) -> Option<(String, usize)> {
         let realm = user.pointer("/auth/realm").and_then(|v| v.as_str())?;
         let username = user.pointer("/auth/username").and_then(|v| v.as_str())?;
-        Some(format!("{realm}\u{1f}{username}"))
+        let key = format!("{realm}\u{1f}{username}");
+
+        let mut effective: Option<usize> = self.cfg.default;
+        if let Some(realm_block) = self.cfg.realms.get(realm) {
+            if let Some(realm_default) = realm_block.default {
+                effective = Some(effective.map_or(realm_default, |e| e.max(realm_default)));
+            }
+            if let Some(roles) = user.pointer("/auth/roles").and_then(|v| v.as_array()) {
+                for role in roles.iter().filter_map(|r| r.as_str()) {
+                    if let Some(&role_max) = realm_block.roles.get(role) {
+                        effective = Some(effective.map_or(role_max, |e| e.max(role_max)));
+                    }
+                }
+            }
+        }
+
+        effective.map(|max| (key, max))
     }
 
     /// Atomically admit one job locally if under the cap. Ok(new count) or
     /// Err(current at-cap count).
-    fn try_admit_local(&self, key: &str) -> Result<usize, usize> {
+    fn try_admit_local(&self, key: &str, max: usize) -> Result<usize, usize> {
         let mut slot = self.counts.entry(key.to_string()).or_insert(0);
-        if *slot >= self.max {
+        if *slot >= max {
             Err(*slot)
         } else {
             *slot += 1;
@@ -193,16 +250,27 @@ impl UserLimiter {
 
     /// Admit one job for `user_key`, returning a guard on success or `None` when
     /// over the cap. Store errors fail OPEN (admit) — availability over strictness.
-    async fn admit(self: &Arc<Self>, user_key: &str, job_id: &str) -> Option<UserLimitGuard> {
+    async fn admit(
+        self: &Arc<Self>,
+        user_key: &str,
+        job_id: &str,
+        max: usize,
+    ) -> Option<UserLimitGuard> {
+        // A resolved ceiling of 0 denies every job for this user (e.g. a target
+        // whose default is 0 but which grants a positive ceiling only to certain
+        // roles). Reject immediately without touching the store.
+        if max == 0 {
+            return None;
+        }
         let Some(store) = self.store.clone() else {
             // Broker-local only.
             return self
-                .try_admit_local(user_key)
+                .try_admit_local(user_key, max)
                 .ok()
                 .map(|_| self.guard(user_key, job_id));
         };
 
-        if self.strict() {
+        if Self::strict(max) {
             // Strict: the store is authoritative via a cross-replica FIFO rank.
             let reserved = match store
                 .reserve_user_slot(&self.scope, user_key, job_id, &self.broker_id)
@@ -239,7 +307,7 @@ impl UserLimiter {
                 .iter()
                 .position(|(s, jid)| *s == seq && *jid == job_id)
                 .unwrap_or(0);
-            if rank < self.max {
+            if rank < max {
                 Some(guard)
             } else {
                 drop(guard); // releases the local count and the store entry
@@ -249,7 +317,7 @@ impl UserLimiter {
             // Lazy: local gate first (local <= synced count, so a full local
             // count means definitely full), then a periodically-refreshed
             // per-dispatcher view from the store.
-            if self.try_admit_local(user_key).is_err() {
+            if self.try_admit_local(user_key, max).is_err() {
                 return None;
             }
             // Guard owns the local increment + store release from here on.
@@ -280,7 +348,7 @@ impl UserLimiter {
                     }
                 }
             };
-            if synced > self.max {
+            if synced > max {
                 drop(guard); // releases the local count and the store entry
                 None
             } else {
@@ -512,7 +580,7 @@ impl<T: Send + 'static> Dispatcher<T> {
         let admission = Arc::clone(&self.admission);
         let closing = Arc::clone(&self.closing);
         let user_limiter = self.user_limiter.clone();
-        let user_key = user_limiter.as_ref().and_then(|l| l.user_key(&job.user));
+        let resolved = user_limiter.as_ref().and_then(|l| l.resolve(&job.user));
         let job_to_enqueue = job.clone();
         let cancelled = job.cancelled.clone();
         let pollers = job.active_pollers.clone();
@@ -523,16 +591,17 @@ impl<T: Send + 'static> Dispatcher<T> {
             // the store when configured). The guard is moved into the work
             // future below so the slot is held for the whole queued+in-flight
             // span and released on any exit path.
-            let user_guard = match (&user_limiter, &user_key) {
-                (Some(limiter), Some(key)) => match limiter.admit(key, &job_to_enqueue.id).await {
-                    Some(guard) => Some(guard),
-                    None => {
-                        return Err(ActionError::UserLimitExceeded(format!(
-                            "user is at the per-user limit ({}) for this route",
-                            limiter.max
-                        )));
+            let user_guard = match (&user_limiter, &resolved) {
+                (Some(limiter), Some((key, max))) => {
+                    match limiter.admit(key, &job_to_enqueue.id, *max).await {
+                        Some(guard) => Some(guard),
+                        None => {
+                            return Err(ActionError::UserLimitExceeded(format!(
+                                "user is at the per-user limit ({max}) for this route"
+                            )));
+                        }
                     }
-                },
+                }
                 _ => None,
             };
 
@@ -594,5 +663,196 @@ impl<T: Send + 'static> Dispatcher<T> {
                 .await
                 .map_err(|_| ActionError::ResourceError("dispatcher closed".into()))?
         })
+    }
+}
+
+#[cfg(test)]
+mod user_limit_resolution_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn limiter(cfg: UserLimitConfig) -> UserLimiter {
+        UserLimiter::new(cfg, "scope".to_string(), "broker-0".to_string(), None)
+    }
+
+    fn realm(default: Option<usize>, roles: &[(&str, usize)]) -> RealmLimit {
+        RealmLimit {
+            default,
+            roles: roles.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        }
+    }
+
+    fn user(realm: &str, username: &str, roles: &[&str]) -> serde_json::Value {
+        json!({ "auth": { "realm": realm, "username": username, "roles": roles } })
+    }
+
+    #[test]
+    fn default_only_matches_todays_behaviour() {
+        let l = limiter(UserLimitConfig {
+            default: Some(4),
+            realms: HashMap::new(),
+        });
+        assert_eq!(
+            l.resolve(&user("ecmwf", "alice", &[])),
+            Some(("ecmwf\u{1f}alice".to_string(), 4))
+        );
+    }
+
+    #[test]
+    fn realm_default_beats_global_default() {
+        let mut realms = HashMap::new();
+        realms.insert("ecmwf".to_string(), realm(Some(20), &[]));
+        let l = limiter(UserLimitConfig {
+            default: Some(4),
+            realms,
+        });
+        // max(global 4, realm 20) = 20.
+        assert_eq!(l.resolve(&user("ecmwf", "alice", &[])).unwrap().1, 20);
+        // A realm with no block falls back to the global default.
+        assert_eq!(l.resolve(&user("other", "bob", &[])).unwrap().1, 4);
+    }
+
+    #[test]
+    fn role_beats_realm_default_and_multiple_roles_take_max() {
+        let mut realms = HashMap::new();
+        realms.insert(
+            "ecmwf".to_string(),
+            realm(Some(20), &[("premium", 100), ("admin", 1000)]),
+        );
+        let l = limiter(UserLimitConfig {
+            default: Some(4),
+            realms,
+        });
+        // Single matching role: max(4, 20, 100) = 100.
+        assert_eq!(
+            l.resolve(&user("ecmwf", "alice", &["premium"])).unwrap().1,
+            100
+        );
+        // Multiple matching roles: max(4, 20, 100, 1000) = 1000.
+        assert_eq!(
+            l.resolve(&user("ecmwf", "alice", &["premium", "admin"]))
+                .unwrap()
+                .1,
+            1000
+        );
+    }
+
+    #[test]
+    fn roles_are_scoped_to_their_realm() {
+        let mut realms = HashMap::new();
+        realms.insert("realm-a".to_string(), realm(None, &[("premium", 100)]));
+        realms.insert("realm-b".to_string(), realm(None, &[("premium", 7)]));
+        let l = limiter(UserLimitConfig {
+            default: None,
+            realms,
+        });
+        // Same role name resolves to the *user's* realm ceiling.
+        assert_eq!(
+            l.resolve(&user("realm-a", "alice", &["premium"]))
+                .unwrap()
+                .1,
+            100
+        );
+        assert_eq!(
+            l.resolve(&user("realm-b", "bob", &["premium"])).unwrap().1,
+            7
+        );
+    }
+
+    #[test]
+    fn max_over_all_candidates() {
+        let mut realms = HashMap::new();
+        realms.insert("ecmwf".to_string(), realm(Some(20), &[("premium", 100)]));
+        let l = limiter(UserLimitConfig {
+            default: Some(4),
+            realms,
+        });
+        assert_eq!(
+            l.resolve(&user("ecmwf", "alice", &["premium"])).unwrap().1,
+            100
+        );
+    }
+
+    #[test]
+    fn unidentifiable_user_resolves_none() {
+        let l = limiter(UserLimitConfig {
+            default: Some(4),
+            realms: HashMap::new(),
+        });
+        // Missing username.
+        assert_eq!(l.resolve(&json!({ "auth": { "realm": "ecmwf" } })), None);
+        // Missing realm.
+        assert_eq!(l.resolve(&json!({ "auth": { "username": "alice" } })), None);
+        // Non-string realm.
+        assert_eq!(
+            l.resolve(&json!({ "auth": { "realm": 1, "username": "alice" } })),
+            None
+        );
+        // No auth at all.
+        assert_eq!(l.resolve(&json!({})), None);
+    }
+
+    #[test]
+    fn identifiable_no_block_no_global_resolves_none() {
+        let mut realms = HashMap::new();
+        realms.insert("ecmwf".to_string(), realm(Some(20), &[]));
+        let l = limiter(UserLimitConfig {
+            default: None,
+            realms,
+        });
+        // User in a realm with no block and no global default -> not limited.
+        assert_eq!(l.resolve(&user("other", "bob", &[])), None);
+    }
+
+    #[test]
+    fn role_only_realm_block_with_no_match_resolves_none() {
+        let mut realms = HashMap::new();
+        realms.insert("ecmwf".to_string(), realm(None, &[("premium", 100)]));
+        let l = limiter(UserLimitConfig {
+            default: None,
+            realms,
+        });
+        // In-realm user with no matching role and no realm/global default.
+        assert_eq!(l.resolve(&user("ecmwf", "alice", &["basic"])), None);
+        // Matching role is still capped.
+        assert_eq!(
+            l.resolve(&user("ecmwf", "alice", &["premium"])).unwrap().1,
+            100
+        );
+    }
+
+    #[test]
+    fn malformed_roles_never_panic_and_are_ignored() {
+        let mut realms = HashMap::new();
+        realms.insert("ecmwf".to_string(), realm(Some(20), &[("premium", 100)]));
+        let l = limiter(UserLimitConfig {
+            default: Some(4),
+            realms,
+        });
+        // roles is not an array -> ignored, falls back to realm default.
+        let u = json!({ "auth": { "realm": "ecmwf", "username": "alice", "roles": "premium" } });
+        assert_eq!(l.resolve(&u).unwrap().1, 20);
+        // roles array with non-string entries -> those are skipped.
+        let u = json!({ "auth": { "realm": "ecmwf", "username": "alice", "roles": [1, true, "premium"] } });
+        assert_eq!(l.resolve(&u).unwrap().1, 100);
+    }
+
+    #[test]
+    fn zero_ceiling_is_a_deny_not_none() {
+        // A resolved ceiling of 0 (deny-all) must be returned as Some(_, 0),
+        // distinct from None (unlimited/fail-open). A matching role raises it.
+        let mut realms = HashMap::new();
+        realms.insert("test".to_string(), realm(None, &[("admin", 2)]));
+        let l = limiter(UserLimitConfig {
+            default: Some(0),
+            realms,
+        });
+        // Non-admin: deny-all, but still an explicit ceiling of 0 (not None).
+        assert_eq!(
+            l.resolve(&user("test", "bob", &[])),
+            Some(("test\u{1f}bob".to_string(), 0))
+        );
+        // Admin role raises the ceiling above the 0 default.
+        assert_eq!(l.resolve(&user("test", "ada", &["admin"])).unwrap().1, 2);
     }
 }

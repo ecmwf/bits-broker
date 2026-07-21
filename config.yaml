@@ -33,6 +33,20 @@ targets:
       executor:
         type: async_pool
         concurrency: 8
+      # Per-user admission cap (queued + in-flight for this dispatcher). The
+      # effective ceiling is identity-derived: the maximum over the global
+      # default, the user's realm default, and any of the user's realm-scoped
+      # roles. Roles only match within their own realm block.
+      user_limit:
+        max: 4                 # global default when the user's realm has no block
+        realms:
+          ecmwf:
+            max: 20            # realm default (ecmwf users with no matching role)
+            roles:
+              premium: 100     # ceiling for role 'premium' within realm ecmwf
+              admin: 1000
+          other-realm:
+            max: 8             # realm default, no role-specific ceilings
 
   # Thread-pool executor: each job runs on a dedicated OS thread.
   backend_threads:

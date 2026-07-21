@@ -17,7 +17,8 @@ use crate::actions::{TargetAction, TargetResult};
 use crate::bits::DEFAULT_MAX_JOBS;
 use crate::db::PersistenceStore;
 use crate::dispatcher::{
-    DEFAULT_QUEUE_CAPACITY, Dispatcher, ExecutorKind, QueueKind, RemotePoolConfig, UserLimitConfig,
+    DEFAULT_QUEUE_CAPACITY, Dispatcher, ExecutorKind, QueueKind, RealmLimit, RemotePoolConfig,
+    UserLimitConfig,
 };
 use crate::error::{BitsError, ConfigError, RoutingError, WorkerServerError};
 use crate::routing::{Route, switch::Switch};
@@ -1068,30 +1069,109 @@ fn validate_inline_action(
     }
 }
 
+/// Parse and validate a single ceiling (non-negative integer that fits `usize`).
+/// A value of `0` is valid and means "deny all jobs for this match"; a role, or
+/// realm/global default, can still raise it via the most-generous-wins rule.
+fn parse_ceiling(value: &serde_json::Value, path: &str) -> Result<usize, BitsError> {
+    let n = value
+        .as_u64()
+        .ok_or_else(|| ConfigError::validation(path, "must be a non-negative integer"))?;
+    usize::try_from(n)
+        .map_err(|_| ConfigError::validation(path, "value too large for this platform").into())
+}
+
 fn parse_user_limit(value: &serde_json::Value) -> Result<UserLimitConfig, BitsError> {
     let obj = value
         .as_object()
         .ok_or_else(|| ConfigError::validation("dispatcher.user_limit", "must be an object"))?;
 
-    let max = obj.get("max").and_then(|m| m.as_u64()).ok_or_else(|| {
-        ConfigError::validation("dispatcher.user_limit.max", "must be a positive integer")
-    })?;
-    if max == 0 {
+    // Optional top-level `max` -> global default ceiling.
+    let default = obj
+        .get("max")
+        .map(|m| parse_ceiling(m, "dispatcher.user_limit.max"))
+        .transpose()?;
+
+    // Reject typos: an unrecognised key here (e.g. `realm`, `role`, `mx`) would
+    // otherwise be silently ignored and — because resolution fails open — leave
+    // users uncapped, a security-relevant footgun for an admission cap.
+    for key in obj.keys() {
+        if key != "max" && key != "realms" {
+            return Err(ConfigError::validation(
+                "dispatcher.user_limit",
+                format!("unknown field '{key}' (expected 'max' and/or 'realms')"),
+            )
+            .into());
+        }
+    }
+
+    // Optional `realms` map of `{ max?, roles? }`.
+    let mut realms = HashMap::new();
+    if let Some(realms_value) = obj.get("realms") {
+        let realms_obj = realms_value.as_object().ok_or_else(|| {
+            ConfigError::validation("dispatcher.user_limit.realms", "must be an object")
+        })?;
+        for (realm, realm_value) in realms_obj {
+            let realm_path = format!("dispatcher.user_limit.realms.{realm}");
+            let realm_obj = realm_value
+                .as_object()
+                .ok_or_else(|| ConfigError::validation(&realm_path, "must be an object"))?;
+
+            for key in realm_obj.keys() {
+                if key != "max" && key != "roles" {
+                    return Err(ConfigError::validation(
+                        &realm_path,
+                        format!("unknown field '{key}' (expected 'max' and/or 'roles')"),
+                    )
+                    .into());
+                }
+            }
+
+            let realm_default = realm_obj
+                .get("max")
+                .map(|m| parse_ceiling(m, &format!("{realm_path}.max")))
+                .transpose()?;
+
+            let mut roles = HashMap::new();
+            if let Some(roles_value) = realm_obj.get("roles") {
+                let roles_obj = roles_value.as_object().ok_or_else(|| {
+                    ConfigError::validation(&format!("{realm_path}.roles"), "must be an object")
+                })?;
+                for (role, role_value) in roles_obj {
+                    let role_path = format!("{realm_path}.roles.{role}");
+                    roles.insert(role.clone(), parse_ceiling(role_value, &role_path)?);
+                }
+            }
+
+            // A realm block must carry a `max` and/or a non-empty `roles`.
+            if realm_default.is_none() && roles.is_empty() {
+                return Err(ConfigError::validation(
+                    &realm_path,
+                    "must define 'max' and/or a non-empty 'roles' map",
+                )
+                .into());
+            }
+
+            realms.insert(
+                realm.clone(),
+                RealmLimit {
+                    default: realm_default,
+                    roles,
+                },
+            );
+        }
+    }
+
+    // The block must define at least one ceiling somewhere.
+    if default.is_none() && realms.is_empty() {
         return Err(ConfigError::validation(
-            "dispatcher.user_limit.max",
-            "must be greater than zero",
+            "dispatcher.user_limit",
+            "must define a global 'max' and/or at least one realm block",
         )
         .into());
     }
-    let max = usize::try_from(max).map_err(|_| {
-        ConfigError::validation(
-            "dispatcher.user_limit.max",
-            "value too large for this platform",
-        )
-    })?;
 
     // The user identity is always (realm, username); it is not configurable.
-    Ok(UserLimitConfig { max })
+    Ok(UserLimitConfig { default, realms })
 }
 
 fn parse_dispatcher_fields(
@@ -1361,7 +1441,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use super::{RouteFactory, RuntimeConfig};
+    use super::{RouteFactory, RuntimeConfig, parse_user_limit};
     use crate::Bits;
     use crate::actions::Action;
     use crate::db::{
@@ -1738,5 +1818,44 @@ targets:
         let target1 = extract_target(&routes1[0]);
         let target2 = extract_target(&routes2[0]);
         assert!(Arc::ptr_eq(&target1, &target2));
+    }
+
+    #[test]
+    fn parse_user_limit_maps_schema_into_struct() {
+        // Close the YAML/JSON -> struct loop: verify `max` lands in `default` at
+        // each level and role ceilings attach to the correct realm.
+        let value = serde_json::json!({
+            "max": 4,
+            "realms": {
+                "ecmwf": {
+                    "max": 20,
+                    "roles": { "premium": 100, "admin": 1000 }
+                },
+                "other": { "max": 0 }
+            }
+        });
+        let cfg = parse_user_limit(&value).expect("valid extended schema should parse");
+
+        assert_eq!(
+            cfg.default,
+            Some(4),
+            "top-level `max` maps to global default"
+        );
+        let ecmwf = cfg.realms.get("ecmwf").expect("ecmwf realm block");
+        assert_eq!(ecmwf.default, Some(20), "realm `max` maps to realm default");
+        assert_eq!(ecmwf.roles.get("premium").copied(), Some(100));
+        assert_eq!(ecmwf.roles.get("admin").copied(), Some(1000));
+        // Role attaches to its own realm only.
+        let other = cfg.realms.get("other").expect("other realm block");
+        assert_eq!(other.default, Some(0), "0 is a valid (deny-all) ceiling");
+        assert!(other.roles.is_empty());
+    }
+
+    #[test]
+    fn parse_user_limit_bare_max_is_global_default_only() {
+        let cfg =
+            parse_user_limit(&serde_json::json!({ "max": 7 })).expect("bare max should parse");
+        assert_eq!(cfg.default, Some(7));
+        assert!(cfg.realms.is_empty());
     }
 }

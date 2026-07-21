@@ -158,6 +158,72 @@ routes:
 - For the remote worker HTTP API and worker lifecycle, see
   [External Workers](external-workers.md).
 
+### Per-user limits
+
+A dispatcher can enforce a hard **per-user admission cap** — the number of jobs a
+single user may have *queued or in-flight* on that dispatcher at once. When a
+user is already at their ceiling, further dispatches are rejected (rather than
+queued) with a `UserLimitExceeded` error. Accounting is always per
+`(dispatcher, realm, username)`; it is never a global tally across dispatchers.
+
+The user identity is `(realm, username)`, read from `job.user.auth`. The
+ceiling **value** is derived from the job's identity — its realm and its
+**realm-scoped roles** (`job.user.auth.roles`):
+
+```yaml
+dispatcher:
+  queue: cost_weighted
+  executor:
+    type: async_pool
+    concurrency: 8
+  user_limit:
+    max: 4                  # global default when the user's realm has no block
+    realms:
+      ecmwf:
+        max: 20             # realm default (ecmwf users with no matching role)
+        roles:
+          premium: 100      # ceiling for role 'premium' *within realm ecmwf*
+          admin: 1000
+      other-realm:
+        max: 8              # realm default, no role-specific ceilings
+```
+
+- `max` (top level, optional) — global default ceiling, used when the user's
+  realm has no block.
+- `realms.<realm>.max` (optional) — realm-level default for that realm.
+- `realms.<realm>.roles.<role>` (optional) — ceiling for that role **within that
+  realm only**, matched against entries of the user's `auth.roles` array.
+- A bare `user_limit: { max: N }` keeps its simple meaning: a single global cap.
+- A ceiling of `0` is valid and means **deny all jobs** for the matched user.
+  Combined with most-generous-wins, this expresses "deny by default, allow
+  certain roles": e.g. `max: 0` at the top with `roles: { admin: 100 }` under a
+  realm denies everyone except that realm's `admin`s.
+
+**Precedence — most generous applicable limit wins.** For a job in realm `R`
+with roles `{r1, r2, …}`, the effective ceiling is the **maximum** over the
+applicable candidates: the global `max`, `realms[R].max`, and
+`realms[R].roles[ri]` for each matching role. Granting a user a privileged
+realm-scoped role can therefore only raise their cap, never lower it. Role
+matching is confined to the user's own realm block — a `premium` role under
+realm `ecmwf` never applies to a user in another realm, even one that also has a
+role literally named `premium`.
+
+**Fail-open.** When no ceiling applies, the user is **not limited**:
+
+- An unidentifiable user (missing/non-string `realm` or `username`) is never
+  limited (anonymous requests always pass).
+- An identifiable user whose realm has no block and where no global `max` is set
+  is not limited.
+- A role-only realm block leaves users with no matching role uncapped.
+
+Every ceiling must be a non-negative integer (`0` = deny-all; see above).
+Unknown keys inside `user_limit` (or a realm block) are rejected — a typo such as
+`realm:` or `role:` would otherwise be silently ignored and, because resolution
+fails open, leave users unintentionally uncapped. A `user_limit` block that
+defines no ceiling at all (empty block, or a realm block with neither `max` nor a
+non-empty `roles`) is rejected at config parse time. Omitting `user_limit`
+entirely is valid and leaves the dispatcher unlimited.
+
 ## Silent rejections
 
 When all routes in a switch reject a job, the error returned to the user includes rejection

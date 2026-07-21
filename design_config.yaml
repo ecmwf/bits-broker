@@ -74,6 +74,18 @@ targets:
       executor:
         type: thread_pool     # run each job on a dedicated thread to avoid blocking the dispatcher
         concurrency: 10
+      # Per-user admission cap (queued + in-flight for this target). The
+      # effective ceiling is the maximum over the global default, the user's
+      # realm default, and any of the user's realm-scoped roles (roles only
+      # match within their own realm block; most-generous applicable wins).
+      user_limit:
+        max: 4                  # global default when the user's realm has no block
+        realms:
+          ecmwf:
+            max: 20             # realm default (ecmwf users with no matching role)
+            roles:
+              premium: 100      # ceiling for role 'premium' within realm ecmwf
+              admin: 1000
 
 
   dss_od:

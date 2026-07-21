@@ -10,6 +10,7 @@
 //! different `broker_id`s stand in for two replicas of the SAME dispatcher
 //! (one route target running on two brokers).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
@@ -19,7 +20,9 @@ use bits::actions::{ActionError, CheckResult};
 use bits::db::PersistenceStore;
 use bits::db::memory::MemoryStore;
 use bits::db::{BrokerLeaseStore, UserLimitStore};
-use bits::dispatcher::{DispatchGuard, Dispatcher, ExecutorKind, QueueKind, UserLimitConfig};
+use bits::dispatcher::{
+    DispatchGuard, Dispatcher, ExecutorKind, QueueKind, RealmLimit, UserLimitConfig,
+};
 use futures::future::BoxFuture;
 use futures::poll;
 use tokio::sync::oneshot;
@@ -30,6 +33,21 @@ fn broker(
     store: Arc<dyn PersistenceStore>,
     broker_id: &str,
     max: usize,
+) -> Dispatcher<CheckResult> {
+    broker_cfg(
+        store,
+        broker_id,
+        UserLimitConfig {
+            default: Some(max),
+            realms: HashMap::new(),
+        },
+    )
+}
+
+fn broker_cfg(
+    store: Arc<dyn PersistenceStore>,
+    broker_id: &str,
+    cfg: UserLimitConfig,
 ) -> Dispatcher<CheckResult> {
     Dispatcher::<CheckResult>::from_config(
         Some(&QueueKind::Fifo),
@@ -42,12 +60,19 @@ fn broker(
     )
     .expect("dispatcher config should not error")
     .expect("dispatcher should be created")
-    .with_user_limit(Some(UserLimitConfig { max }), SCOPE, broker_id, Some(store))
+    .with_user_limit(Some(cfg), SCOPE, broker_id, Some(store))
 }
 
 fn user_job(name: &str) -> Job {
     let mut job = Job::new(serde_json::json!({}));
     *job.user_mut() = serde_json::json!({ "auth": { "realm": "test", "username": name } });
+    job
+}
+
+fn user_job_roles(name: &str, roles: &[&str]) -> Job {
+    let mut job = Job::new(serde_json::json!({}));
+    *job.user_mut() =
+        serde_json::json!({ "auth": { "realm": "test", "username": name, "roles": roles } });
     job
 }
 
@@ -183,6 +208,107 @@ async fn lazy_mode_enforces_local_cap() {
     );
 
     for (tx, fut) in holds {
+        let _ = tx.send(());
+        assert!(fut.await.is_ok());
+    }
+}
+
+#[tokio::test]
+async fn mixed_strict_and_lazy_users_in_one_scope() {
+    // One dispatcher/scope with role-derived ceilings: a strict user (max 2 <= 3)
+    // and a lazy user (max 6 > 3) run simultaneously; each is capped at its own
+    // ceiling and they do not interfere.
+    let store: Arc<dyn PersistenceStore> = Arc::new(MemoryStore::new());
+    let mut realms = HashMap::new();
+    realms.insert(
+        "test".to_string(),
+        RealmLimit {
+            default: None,
+            roles: [("strict".to_string(), 2usize), ("lazy".to_string(), 6usize)]
+                .into_iter()
+                .collect(),
+        },
+    );
+    let a = broker_cfg(
+        store.clone(),
+        "broker-a",
+        UserLimitConfig {
+            default: None,
+            realms,
+        },
+    );
+
+    // Strict user: fill to cap 2.
+    let mut strict_holds = Vec::new();
+    for _ in 0..2 {
+        let (tx, rx) = oneshot::channel();
+        let mut fut = a.dispatch(
+            &user_job_roles("sam", &["strict"]),
+            DispatchGuard::None,
+            held(rx),
+        );
+        assert!(matches!(poll!(&mut fut), Poll::Pending));
+        strict_holds.push((tx, fut));
+    }
+    let strict_over = a
+        .dispatch(
+            &user_job_roles("sam", &["strict"]),
+            DispatchGuard::None,
+            instant(),
+        )
+        .await;
+    let Err(ActionError::UserLimitExceeded(msg)) = strict_over else {
+        panic!("3rd strict-user job must be rejected at its cap of 2, got {strict_over:?}");
+    };
+    assert!(
+        msg.contains("(2)"),
+        "rejection message must report the strict user's resolved ceiling of 2: {msg}"
+    );
+
+    // Lazy user runs concurrently: fill to cap 6, unaffected by the strict user.
+    let mut lazy_holds = Vec::new();
+    for _ in 0..6 {
+        let (tx, rx) = oneshot::channel();
+        let mut fut = a.dispatch(
+            &user_job_roles("leo", &["lazy"]),
+            DispatchGuard::None,
+            held(rx),
+        );
+        assert!(
+            matches!(poll!(&mut fut), Poll::Pending),
+            "each of the first 6 lazy-user jobs should be admitted"
+        );
+        lazy_holds.push((tx, fut));
+    }
+    let lazy_over = a
+        .dispatch(
+            &user_job_roles("leo", &["lazy"]),
+            DispatchGuard::None,
+            instant(),
+        )
+        .await;
+    let Err(ActionError::UserLimitExceeded(msg)) = lazy_over else {
+        panic!("7th lazy-user job must be rejected at its cap of 6, got {lazy_over:?}");
+    };
+    assert!(
+        msg.contains("(6)"),
+        "rejection message must report the lazy user's resolved ceiling of 6: {msg}"
+    );
+
+    // The strict user is still exactly at its own cap (unaffected by the lazy user).
+    let strict_still_over = a
+        .dispatch(
+            &user_job_roles("sam", &["strict"]),
+            DispatchGuard::None,
+            instant(),
+        )
+        .await;
+    assert!(
+        matches!(strict_still_over, Err(ActionError::UserLimitExceeded(_))),
+        "strict user must remain capped at 2 while the lazy user is at 6, got {strict_still_over:?}"
+    );
+
+    for (tx, fut) in strict_holds.into_iter().chain(lazy_holds) {
         let _ = tx.send(());
         assert!(fut.await.is_ok());
     }

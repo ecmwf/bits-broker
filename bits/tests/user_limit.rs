@@ -405,7 +405,7 @@ routes:
 }
 
 #[test]
-fn config_rejects_non_integer_role_ceiling() {
+fn config_rejects_negative_role_ceiling() {
     let yaml = r#"
 bits:
   site: tst

@@ -306,10 +306,12 @@ realm block. Resolution is fail-open: an unidentifiable user, a realm with no
 block and no global default, or a role-only realm block with no matching role are
 all left uncapped. Strict cross-broker enforcement vs. lazy local enforcement is
 chosen per-user from the resolved cap (`<= 3` strict, `> 3` lazy). A bare
-`user_limit: { max: N }` keeps its simple single-cap meaning. A ceiling of `0` is
-valid and denies all jobs for the matched user, so `max: 0` with a positive role
-ceiling expresses "deny by default, allow certain roles". Unknown keys inside a
-`user_limit` block are rejected (fail-open makes silent typos dangerous).
+`user_limit: { max: N }` keeps its simple single-cap meaning. A *resolved*
+ceiling of `0` is valid and denies all jobs for the matched user, so `max: 0`
+with a positive role ceiling expresses "deny by default, allow certain roles"
+(role ceilings only ever raise a user's cap, never lower it, so a `0` role
+ceiling does not itself deny). Unknown keys inside a `user_limit` block are
+rejected (fail-open makes silent typos dangerous).
 
 ---
 

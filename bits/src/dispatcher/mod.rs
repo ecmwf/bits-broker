@@ -102,8 +102,8 @@ pub trait Executor<T: Send + 'static>: Send + Sync {
 /// The effective ceiling is **identity-derived**: the value is the maximum over
 /// the applicable candidates — the global `default` (YAML `max`), the user's
 /// realm `default`, and the ceiling for each of the user's realm-scoped roles
-/// ([`RealmLimit::roles`]). Roles are scoped
-/// to their realm: a role only matches within the user's own realm block.
+/// ([`RealmLimit::roles`]). Roles are scoped to their realm: a role only
+/// matches within the user's own realm block.
 ///
 /// The YAML key `max` maps to the `default` field at each level.
 #[derive(Debug, Clone, Default)]

@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::config::{RouteFactory, RuntimeConfig, parse_bootstrap};
 use crate::db::{ClaimResult, DbError, PersistenceStore};
 use crate::error::{BitsError, ConfigError};
-use crate::job::Job;
+use crate::job::{Job, PendingStatus};
 use crate::result::JobResult;
 use crate::route_handle::RouteHandle;
 use crate::routing::switch::Switch;
@@ -33,13 +33,29 @@ pub const DEFAULT_MAX_JOBS: usize = 500_000;
 pub enum PollOutcome {
     /// The job reached a terminal state and produced a final result.
     Ready(JobResult),
-    /// The job is still in progress; poll again using the returned id.
-    Pending { id: String },
+    /// The job is still non-terminal; `status` distinguishes queued from claimed.
+    Pending { id: String, status: PendingStatus },
     /// No local, remote, or durable record exists for this job id.
     NotFound,
     /// The original owner disappeared and no durable state remained to recover.
     JobLost,
 }
+
+impl PollOutcome {
+    pub(crate) fn pending(id: &str, status: PendingStatus) -> Self {
+        Self::Pending {
+            id: id.to_string(),
+            status,
+        }
+    }
+
+    pub(crate) fn queued(id: &str) -> Self {
+        Self::pending(id, PendingStatus::Queued)
+    }
+}
+
+/// Header used by broker-to-broker poll responses to preserve pending state.
+pub const PENDING_STATUS_HEADER: &str = "x-bits-pending-status";
 
 /// Handle returned from submission and used for later polling.
 pub struct JobHandle {
@@ -383,7 +399,7 @@ impl Bits {
                 let mut status = if job.is_cancelled() {
                     "failed"
                 } else {
-                    "queued"
+                    job.pending_status().as_str()
                 };
                 let mut location = None;
                 let mut content_type = None;
@@ -476,9 +492,9 @@ impl Bits {
                     if let Some(outcome) = self.try_proxy_with_lease(&lease, id, timeout).await {
                         return outcome;
                     }
-                    return PollOutcome::Pending { id: id.to_string() };
+                    return PollOutcome::queued(id);
                 }
-                LeaseLookup::Unknown => return PollOutcome::Pending { id: id.to_string() },
+                LeaseLookup::Unknown => return PollOutcome::queued(id),
                 LeaseLookup::MissingOrExpired => {}
             }
         }
@@ -508,7 +524,7 @@ impl Bits {
                 }
                 self.poll_local(id, timeout)
                     .await
-                    .unwrap_or(PollOutcome::Pending { id: id.to_string() })
+                    .unwrap_or_else(|| PollOutcome::queued(id))
             }
             Ok(ClaimResult::Active { owner_broker_id }) => {
                 if owner_broker_id == self.submit_context.broker_id {
@@ -518,7 +534,7 @@ impl Bits {
                         request.id = id,
                         "job owned by this broker but not in memory, returning pending"
                     );
-                    return PollOutcome::Pending { id: id.to_string() };
+                    return PollOutcome::queued(id);
                 }
                 match self.lookup_owner_lease(&owner_broker_id).await {
                     // Ownership moved concurrently to another live broker.
@@ -526,10 +542,8 @@ impl Bits {
                     LeaseLookup::Active(lease) => self
                         .try_proxy_with_lease(&lease, id, timeout)
                         .await
-                        .unwrap_or(PollOutcome::Pending { id: id.to_string() }),
-                    LeaseLookup::MissingOrExpired | LeaseLookup::Unknown => {
-                        PollOutcome::Pending { id: id.to_string() }
-                    }
+                        .unwrap_or_else(|| PollOutcome::queued(id)),
+                    LeaseLookup::MissingOrExpired | LeaseLookup::Unknown => PollOutcome::queued(id),
                 }
             }
             // No durable record exists for this id anymore.
@@ -541,17 +555,17 @@ impl Bits {
                 // Rare optimistic-claim race. Keep response in pending loop so the
                 // next poll can observe the winning owner.
                 tracing::warn!(request.id = %id, error = %message, "claim conflict");
-                PollOutcome::Pending { id: id.to_string() }
+                PollOutcome::queued(id)
             }
             Err(DbError::Backend(message)) => {
                 // Backend remained unavailable after in-poll backoff retries.
                 // Return pending so client retries on the next poll interval.
                 tracing::warn!(request.id = %id, error = %message, "claim backend unavailable after retries");
-                PollOutcome::Pending { id: id.to_string() }
+                PollOutcome::queued(id)
             }
             Err(err @ DbError::SlotExhausted { .. }) => {
                 tracing::error!(request.id = %id, error = %err, "broker slot space exhausted during claim");
-                PollOutcome::Pending { id: id.to_string() }
+                PollOutcome::queued(id)
             }
         }
     }
@@ -599,10 +613,10 @@ impl Bits {
                             self.schedule_durable_cleanup(id, &job);
                             PollOutcome::Ready(result)
                         }
-                        None => PollOutcome::Pending { id: id.to_string() },
+                        None => PollOutcome::pending(id, job.pending_status()),
                     }
                 }
-                Err(_) => PollOutcome::Pending { id: id.to_string() },
+                Err(_) => PollOutcome::pending(id, job.pending_status()),
             },
             None => {
                 notified.await;
@@ -613,7 +627,7 @@ impl Bits {
                         self.schedule_durable_cleanup(id, &job);
                         PollOutcome::Ready(result)
                     }
-                    None => PollOutcome::Pending { id: id.to_string() },
+                    None => PollOutcome::pending(id, job.pending_status()),
                 }
             }
         };

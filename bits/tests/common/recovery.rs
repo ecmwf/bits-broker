@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Json, Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -574,12 +575,22 @@ impl BrokerLeaseStore for LeaseWriteGateStore {
 }
 
 enum StubResponse {
-    Success { content_type: String, body: Vec<u8> },
-    Redirect { location: String },
-    Error { message: String },
+    Success {
+        content_type: String,
+        body: Vec<u8>,
+    },
+    Redirect {
+        location: String,
+    },
+    Error {
+        message: String,
+    },
     Gone,
     NotFound,
-    Pending { job_id: String },
+    Pending {
+        job_id: String,
+        pending_status: &'static str,
+    },
     ServerError,
 }
 
@@ -630,11 +641,15 @@ async fn owner_stub(Path(_id): Path<String>, State(state): State<StubState>) -> 
             })),
         )
             .into_response(),
-        StubResponse::Pending { job_id } => (
-            StatusCode::SEE_OTHER,
-            [(header::LOCATION, format!("/job/{job_id}"))],
-        )
-            .into_response(),
+        StubResponse::Pending {
+            job_id,
+            pending_status,
+        } => Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header(header::LOCATION, format!("/job/{job_id}"))
+            .header("x-bits-pending-status", *pending_status)
+            .body(Body::empty())
+            .unwrap(),
         StubResponse::ServerError => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -684,6 +699,15 @@ pub async fn start_not_found_owner_stub() -> String {
 pub async fn start_pending_owner_stub(job_id: &str) -> String {
     start_owner_stub(StubResponse::Pending {
         job_id: job_id.to_string(),
+        pending_status: "queued",
+    })
+    .await
+}
+
+pub async fn start_processing_owner_stub(job_id: &str) -> String {
+    start_owner_stub(StubResponse::Pending {
+        job_id: job_id.to_string(),
+        pending_status: "processing",
     })
     .await
 }

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,35 @@ fn default_persisted() -> AtomicBool {
     AtomicBool::new(false)
 }
 
+fn default_pending_status() -> Arc<AtomicU8> {
+    Arc::new(AtomicU8::new(PendingStatus::Queued as u8))
+}
+
+/// Non-terminal lifecycle state for a submitted job.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingStatus {
+    Queued = 0,
+    Processing = 1,
+}
+
+impl PendingStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Processing => "processing",
+        }
+    }
+
+    pub(crate) fn from_header(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "processing" => Some(Self::Processing),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 /// A unit of work flowing through checks, transforms, and a terminal target.
 pub struct Job {
@@ -70,6 +99,9 @@ pub struct Job {
     /// Stored as nanoseconds since process-epoch for lock-free access.
     #[serde(skip, default = "default_reconnect_deadline_nanos")]
     pub(crate) reconnect_deadline_nanos: Arc<AtomicU64>,
+    /// Shared non-terminal state, advanced when a remote worker claims the job.
+    #[serde(skip, default = "default_pending_status")]
+    pending_status: Arc<AtomicU8>,
     /// True once a durable record has been successfully written for this job.
     /// Used by poll and sweeper to know whether durable cleanup is needed.
     #[serde(skip, default = "default_persisted")]
@@ -77,9 +109,9 @@ pub struct Job {
     /// Result slot written by the dispatch task and consumed by `Bits::poll()`.
     #[serde(skip)]
     pub(crate) result: Mutex<Option<JobResult>>,
-    /// Notifies waiting pollers when the result is ready.
+    /// Wakes waiting pollers when either status advances or the result is ready.
     #[serde(skip)]
-    pub(crate) notify: Notify,
+    pub(crate) notify: Arc<Notify>,
 }
 
 impl Job {
@@ -100,9 +132,10 @@ impl Job {
             cancelled: default_cancelled(),
             active_pollers: default_active_pollers(),
             reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
+            pending_status: default_pending_status(),
             persisted: AtomicBool::new(false),
             result: Mutex::new(None),
-            notify: Notify::new(),
+            notify: Arc::new(Notify::new()),
         }
     }
 
@@ -118,9 +151,10 @@ impl Job {
             cancelled: default_cancelled(),
             active_pollers: default_active_pollers(),
             reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
+            pending_status: default_pending_status(),
             persisted: AtomicBool::new(false),
             result: Mutex::new(None),
-            notify: Notify::new(),
+            notify: Arc::new(Notify::new()),
         }
     }
 
@@ -141,6 +175,22 @@ impl Job {
         Arc::make_mut(&mut self.metadata)
     }
 
+    pub fn pending_status(&self) -> PendingStatus {
+        match self.pending_status.load(Ordering::Acquire) {
+            value if value == PendingStatus::Processing as u8 => PendingStatus::Processing,
+            _ => PendingStatus::Queued,
+        }
+    }
+
+    pub(crate) fn mark_processing(&self) {
+        let previous = self
+            .pending_status
+            .swap(PendingStatus::Processing as u8, Ordering::AcqRel);
+        if previous != PendingStatus::Processing as u8 {
+            self.notify.notify_waiters();
+        }
+    }
+
     pub(crate) fn set_reconnect_deadline(&self, deadline: Instant) {
         self.reconnect_deadline_nanos
             .store(instant_to_nanos(deadline), Ordering::Release);
@@ -157,16 +207,17 @@ impl Clone for Job {
             user: self.user.clone(),
             created_at: self.created_at,
             metadata: self.metadata.clone(),
-            // Lifecycle arcs — share the same underlying state so the pipeline
-            // clone can still read cancellation / client-presence correctly.
+            // Lifecycle arcs are shared so the pipeline clone can report
+            // cancellation, client presence, and worker-claim status.
             cancelled: self.cancelled.clone(),
             active_pollers: self.active_pollers.clone(),
             reconnect_deadline_nanos: self.reconnect_deadline_nanos.clone(),
-            // Result slot, notifier, and persisted flag are not shared — the
-            // pipeline clone never writes results or persistence state.
+            pending_status: self.pending_status.clone(),
+            // Result slot and persisted flag are owned by the submitted job.
             persisted: AtomicBool::new(false),
             result: Mutex::new(None),
-            notify: Notify::new(),
+            // Status and result changes wake the same submitted-job pollers.
+            notify: self.notify.clone(),
         }
     }
 }
@@ -189,6 +240,23 @@ mod tests {
         let job = Job::new(request.clone());
         assert_eq!(*job.original_request, request);
         assert_eq!(job.request, request);
+    }
+
+    #[tokio::test]
+    async fn processing_status_is_shared_with_pipeline_clones_and_wakes_pollers() {
+        let original = Job::new(json!({}));
+        let cloned = original.clone();
+        let notified = original.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        cloned.mark_processing();
+
+        tokio::time::timeout(Duration::from_millis(100), notified)
+            .await
+            .expect("processing transition should wake pending pollers");
+        assert_eq!(original.pending_status(), PendingStatus::Processing);
+        assert_eq!(cloned.pending_status(), PendingStatus::Processing);
     }
 
     #[test]

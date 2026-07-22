@@ -14,12 +14,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bits::db::{PersistenceStore, memory::MemoryStore};
 use bits::server::CODE_JOB_ERROR;
-use bits::{Job, JobResult, PollOutcome};
+use bits::{Job, JobResult, PendingStatus, PollOutcome};
 use common::recovery::{
     BackendFailingStore, LeaseLookupFailingStore, TargetBehavior, broker_identity,
     insert_job_record, new_recovery_job_id, observed_owner, poll_until_terminal, read_success_body,
     single_target_switch, start_broker_server, start_error_owner_stub, start_gone_owner_stub,
-    start_not_found_owner_stub, start_pending_owner_stub, start_redirect_owner_stub,
+    start_not_found_owner_stub, start_processing_owner_stub, start_redirect_owner_stub,
     start_server_error_owner_stub, start_success_owner_stub, wait_for_no_owner, wait_for_owner,
     wait_for_ready,
 };
@@ -316,7 +316,7 @@ async fn active_lease_proxy_pending_when_location_points_back_to_job() {
     let store = shared_store().await;
     let owner_id = broker_identity("tst", "mem", 7);
     let job_id = new_recovery_job_id("tst", "mem", 7);
-    let owner_url = start_pending_owner_stub(&job_id).await;
+    let owner_url = start_processing_owner_stub(&job_id).await;
     insert_job_record(&store, &job_id, owner_id, json!({"job": "pending"})).await;
     store
         .upsert_broker_lease(owner_id, &owner_url, Duration::from_secs(2))
@@ -338,7 +338,10 @@ async fn active_lease_proxy_pending_when_location_points_back_to_job() {
             .bits
             .poll(&job_id, Some(Duration::from_millis(400)))
             .await,
-        PollOutcome::Pending { .. }
+        PollOutcome::Pending {
+            status: PendingStatus::Processing,
+            ..
+        }
     ));
     assert_eq!(
         observed_owner(&store, &job_id).await.as_deref(),

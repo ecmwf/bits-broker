@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
 
+use crate::bits::PENDING_STATUS_HEADER;
 use crate::db::{BrokerLeaseRecord, ClaimResult, DbError, PersistenceStore, durable_job_present};
 use crate::result::JobResult;
-use crate::{Bits, PollOutcome};
+use crate::{Bits, PendingStatus, PollOutcome};
 
 pub(crate) enum LeaseLookup {
     Active(BrokerLeaseRecord),
@@ -98,12 +99,12 @@ impl Bits {
         match durable_job_present(store.as_ref(), id).await {
             Ok(true) => {
                 tracing::warn!(request.id = %id, "proxy owner returned 404 while durable record still exists");
-                PollOutcome::Pending { id: id.to_string() }
+                PollOutcome::queued(id)
             }
             Ok(false) => PollOutcome::NotFound,
             Err(err) => {
                 tracing::warn!(request.id = %id, error = %err, "failed to verify durable record after owner 404");
-                PollOutcome::Pending { id: id.to_string() }
+                PollOutcome::queued(id)
             }
         }
     }
@@ -143,6 +144,12 @@ impl Bits {
         };
 
         let status = response.status();
+        let pending_status = response
+            .headers()
+            .get(PENDING_STATUS_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(PendingStatus::from_header)
+            .unwrap_or(PendingStatus::Queued);
         if status == reqwest::StatusCode::OK {
             let content_type = match response.headers().get(reqwest::header::CONTENT_TYPE) {
                 Some(value) => match value.to_str() {
@@ -184,7 +191,7 @@ impl Bits {
                 .to_string();
             if location.is_empty() {
                 tracing::warn!(request.id = %id, status = %status, "proxy redirect with empty Location");
-                return Some(PollOutcome::Pending { id: id.to_string() });
+                return Some(PollOutcome::pending(id, pending_status));
             }
             let last_segment = location
                 .split('?')
@@ -194,7 +201,7 @@ impl Bits {
                 .next_back()
                 .unwrap_or_default();
             if last_segment == id {
-                return Some(PollOutcome::Pending { id: id.to_string() });
+                return Some(PollOutcome::pending(id, pending_status));
             }
             // Recover the object's content metadata from the owner broker's
             // response headers so the v1 redirect body keeps parity across a
@@ -230,18 +237,18 @@ impl Bits {
         }
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             tracing::warn!(request.id = %id, status = %status, "proxy auth error from owner");
-            return Some(PollOutcome::Pending { id: id.to_string() });
+            return Some(PollOutcome::queued(id));
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             tracing::warn!(request.id = %id, "proxy throttled by owner");
-            return Some(PollOutcome::Pending { id: id.to_string() });
+            return Some(PollOutcome::queued(id));
         }
         if status.is_server_error() {
-            return Some(PollOutcome::Pending { id: id.to_string() });
+            return Some(PollOutcome::queued(id));
         }
 
         tracing::warn!(request.id = %id, status = %status, "proxy received unexpected status");
-        Some(PollOutcome::Pending { id: id.to_string() })
+        Some(PollOutcome::queued(id))
     }
 
     pub(crate) fn start_broker_lease_heartbeat(

@@ -769,7 +769,7 @@ async fn poll_outcome_to_py(outcome: PollOutcome) -> PyResult<Py<PyAny>> {
                 Ok(payload.into_any().unbind())
             })
         }
-        PollOutcome::Pending { id } => Python::attach(|py| {
+        PollOutcome::Pending { id, .. } => Python::attach(|py| {
             let payload = PyDict::new(py);
             payload.set_item("status", "pending")?;
             payload.set_item("id", id)?;

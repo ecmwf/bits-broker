@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use bits::{Bits, Job, JobResult, PollOutcome};
+use bits::{Bits, Job, JobResult, PendingStatus, PollOutcome};
 use futures::TryStreamExt;
 use reqwest::Client;
 
@@ -239,6 +239,43 @@ async fn worker_completes_job() {
         }
         other => panic!("expected Success, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn worker_claim_advances_pending_status_to_processing() {
+    let port = free_port().await;
+    let bits = make_bits(port, 60.0);
+    wait_for_server(port).await;
+
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"class": "od"})))
+        .expect_accepted("submit should not be rejected");
+    let queued = bits.poll(&handle.id, Some(Duration::from_millis(1))).await;
+    assert!(matches!(
+        queued,
+        PollOutcome::Pending {
+            status: PendingStatus::Queued,
+            ..
+        }
+    ));
+
+    let response = Client::new()
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let processing = bits.poll(&handle.id, Some(Duration::from_millis(1))).await;
+    assert!(matches!(
+        processing,
+        PollOutcome::Pending {
+            status: PendingStatus::Processing,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]

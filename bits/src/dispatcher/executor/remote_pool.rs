@@ -264,6 +264,8 @@ async fn handle_get_work(
             last_heartbeat: Instant::now(),
         },
     );
+    // This is the first point at which a remote worker owns the job.
+    job.mark_processing();
 
     // Spawn a task that waits for the worker outcome and translates it into
     // the TargetResult sent back to the original dispatcher caller.

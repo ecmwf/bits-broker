@@ -363,6 +363,12 @@ routes:
         .get("retry-after")
         .expect("missing Retry-After header");
     assert_eq!(retry_after.to_str().unwrap(), "0");
+
+    let pending_status = resp
+        .headers()
+        .get("x-bits-pending-status")
+        .expect("missing pending status header");
+    assert_eq!(pending_status.to_str().unwrap(), "queued");
 }
 
 #[tokio::test]

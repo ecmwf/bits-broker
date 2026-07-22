@@ -29,6 +29,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::net::TcpListener;
 
+use crate::bits::PENDING_STATUS_HEADER;
 use crate::{Bits, Job, JobResult, PollOutcome, SubmitOutcome};
 
 pub async fn shutdown_signal() {
@@ -306,14 +307,13 @@ async fn poll_job(Path(id): Path<String>, State(state): State<AppState>) -> Resp
 async fn poll_by_id(id: &str, state: &AppState) -> Response {
     match state.bits.poll(id, Some(state.poll_timeout)).await {
         PollOutcome::Ready(result) => result_to_response(result, state.retry_after_secs),
-        PollOutcome::Pending { id } => (
-            StatusCode::SEE_OTHER,
-            [
-                (header::LOCATION, format!("/job/{id}")),
-                (header::RETRY_AFTER, "0".to_string()),
-            ],
-        )
-            .into_response(),
+        PollOutcome::Pending { id, status } => Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header(header::LOCATION, format!("/job/{id}"))
+            .header(header::RETRY_AFTER, "0")
+            .header(PENDING_STATUS_HEADER, status.as_str())
+            .body(Body::empty())
+            .unwrap(),
         PollOutcome::NotFound => json_error(
             StatusCode::NOT_FOUND,
             CODE_JOB_NOT_FOUND,

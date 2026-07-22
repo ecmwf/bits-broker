@@ -37,11 +37,14 @@ pub use actions::registry::{
     RuntimeActionFactory, create_action, list_actions, register_runtime_action,
 };
 pub use actions::*;
-pub use bits::{ActiveJobSnapshot, Bits, DEFAULT_MAX_JOBS, JobHandle, PollOutcome, SubmitOutcome};
+pub use bits::{
+    ActiveJobSnapshot, Bits, DEFAULT_MAX_JOBS, JobHandle, PENDING_STATUS_HEADER, PollOutcome,
+    SubmitOutcome,
+};
 pub use config::{Bootstrap, RouteFactory, parse_bootstrap};
 pub use db::*;
 pub use error::{BitsError, ConfigError, RoutingError, WorkerServerError};
-pub use job::Job;
+pub use job::{Job, PendingStatus};
 pub use result::JobResult;
 pub use route_handle::RouteHandle;
 pub use server::ServerConfig;

@@ -10,6 +10,7 @@
 
 #![cfg(feature = "nats")]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,7 +47,8 @@ fn user_job(name: &str) -> Job {
 }
 
 /// The identity key the dispatcher derives for `user_job(name)`: realm "test" +
-/// US separator + username. Must match `UserLimiter::user_key` (realm, username).
+/// US separator + username. Must match the key produced by `UserLimiter::resolve`
+/// (realm, username).
 fn identity(name: &str) -> String {
     format!("test\u{1f}{name}")
 }
@@ -63,7 +65,15 @@ fn broker(store: Arc<dyn PersistenceStore>, id: &str, max: usize) -> Dispatcher<
     )
     .expect("dispatcher config")
     .expect("dispatcher")
-    .with_user_limit(Some(UserLimitConfig { max }), SCOPE, id, Some(store))
+    .with_user_limit(
+        Some(UserLimitConfig {
+            default: Some(max),
+            realms: HashMap::new(),
+        }),
+        SCOPE,
+        id,
+        Some(store),
+    )
 }
 
 fn held(rx: oneshot::Receiver<()>) -> BoxFuture<'static, Result<CheckResult, ActionError>> {

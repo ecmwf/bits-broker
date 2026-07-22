@@ -110,6 +110,7 @@ pub(crate) fn spawn_job(
                 JobResult::Error { message } => tracing::warn!(duration_ms = ms, error = %message, "job error"),
                 JobResult::Failed { reason } => tracing::error!(duration_ms = ms, reason = %reason, "job failed"),
                 JobResult::Overloaded { reason } => tracing::warn!(duration_ms = ms, reason = %reason, "job rejected: overloaded"),
+                JobResult::RateLimited { reason } => tracing::warn!(duration_ms = ms, reason = %reason, "job rejected: rate limited"),
                 JobResult::Cancelled => tracing::info!(duration_ms = ms, "job cancelled"),
                 JobResult::ClientGone => tracing::info!(duration_ms = ms, "job abandoned: client gone"),
             }
@@ -145,11 +146,71 @@ async fn dispatch(router: &Switch, job: Job) -> JobResult {
             tracing::warn!(error = %reason, "dispatch rejected: queue full");
             JobResult::Overloaded { reason }
         }
+        Err(crate::actions::ActionError::UserLimitExceeded(reason)) => {
+            tracing::warn!(error = %reason, "dispatch rejected: user limit exceeded");
+            JobResult::RateLimited { reason }
+        }
         Err(err) => {
             tracing::error!(error = %err, "dispatch failed");
             JobResult::Failed {
                 reason: "internal server error".to_string(),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::dispatch;
+    use crate::actions::{Action, ActionError, TargetAction, TargetResult};
+    use crate::job::Job;
+    use crate::result::JobResult;
+    use crate::routing::Route;
+    use crate::routing::switch::Switch;
+
+    struct AlwaysUserLimitExceeded;
+
+    #[async_trait]
+    impl TargetAction for AlwaysUserLimitExceeded {
+        async fn dispatch(&self, _job: &Job) -> Result<TargetResult, ActionError> {
+            Err(ActionError::UserLimitExceeded(
+                "user is at the per-user limit (6) for this route".to_string(),
+            ))
+        }
+    }
+
+    /// A user-limit rejection is a "try again later" signal, not a system
+    /// failure: it must surface as `JobResult::RateLimited` (retryable, 429 +
+    /// Retry-After at the HTTP layer) rather than falling through to the
+    /// generic `JobResult::Failed` ("internal server error", non-retryable),
+    /// and distinct from `JobResult::Overloaded` (system-wide 529 backpressure).
+    #[tokio::test]
+    async fn user_limit_exceeded_maps_to_rate_limited_not_failed() {
+        let switch = Switch::new(vec![Route::new(
+            "default".to_string(),
+            vec![Action::Target(
+                Arc::new(AlwaysUserLimitExceeded),
+                None,
+                None,
+            )],
+        )]);
+
+        let job = Job::new(serde_json::json!({}));
+        job.set_reconnect_deadline_for_test(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+
+        let result = dispatch(&switch, job).await;
+
+        match result {
+            JobResult::RateLimited { reason } => {
+                assert!(reason.contains("per-user limit"));
+            }
+            other => panic!("expected JobResult::RateLimited, got {other:?}"),
         }
     }
 }

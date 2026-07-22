@@ -29,6 +29,11 @@ pub enum JobResult {
     Failed { reason: String },
     /// System is at capacity; the caller should retry later.
     Overloaded { reason: String },
+    /// The caller has exceeded a per-user/per-realm/per-role admission limit
+    /// on this route; the caller should back off and retry later. Distinct
+    /// from [`JobResult::Overloaded`] (system-wide backpressure): this is a
+    /// per-caller cap, surfaced over HTTP as `429 Too Many Requests`.
+    RateLimited { reason: String },
     /// Job was cancelled before reaching a target (explicit cancel).
     Cancelled,
     /// Job reached a target but the client was no longer present to receive the result.
@@ -49,6 +54,7 @@ impl std::fmt::Debug for JobResult {
             JobResult::Error { message } => write!(f, "Error({})", message),
             JobResult::Failed { reason } => write!(f, "Failed({})", reason),
             JobResult::Overloaded { reason } => write!(f, "Overloaded({})", reason),
+            JobResult::RateLimited { reason } => write!(f, "RateLimited({})", reason),
             JobResult::Cancelled => write!(f, "Cancelled"),
             JobResult::ClientGone => write!(f, "ClientGone"),
         }
@@ -108,5 +114,16 @@ mod tests {
             reason: "Queue is full".to_string(),
         };
         assert_eq!(format!("{:?}", result), "Failed(Queue is full)");
+    }
+
+    #[test]
+    fn test_result_rate_limited() {
+        let result = JobResult::RateLimited {
+            reason: "user is at the per-user limit (6) for this route".to_string(),
+        };
+        assert_eq!(
+            format!("{:?}", result),
+            "RateLimited(user is at the per-user limit (6) for this route)"
+        );
     }
 }

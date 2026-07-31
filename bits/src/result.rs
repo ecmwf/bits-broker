@@ -40,6 +40,19 @@ pub enum JobResult {
     ClientGone,
 }
 
+impl JobResult {
+    /// Whether this terminal result carries a payload the client must fetch
+    /// (streamed content or a redirect), as opposed to a failure/terminal
+    /// condition that can be surfaced to the caller directly.
+    ///
+    /// Used by the v1 submit path: deliverable results are left in place for the
+    /// client's consuming poll, while non-deliverable ones are surfaced on the
+    /// submit response.
+    pub fn is_deliverable(&self) -> bool {
+        matches!(self, JobResult::Success { .. } | JobResult::Redirect { .. })
+    }
+}
+
 impl std::fmt::Debug for JobResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

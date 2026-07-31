@@ -54,6 +54,22 @@ impl PollOutcome {
     }
 }
 
+/// Outcome of [`Bits::wait_terminal_peek`], the non-consuming submit-path wait.
+#[derive(Debug)]
+pub enum SubmitPeek {
+    /// A terminal failure was observed. The result is consumed and returned so
+    /// the caller can surface it synchronously on the submit response.
+    Failed(JobResult),
+    /// A deliverable result (streamed content or redirect) is ready. It is left
+    /// in place for the client to fetch with a normal consuming poll.
+    Deliverable,
+    /// The job is still non-terminal after the wait; `status` distinguishes
+    /// queued from claimed.
+    Pending { status: PendingStatus },
+    /// No local record exists for this job id.
+    NotFound,
+}
+
 /// Header used by broker-to-broker poll responses to preserve pending state.
 pub const PENDING_STATUS_HEADER: &str = "x-bits-pending-status";
 
@@ -635,6 +651,63 @@ impl Bits {
         Some(outcome)
     }
 
+    /// Waits up to `timeout` for a *local* job to reach a terminal state,
+    /// peeking the result without consuming a deliverable payload.
+    ///
+    /// This is the submit-path counterpart to [`Bits::poll`]. A job is always
+    /// owned by the broker that accepted its submission, so — unlike `poll` —
+    /// no proxy or durable-recovery path is involved; the lookup is purely
+    /// local. On a terminal *failure* the result is taken and returned as
+    /// [`SubmitPeek::Failed`] so the caller can surface it on the submit
+    /// response. A *deliverable* result (success/redirect) is left in place and
+    /// reported as [`SubmitPeek::Deliverable`], so the client fetches it with a
+    /// normal consuming poll.
+    pub async fn wait_terminal_peek(&self, id: &str, timeout: Duration) -> SubmitPeek {
+        let Some(job) = self.submit_context.jobs.get(id).map(|r| r.clone()) else {
+            return SubmitPeek::NotFound;
+        };
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Arm the notification before inspecting the result so a completion
+            // that races with this check still wakes the wait below.
+            let notified = job.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            // Peek without consuming; take only when the result is a failure.
+            // Release the result lock before touching the jobs map (see the
+            // lock-ordering note in `poll_local`).
+            {
+                let mut result = job.result.lock().unwrap_or_else(|p| p.into_inner());
+                if result.is_some() {
+                    if result.as_ref().unwrap().is_deliverable() {
+                        return SubmitPeek::Deliverable;
+                    }
+                    let failure = result.take().unwrap();
+                    drop(result);
+                    self.remove_job(id);
+                    self.schedule_durable_cleanup(id, &job);
+                    return SubmitPeek::Failed(failure);
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return SubmitPeek::Pending {
+                    status: job.pending_status(),
+                };
+            }
+            // A notify also fires on the queued->processing transition, so a
+            // wake without a result simply loops to re-check until the deadline.
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return SubmitPeek::Pending {
+                    status: job.pending_status(),
+                };
+            }
+        }
+    }
+
     fn remove_job(&self, id: &str) {
         if self.submit_context.jobs.remove(id).is_some() {
             let _ = self.submit_context.job_count.fetch_update(
@@ -956,5 +1029,124 @@ targets:
             outcome_b,
             crate::PollOutcome::Ready(_) | crate::PollOutcome::Pending { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod submit_peek_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::job::Job;
+    use crate::result::JobResult;
+
+    fn test_bits() -> Bits {
+        Bits::from_router_for_tests(
+            Switch::new(vec![]),
+            "bol-dev-0".to_string(),
+            "http://127.0.0.1:1/job".to_string(),
+            Duration::from_millis(10),
+            None,
+            None,
+            Duration::from_secs(60),
+        )
+    }
+
+    /// Inserts a job directly into the broker's map, bypassing the async runner
+    /// so the test controls exactly when (and how) the result is set.
+    fn insert_pending_job(bits: &Bits, id: &str) -> Arc<Job> {
+        let job = Arc::new(Job::new_with_id(id.to_string(), serde_json::json!({})));
+        bits.submit_context.jobs.insert(id.to_string(), job.clone());
+        job
+    }
+
+    #[tokio::test]
+    async fn peek_surfaces_and_consumes_failure() {
+        let bits = test_bits();
+        let job = insert_pending_job(&bits, "job-fail");
+        *job.result.lock().unwrap() = Some(JobResult::Failed {
+            reason: "boom".to_string(),
+        });
+
+        let outcome = bits
+            .wait_terminal_peek("job-fail", Duration::from_secs(5))
+            .await;
+        assert!(
+            matches!(outcome, SubmitPeek::Failed(JobResult::Failed { reason }) if reason == "boom")
+        );
+        // A failure is consumed: the job is removed and a later poll finds nothing.
+        assert!(bits.submit_context.jobs.get("job-fail").is_none());
+    }
+
+    #[tokio::test]
+    async fn peek_leaves_deliverable_in_place_for_the_client_poll() {
+        let bits = test_bits();
+        let job = insert_pending_job(&bits, "job-ok");
+        *job.result.lock().unwrap() = Some(JobResult::Redirect {
+            location: "https://bobs/data".to_string(),
+            message: String::new(),
+            content_type: None,
+            content_length: None,
+        });
+
+        let outcome = bits
+            .wait_terminal_peek("job-ok", Duration::from_secs(5))
+            .await;
+        assert!(matches!(outcome, SubmitPeek::Deliverable));
+
+        // The result was NOT consumed: a subsequent real poll still delivers it.
+        match bits.poll("job-ok", Some(Duration::from_millis(10))).await {
+            PollOutcome::Ready(JobResult::Redirect { location, .. }) => {
+                assert_eq!(location, "https://bobs/data");
+            }
+            other => panic!("expected the redirect to survive the peek, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn peek_reports_pending_after_timeout() {
+        let bits = test_bits();
+        let _job = insert_pending_job(&bits, "job-slow");
+
+        let outcome = bits
+            .wait_terminal_peek("job-slow", Duration::from_millis(50))
+            .await;
+        assert!(matches!(outcome, SubmitPeek::Pending { .. }));
+        // Still present and un-consumed.
+        assert!(bits.submit_context.jobs.get("job-slow").is_some());
+    }
+
+    #[tokio::test]
+    async fn peek_wakes_on_completion_notification() {
+        let bits = test_bits();
+        let job = insert_pending_job(&bits, "job-late");
+
+        // Complete the job shortly after the wait starts; the notify must wake it
+        // well within the generous timeout.
+        let completer = job.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            *completer.result.lock().unwrap() = Some(JobResult::Error {
+                message: "late failure".to_string(),
+            });
+            completer.notify.notify_waiters();
+        });
+
+        let outcome = bits
+            .wait_terminal_peek("job-late", Duration::from_secs(5))
+            .await;
+        assert!(
+            matches!(outcome, SubmitPeek::Failed(JobResult::Error { message }) if message == "late failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_reports_not_found_for_unknown_id() {
+        let bits = test_bits();
+        let outcome = bits
+            .wait_terminal_peek("no-such-job", Duration::from_millis(10))
+            .await;
+        assert!(matches!(outcome, SubmitPeek::NotFound));
     }
 }

@@ -39,7 +39,7 @@ pub use actions::registry::{
 pub use actions::*;
 pub use bits::{
     ActiveJobSnapshot, Bits, DEFAULT_MAX_JOBS, JobHandle, PENDING_STATUS_HEADER, PollOutcome,
-    SubmitOutcome,
+    SubmitOutcome, SubmitPeek,
 };
 pub use config::{Bootstrap, RouteFactory, parse_bootstrap};
 pub use db::*;

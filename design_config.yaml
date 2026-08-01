@@ -2,7 +2,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Example ECMWF routing config demonstrating the full dispatcher architecture.
+# Example routing config demonstrating the full dispatcher architecture.
+#
+# Target hostnames below (mars.example.com, dss.example.com) are placeholders;
+# replace them with the endpoints of your own deployment.
 #
 # Dispatcher config (queue, executor) lives inside a `dispatcher:`
 # key within the registry entry, or as a sibling `dispatcher:` key for inline steps.
@@ -68,7 +71,7 @@ targets:
 
   mars_od:
     type: http
-    url: "http://mars.ecmwf.int:8080/retrieve"
+    url: "http://mars.example.com:8080/retrieve"
     dispatcher:
       queue: cost_weighted      # cheap jobs first
       executor:
@@ -90,7 +93,7 @@ targets:
 
   dss_od:
     type: http
-    url: "http://dss.ecmwf.int:9090/retrieve"
+    url: "http://dss.example.com:9090/retrieve"
     dispatcher:
       queue: fifo
       executor:

@@ -74,7 +74,8 @@ Switches can be nested inside routes.
 ## Configuration
 
 Config is YAML. The top-level sections are three typed registries (`checks`, `transforms`,
-`targets`) for reusable named entries, and a `routes` section defining the pipelines:
+`targets`) for reusable named entries, and a `routes` section defining the pipelines. Hostnames
+in the examples below are placeholders — substitute the endpoints of your own deployment:
 
 ```yaml
 bits:
@@ -94,7 +95,7 @@ transforms:
 targets:
   mars_retrieval:
     type: http
-    url: "http://mars.ecmwf.int:8080"
+    url: "http://mars.example.com:8080"
     dispatcher:
       queue: cost_weighted   # dispatcher config — see Dispatcher section
       executor:
@@ -187,7 +188,7 @@ For **named registry entries**, dispatcher fields are nested under a `dispatcher
 targets:
   mars_retrieval:
     type: http
-    url: "http://mars.ecmwf.int:8080"
+    url: "http://mars.example.com:8080"
     dispatcher:
       queue: cost_weighted
       executor:
@@ -201,7 +202,7 @@ For **inline steps**, `dispatcher:` is a sibling key in the action mapping:
 routes:
   - default:
       - target::http:
-            url: "http://mars.ecmwf.int:8080"
+            url: "http://mars.example.com:8080"
         dispatcher:
           queue: cost_weighted
           executor:

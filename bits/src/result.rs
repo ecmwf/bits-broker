@@ -40,6 +40,15 @@ pub enum JobResult {
     ClientGone,
 }
 
+impl JobResult {
+    /// Returns `true` for results that carry a deliverable payload (`Success`
+    /// or `Redirect`). These must not be consumed on the submit path — they
+    /// must be left in place for the client's follow-up poll.
+    pub fn is_deliverable(&self) -> bool {
+        matches!(self, JobResult::Success { .. } | JobResult::Redirect { .. })
+    }
+}
+
 impl std::fmt::Debug for JobResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

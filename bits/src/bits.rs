@@ -579,6 +579,69 @@ impl Bits {
         }
     }
 
+    /// Waits for the first state transition of a freshly submitted local job,
+    /// returning on the first notify without consuming a deliverable payload.
+    ///
+    /// Unlike [`Bits::poll`], this is a single-pass, purely local operation —
+    /// the job was just accepted by this broker, so no proxy or
+    /// durable-recovery path is needed.
+    ///
+    /// - If the first notify carries a **failure** result, it is taken and
+    ///   returned as [`PollOutcome::Ready`] so the caller can surface it on
+    ///   the submit response.
+    /// - If the first notify carries a **deliverable** result (`Success` /
+    ///   `Redirect`), it is left in place and [`PollOutcome::Pending`] is
+    ///   returned so the client fetches it with a normal consuming poll.
+    /// - If no result is present after the first notify (queued→processing
+    ///   transition) or the timeout expires, [`PollOutcome::Pending`] is
+    ///   returned.
+    pub async fn poll_submit(&self, id: &str, timeout: Duration) -> PollOutcome {
+        let Some(job) = self.submit_context.jobs.get(id).map(|r| r.clone()) else {
+            return PollOutcome::NotFound;
+        };
+
+        // Arm the notification before inspecting the result so a completion
+        // that races with this check still wakes the wait below.
+        let notified = job.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        // Fast path: result already set before we even started waiting.
+        {
+            let mut result = job.result.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(r) = result.as_ref() {
+                if r.is_deliverable() {
+                    return PollOutcome::pending(id, job.pending_status());
+                }
+                let failure = result.take().unwrap();
+                drop(result);
+                self.remove_job(id);
+                self.schedule_durable_cleanup(id, &job);
+                return PollOutcome::Ready(failure);
+            }
+        }
+
+        // Wait for the first notify or timeout — do not loop.
+        if tokio::time::timeout(timeout, notified).await.is_err() {
+            return PollOutcome::pending(id, job.pending_status());
+        }
+
+        // First notify fired. Check result once; don't loop back.
+        let mut result = job.result.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(r) = result.as_ref() {
+            if r.is_deliverable() {
+                return PollOutcome::pending(id, job.pending_status());
+            }
+            let failure = result.take().unwrap();
+            drop(result);
+            self.remove_job(id);
+            self.schedule_durable_cleanup(id, &job);
+            return PollOutcome::Ready(failure);
+        }
+        // No result yet — this was the queued→processing transition notify.
+        PollOutcome::pending(id, job.pending_status())
+    }
+
     async fn poll_local(&self, id: &str, timeout: Option<Duration>) -> Option<PollOutcome> {
         let job = self.submit_context.jobs.get(id).map(|r| r.clone())?;
 
@@ -713,6 +776,137 @@ impl Drop for Bits {
         {
             tracing::error!("heartbeat thread panicked during shutdown: {panic:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod poll_submit_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::job::Job;
+    use crate::result::JobResult;
+    use crate::routing::switch::Switch;
+
+    fn test_bits() -> Bits {
+        Bits::from_router_for_tests(
+            Switch::new(vec![]),
+            "bol-dev-0".to_string(),
+            "http://127.0.0.1:1/job".to_string(),
+            Duration::from_millis(10),
+            None,
+            None,
+            Duration::from_secs(60),
+        )
+    }
+
+    fn insert_pending_job(bits: &Bits, id: &str) -> Arc<Job> {
+        let job = Arc::new(Job::new_with_id(id.to_string(), serde_json::json!({})));
+        bits.submit_context.jobs.insert(id.to_string(), job.clone());
+        job
+    }
+
+    #[tokio::test]
+    async fn failure_is_consumed_and_returned() {
+        let bits = test_bits();
+        let job = insert_pending_job(&bits, "job-fail");
+        *job.result.lock().unwrap() = Some(JobResult::Failed {
+            reason: "boom".to_string(),
+        });
+
+        let outcome = bits.poll_submit("job-fail", Duration::from_secs(5)).await;
+        assert!(matches!(
+            outcome,
+            PollOutcome::Ready(JobResult::Failed { .. })
+        ));
+        assert!(bits.submit_context.jobs.get("job-fail").is_none());
+    }
+
+    #[tokio::test]
+    async fn deliverable_is_left_in_place_and_pending_returned() {
+        let bits = test_bits();
+        let job = insert_pending_job(&bits, "job-ok");
+        *job.result.lock().unwrap() = Some(JobResult::Redirect {
+            location: "https://bobs/data".to_string(),
+            message: String::new(),
+            content_type: None,
+            content_length: None,
+        });
+
+        let outcome = bits.poll_submit("job-ok", Duration::from_secs(5)).await;
+        assert!(matches!(outcome, PollOutcome::Pending { .. }));
+
+        // Result was NOT consumed — a subsequent real poll still delivers it.
+        assert!(matches!(
+            bits.poll("job-ok", Some(Duration::from_millis(10))).await,
+            PollOutcome::Ready(JobResult::Redirect { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_returned_after_timeout() {
+        let bits = test_bits();
+        let _job = insert_pending_job(&bits, "job-slow");
+
+        let outcome = bits
+            .poll_submit("job-slow", Duration::from_millis(50))
+            .await;
+        assert!(matches!(outcome, PollOutcome::Pending { .. }));
+        assert!(bits.submit_context.jobs.get("job-slow").is_some());
+    }
+
+    #[tokio::test]
+    async fn pending_returned_on_processing_transition_notify() {
+        let bits = test_bits();
+        let job = insert_pending_job(&bits, "job-processing");
+
+        // Fire a notify with no result set — simulates the queued→processing
+        // transition from mark_processing().
+        let waker = job.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            waker.notify.notify_waiters();
+        });
+
+        let outcome = bits
+            .poll_submit("job-processing", Duration::from_secs(5))
+            .await;
+        assert!(matches!(outcome, PollOutcome::Pending { .. }));
+        assert!(bits.submit_context.jobs.get("job-processing").is_some());
+    }
+
+    #[tokio::test]
+    async fn failure_via_notify_is_consumed() {
+        let bits = test_bits();
+        let job = insert_pending_job(&bits, "job-late-fail");
+
+        let completer = job.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            *completer.result.lock().unwrap() = Some(JobResult::Error {
+                message: "late error".to_string(),
+            });
+            completer.notify.notify_waiters();
+        });
+
+        let outcome = bits
+            .poll_submit("job-late-fail", Duration::from_secs(5))
+            .await;
+        assert!(matches!(
+            outcome,
+            PollOutcome::Ready(JobResult::Error { .. })
+        ));
+        assert!(bits.submit_context.jobs.get("job-late-fail").is_none());
+    }
+
+    #[tokio::test]
+    async fn not_found_for_unknown_id() {
+        let bits = test_bits();
+        let outcome = bits
+            .poll_submit("no-such-job", Duration::from_millis(10))
+            .await;
+        assert!(matches!(outcome, PollOutcome::NotFound));
     }
 }
 

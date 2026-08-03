@@ -579,67 +579,66 @@ impl Bits {
         }
     }
 
-    /// Waits for the first state transition of a freshly submitted local job,
-    /// returning on the first notify without consuming a deliverable payload.
+    /// Waits for a freshly submitted local job to leave the queued state,
+    /// keyed off the explicit `Processing` transition rather than any single
+    /// notification, without consuming a deliverable payload.
     ///
-    /// Unlike [`Bits::poll`], this is a single-pass, purely local operation —
-    /// the job was just accepted by this broker, so no proxy or
-    /// durable-recovery path is needed.
+    /// Unlike [`Bits::poll`], this is a purely local operation — the job was
+    /// just accepted by this broker, so no proxy or durable-recovery path is
+    /// needed.
     ///
-    /// - If the first notify carries a **failure** result, it is taken and
-    ///   returned as [`PollOutcome::Ready`] so the caller can surface it on
-    ///   the submit response.
-    /// - If the first notify carries a **deliverable** result (`Success` /
-    ///   `Redirect`), it is left in place and [`PollOutcome::Pending`] is
-    ///   returned so the client fetches it with a normal consuming poll.
-    /// - If no result is present after the first notify (queued→processing
-    ///   transition) or the timeout expires, [`PollOutcome::Pending`] is
-    ///   returned.
+    /// - A **failure** result (produced during admission, before the job
+    ///   reached a worker) is taken and returned as [`PollOutcome::Ready`] so
+    ///   the caller can surface it on the submit response.
+    /// - A **deliverable** result (`Success` / `Redirect`) is left in place
+    ///   and [`PollOutcome::Pending`] is returned so the client fetches it
+    ///   with a normal consuming poll.
+    /// - Reaching the `Processing` state (job claimed by a worker) or the
+    ///   timeout expiring returns [`PollOutcome::Pending`].
+    ///
+    /// The predicate (terminal result / `Processing`) is re-checked on every
+    /// wake, so the wait is robust to spurious notifications: a bare notify
+    /// with no state change resumes waiting instead of returning early.
     pub async fn poll_submit(&self, id: &str, timeout: Duration) -> PollOutcome {
         let Some(job) = self.submit_context.jobs.get(id).map(|r| r.clone()) else {
             return PollOutcome::NotFound;
         };
+        let deadline = tokio::time::Instant::now() + timeout;
 
-        // Arm the notification before inspecting the result so a completion
-        // that races with this check still wakes the wait below.
-        let notified = job.notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
+        loop {
+            // Arm the notification before inspecting state so a transition that
+            // races with this check still wakes the wait below.
+            let notified = job.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
 
-        // Fast path: result already set before we even started waiting.
-        {
-            let mut result = job.result.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(r) = result.as_ref() {
-                if r.is_deliverable() {
-                    return PollOutcome::pending(id, job.pending_status());
+            {
+                let mut result = job.result.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(r) = result.as_ref() {
+                    if r.is_deliverable() {
+                        // Success/Redirect: leave in place for the follow-up poll.
+                        return PollOutcome::pending(id, job.pending_status());
+                    }
+                    let failure = result.take().unwrap();
+                    drop(result);
+                    self.remove_job(id);
+                    self.schedule_durable_cleanup(id, &job);
+                    return PollOutcome::Ready(failure);
                 }
-                let failure = result.take().unwrap();
-                drop(result);
-                self.remove_job(id);
-                self.schedule_durable_cleanup(id, &job);
-                return PollOutcome::Ready(failure);
             }
-        }
 
-        // Wait for the first notify or timeout — do not loop.
-        if tokio::time::timeout(timeout, notified).await.is_err() {
-            return PollOutcome::pending(id, job.pending_status());
-        }
-
-        // First notify fired. Check result once; don't loop back.
-        let mut result = job.result.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(r) = result.as_ref() {
-            if r.is_deliverable() {
+            // No terminal result yet: an explicit Processing state means the job
+            // passed admission and reached a worker — stop and let the client poll.
+            if job.pending_status() == PendingStatus::Processing {
                 return PollOutcome::pending(id, job.pending_status());
             }
-            let failure = result.take().unwrap();
-            drop(result);
-            self.remove_job(id);
-            self.schedule_durable_cleanup(id, &job);
-            return PollOutcome::Ready(failure);
+
+            // Still queued. Wait for the next transition or the deadline, and
+            // re-check the predicate on each (possibly spurious) wake.
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return PollOutcome::pending(id, job.pending_status());
+            }
         }
-        // No result yet — this was the queued→processing transition notify.
-        PollOutcome::pending(id, job.pending_status())
     }
 
     async fn poll_local(&self, id: &str, timeout: Option<Duration>) -> Option<PollOutcome> {
@@ -861,12 +860,12 @@ mod poll_submit_tests {
         let bits = test_bits();
         let job = insert_pending_job(&bits, "job-processing");
 
-        // Fire a notify with no result set — simulates the queued→processing
-        // transition from mark_processing().
+        // Drive the real queued→processing transition; poll_submit stops on the
+        // explicit Processing state, not on a bare notify.
         let waker = job.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            waker.notify.notify_waiters();
+            waker.mark_processing();
         });
 
         let outcome = bits
@@ -874,6 +873,28 @@ mod poll_submit_tests {
             .await;
         assert!(matches!(outcome, PollOutcome::Pending { .. }));
         assert!(bits.submit_context.jobs.get("job-processing").is_some());
+    }
+
+    #[tokio::test]
+    async fn spurious_notify_while_queued_keeps_waiting() {
+        // A bare notify with no state change must not be treated as admission:
+        // the wait continues until Processing / a result / the deadline.
+        let bits = test_bits();
+        let job = insert_pending_job(&bits, "job-spurious");
+
+        let waker = job.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            waker.notify.notify_waiters();
+        });
+
+        let outcome = bits
+            .poll_submit("job-spurious", Duration::from_millis(80))
+            .await;
+        assert!(matches!(outcome, PollOutcome::Pending { .. }));
+        // Still queued and present — not misclassified into an early return.
+        assert_eq!(job.pending_status(), PendingStatus::Queued);
+        assert!(bits.submit_context.jobs.get("job-spurious").is_some());
     }
 
     #[tokio::test]

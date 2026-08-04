@@ -19,29 +19,25 @@ SPDX-License-Identifier: Apache-2.0
 > \[!IMPORTANT\]
 > This software is **Incubating** and subject to ECMWF's guidelines on [Software Maturity](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity).
 
-> A policy-aware job broker that classifies, transforms, and dispatches requests across distributed infrastructure — with queuing, persistence, and fault recovery built in.
+
+
+**A policy-aware job broker that classifies, transforms, and dispatches requests across distributed infrastructure — with queuing, persistence, and fault recovery built in.**
+
+## Features
+
+- **Fast and slow requests, one broker** — ephemeral jobs flow through the pipeline in-memory with no overhead; long-lived jobs persist after a configurable in-flight threshold.
+
+- **Horizontal scalability with consistency** — multiple broker instances share quota of shared resources safely and efficiently.
+
+- **Queuing and backpressure** — any pipeline step (check, transform, or target) can have a dispatcher with configurable ordering and concurrency.
+
+- **Persistence and recovery** — long-running jobs can be persisted after a configurable in-flight threshold, then reclaimed by live brokers after owner lease expiry.
+
+- **Pluggable actions** — additional actions can be created in Rust or Python.
 
 ---
 
-## ✨ Features
-
-- ⚡ **Fast and slow requests, one broker** — ephemeral jobs flow through the pipeline in-memory with no overhead; long-lived jobs persist after a configurable in-flight threshold.
-
-- 📡 **Horizontal scalability with consistency** — multiple broker instances share quota of shared resources safely and efficiently.
-
-- 🚦 **Queuing and backpressure** — any pipeline step (check, transform, or target) can have a dispatcher with configurable ordering and concurrency.
-
-- 🔀 **Push and pull targets** — push jobs directly to a target via HTTP, or use `target::remote` to hand off to an external worker pool.
-
-- 💾 **Persistence and recovery** — long-running jobs can be persisted after a configurable in-flight threshold, then reclaimed by live brokers after owner lease expiry.
-
-- 🔌 **Pluggable actions** — additional actions can be created in Rust or Python.
-
-- 📊 **Observable** — OpenTelemetry instrumentation with an opt-in, scrapeable Prometheus `/metrics` endpoint and configurable histogram buckets.
-
----
-
-## 🚀 Quick Start
+## Quick Start
 
 Define your routing policy in YAML:
 
@@ -166,7 +162,7 @@ See [Writing Custom Actions](docs/src/custom-actions.md) for the full Python API
 
 ---
 
-## 🔀 Programmatic Routes
+## Programmatic Routes
 
 The `routes` section in YAML is optional. When your application manages its own collection or
 tenant model, you can add routes at runtime via `Bits::add_route()`:
@@ -190,7 +186,7 @@ Routes added this way share registries and target instances with YAML-defined ro
 
 ---
 
-## 📐 Dispatcher Config
+## Dispatcher Config
 
 Any step in a pipeline can be given a dispatcher via a `dispatcher:` key. For named registry entries it sits alongside `type:`; for inline steps it is a sibling key of the action mapping:
 
@@ -234,7 +230,7 @@ routes:
 
 ---
 
-## 📊 Metrics
+## Metrics
 
 BITS is instrumented with [OpenTelemetry](https://opentelemetry.io/). Build with the
 `metrics-prometheus` feature (enabled by default in the `bits-server` binary) to install a
@@ -265,7 +261,7 @@ metric list and a Prometheus scrape config.
 
 ---
 
-## 🏗 Architecture
+## Architecture
 
 <p align="center">
   <img src="docs/src/images/bits_pipeline_tree.svg" alt="BITS pipeline routing architecture" width="100%">
@@ -275,7 +271,7 @@ See [design.md](design.md) for the full design specification.
 
 ---
 
-## 🧰 Developer hooks
+## Developer hooks
 
 This repo includes a pre-commit configuration that runs rustfmt automatically:
 

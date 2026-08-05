@@ -47,6 +47,7 @@ impl ShutdownSignal {
 pub(crate) struct ConnectedGuard {
     pollers: Arc<AtomicUsize>,
     deadline_nanos: Arc<AtomicU64>,
+    notify: Arc<tokio::sync::Notify>,
     reconnect_buffer: Duration,
 }
 
@@ -54,12 +55,15 @@ impl ConnectedGuard {
     pub(crate) fn new(
         pollers: Arc<AtomicUsize>,
         deadline_nanos: Arc<AtomicU64>,
+        notify: Arc<tokio::sync::Notify>,
         reconnect_buffer: Duration,
     ) -> Self {
         pollers.fetch_add(1, Ordering::Release);
+        notify.notify_waiters();
         Self {
             pollers,
             deadline_nanos,
+            notify,
             reconnect_buffer,
         }
     }
@@ -71,6 +75,7 @@ impl Drop for ConnectedGuard {
         self.deadline_nanos
             .store(job::instant_to_nanos(deadline), Ordering::Release);
         self.pollers.fetch_sub(1, Ordering::Release);
+        self.notify.notify_waiters();
     }
 }
 

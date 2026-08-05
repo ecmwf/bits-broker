@@ -585,6 +585,10 @@ impl<T: Send + 'static> Dispatcher<T> {
         let cancelled = job.cancelled.clone();
         let pollers = job.active_pollers.clone();
         let deadline_nanos = job.reconnect_deadline_nanos.clone();
+        let queued_cancelled = job.cancelled.clone();
+        let queued_pollers = job.active_pollers.clone();
+        let queued_deadline_nanos = job.reconnect_deadline_nanos.clone();
+        let change_notify = job.dispatch_notify.clone();
         Box::pin(async move {
             // Hard per-user admission cap: reject when the user already has
             // `max` jobs queued or in-flight (broker-local, and cross-broker via
@@ -652,16 +656,95 @@ impl<T: Send + 'static> Dispatcher<T> {
                     return Err(ActionError::ResourceError("dispatcher closed".to_string()));
                 }
                 map.insert(
-                    job_id,
+                    job_id.clone(),
                     (guard, guarded_work, reply_tx, Some(permit), Instant::now()),
                 );
             }
             metrics::record_queue_enqueued();
             queue.enqueue(job_to_enqueue);
 
-            reply_rx
-                .await
-                .map_err(|_| ActionError::ResourceError("dispatcher closed".into()))?
+            let mut reply_rx = reply_rx;
+            loop {
+                // Arm before checking state so cancellation or a poller change cannot
+                // be missed between the predicate and the wait below.
+                let changed = change_notify.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+
+                let queued_error = match guard {
+                    DispatchGuard::None => None,
+                    DispatchGuard::Cancelled => queued_cancelled
+                        .load(Ordering::Acquire)
+                        .then_some(ActionError::Cancelled),
+                    DispatchGuard::CancelledOrClientGone => {
+                        if queued_cancelled.load(Ordering::Acquire) {
+                            Some(ActionError::Cancelled)
+                        } else if !crate::job::is_client_present(
+                            &queued_pollers,
+                            &queued_deadline_nanos,
+                        ) {
+                            Some(ActionError::ClientGone)
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                if let Some(error) = queued_error {
+                    // The pending-map removal winner owns queued cleanup. If an
+                    // executor already removed this entry, worker ownership has begun
+                    // and existing in-flight behaviour must remain unchanged.
+                    let removal = {
+                        let mut map = pending.lock().unwrap_or_else(|p| p.into_inner());
+                        let still_abandoned = match error {
+                            ActionError::Cancelled => queued_cancelled.load(Ordering::Acquire),
+                            ActionError::ClientGone => !crate::job::is_client_present(
+                                &queued_pollers,
+                                &queued_deadline_nanos,
+                            ),
+                            _ => false,
+                        };
+                        still_abandoned.then(|| map.remove(&job_id))
+                    };
+
+                    match removal {
+                        Some(Some(item)) => {
+                            // Dropping the tombstoned pending item releases both the
+                            // queue-capacity permit and the local/store user-limit guard.
+                            drop(item);
+                            return Err(error);
+                        }
+                        Some(None) => {
+                            return reply_rx.await.map_err(|_| {
+                                ActionError::ResourceError("dispatcher closed".into())
+                            })?;
+                        }
+                        None => continue, // a poller reconnected at the deadline
+                    }
+                }
+
+                if guard == DispatchGuard::CancelledOrClientGone
+                    && queued_pollers.load(Ordering::Acquire) == 0
+                {
+                    let reconnect_deadline = tokio::time::Instant::from_std(
+                        crate::job::nanos_to_instant(queued_deadline_nanos.load(Ordering::Acquire)),
+                    );
+                    tokio::select! {
+                        result = &mut reply_rx => {
+                            return result.map_err(|_| ActionError::ResourceError("dispatcher closed".into()))?;
+                        }
+                        _ = &mut changed => {}
+                        _ = tokio::time::sleep_until(reconnect_deadline) => {}
+                    }
+                } else {
+                    tokio::select! {
+                        result = &mut reply_rx => {
+                            return result.map_err(|_| ActionError::ResourceError("dispatcher closed".into()))?;
+                        }
+                        _ = &mut changed => {}
+                    }
+                }
+            }
         })
     }
 }
@@ -854,5 +937,348 @@ mod user_limit_resolution_tests {
         );
         // Admin role raises the ceiling above the 0 default.
         assert_eq!(l.resolve(&user("test", "ada", &["admin"])).unwrap().1, 2);
+    }
+}
+
+#[cfg(test)]
+mod queued_cleanup_tests {
+    use super::*;
+    use crate::bits::Bits;
+    use crate::db::UserLimitStore;
+    use crate::db::memory::MemoryStore;
+    use crate::routing::switch::Switch;
+    use serde_json::json;
+
+    struct DormantExecutor;
+
+    impl<T: Send + 'static> Executor<T> for DormantExecutor {
+        fn start_scheduler(
+            &self,
+            _queue: Arc<dyn Queue>,
+            _pending: Arc<PendingMap<T>>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn user_job(id: &str) -> Job {
+        let mut job = Job::new_with_id(id.to_string(), json!({}));
+        *job.user_mut() = json!({
+            "auth": { "realm": "test", "username": "alice", "roles": [] }
+        });
+        job
+    }
+
+    fn limited_dispatcher(
+        queue: Arc<dyn Queue>,
+        store: Option<Arc<dyn crate::db::PersistenceStore>>,
+    ) -> Dispatcher<()> {
+        Dispatcher::new(queue, Arc::new(DormantExecutor), 1)
+            .unwrap()
+            .with_user_limit(
+                Some(UserLimitConfig {
+                    default: Some(1),
+                    realms: HashMap::new(),
+                }),
+                "target:test",
+                "broker-0",
+                store,
+            )
+    }
+
+    async fn wait_for(mut predicate: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !predicate() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("condition was not met");
+    }
+
+    fn test_bits(reconnect_buffer: Duration) -> Bits {
+        let mut bits = Bits::from_router_for_tests(
+            Switch::new(vec![]),
+            "bol-dev-0".to_string(),
+            "http://127.0.0.1:1/job".to_string(),
+            Duration::from_millis(10),
+            None,
+            None,
+            Duration::from_secs(60),
+        );
+        bits.submit_context.reconnect_buffer = reconnect_buffer;
+        bits
+    }
+
+    #[tokio::test]
+    async fn queued_cancel_releases_user_slot_and_permit_before_fifo_tombstone_is_drained() {
+        let queue: Arc<dyn Queue> = Arc::new(FifoQueue::new());
+        let dispatcher = limited_dispatcher(queue.clone(), None);
+
+        let first = user_job("first");
+        let first_task = tokio::spawn(dispatcher.dispatch(
+            &first,
+            DispatchGuard::Cancelled,
+            Box::pin(async { Ok(()) }),
+        ));
+        wait_for(|| dispatcher.pending.lock().unwrap().contains_key("first")).await;
+
+        first.request_cancel();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(200), first_task)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ActionError::Cancelled)
+        ));
+        assert_eq!(dispatcher.admission.available_permits(), 1);
+
+        let second = user_job("second");
+        let second_task = tokio::spawn(dispatcher.dispatch(
+            &second,
+            DispatchGuard::Cancelled,
+            Box::pin(async { Ok(()) }),
+        ));
+        wait_for(|| dispatcher.pending.lock().unwrap().contains_key("second")).await;
+
+        let stale = queue.dequeue().await.unwrap();
+        assert_eq!(stale.id, "first");
+        assert!(
+            dispatcher
+                .pending
+                .lock()
+                .unwrap()
+                .remove(&stale.id)
+                .is_none(),
+            "cancelled queue entry must be a harmless tombstone"
+        );
+
+        let live = queue.dequeue().await.unwrap();
+        assert_eq!(live.id, "second");
+        let (_guard, work, reply_tx, permit, _) =
+            dispatcher.pending.lock().unwrap().remove(&live.id).unwrap();
+        drop(permit);
+        let result = work.await;
+        reply_tx.send(result).unwrap();
+        assert!(second_task.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn queued_cancel_releases_persistence_backed_user_slot() {
+        let queue: Arc<dyn Queue> = Arc::new(FifoQueue::new());
+        let store = Arc::new(MemoryStore::new());
+        let persistence: Arc<dyn crate::db::PersistenceStore> = store.clone();
+        let dispatcher = limited_dispatcher(queue, Some(persistence));
+
+        let first = user_job("stored-first");
+        let task = tokio::spawn(dispatcher.dispatch(
+            &first,
+            DispatchGuard::Cancelled,
+            Box::pin(async { Ok(()) }),
+        ));
+        wait_for(|| {
+            dispatcher
+                .pending
+                .lock()
+                .unwrap()
+                .contains_key("stored-first")
+        })
+        .await;
+        assert_eq!(
+            store
+                .list_user_slots("target:test", "test\u{1f}alice")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        first.request_cancel();
+        assert!(matches!(task.await.unwrap(), Err(ActionError::Cancelled)));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if store
+                    .list_user_slots("target:test", "test\u{1f}alice")
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("asynchronous store slot release did not complete");
+
+        let second = user_job("stored-second");
+        let second_task = tokio::spawn(dispatcher.dispatch(
+            &second,
+            DispatchGuard::Cancelled,
+            Box::pin(async { Ok(()) }),
+        ));
+        wait_for(|| {
+            dispatcher
+                .pending
+                .lock()
+                .unwrap()
+                .contains_key("stored-second")
+        })
+        .await;
+        second.request_cancel();
+        assert!(matches!(
+            second_task.await.unwrap(),
+            Err(ActionError::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_pending_insert_is_observed_without_a_missed_wakeup() {
+        let queue: Arc<dyn Queue> = Arc::new(FifoQueue::new());
+        let dispatcher = limited_dispatcher(queue, None);
+        let job = user_job("already-cancelled");
+        job.request_cancel();
+
+        let result = dispatcher
+            .dispatch(&job, DispatchGuard::Cancelled, Box::pin(async { Ok(()) }))
+            .await;
+        assert!(matches!(result, Err(ActionError::Cancelled)));
+        assert!(dispatcher.pending.lock().unwrap().is_empty());
+        assert_eq!(dispatcher.admission.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn cost_weighted_queue_skips_cancelled_tombstone() {
+        let queue: Arc<dyn Queue> = Arc::new(CostWeightedQueue::new());
+        let dispatcher = limited_dispatcher(queue.clone(), None);
+        let mut job = user_job("weighted-cancelled");
+        job.metadata_mut()["cost"] = json!(7);
+        job.set_reconnect_deadline_for_test(Instant::now() + Duration::from_secs(1));
+
+        let task = tokio::spawn(dispatcher.dispatch(
+            &job,
+            DispatchGuard::CancelledOrClientGone,
+            Box::pin(async { Ok(()) }),
+        ));
+        wait_for(|| {
+            dispatcher
+                .pending
+                .lock()
+                .unwrap()
+                .contains_key("weighted-cancelled")
+        })
+        .await;
+        job.request_cancel();
+        assert!(matches!(task.await.unwrap(), Err(ActionError::Cancelled)));
+
+        let stale = queue.dequeue().await.unwrap();
+        assert_eq!(stale.id, "weighted-cancelled");
+        assert!(
+            dispatcher
+                .pending
+                .lock()
+                .unwrap()
+                .remove(&stale.id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_submit_presence_and_disconnect_deadline_control_queued_cleanup() {
+        let reconnect_buffer = Duration::from_millis(30);
+        let bits = Arc::new(test_bits(reconnect_buffer));
+        let job = Arc::new(user_job("submit-poller"));
+        job.set_reconnect_deadline_for_test(Instant::now());
+        bits.submit_context.jobs.insert(job.id.clone(), job.clone());
+
+        let poll_bits = bits.clone();
+        let submit_poll = tokio::spawn(async move {
+            poll_bits
+                .poll_submit("submit-poller", Duration::from_secs(1))
+                .await
+        });
+        wait_for(|| job.active_pollers.load(Ordering::Acquire) == 1).await;
+
+        let queue: Arc<dyn Queue> = Arc::new(FifoQueue::new());
+        let dispatcher = limited_dispatcher(queue, None);
+        let dispatch_task = tokio::spawn(dispatcher.dispatch(
+            &job,
+            DispatchGuard::CancelledOrClientGone,
+            Box::pin(async { Ok(()) }),
+        ));
+        wait_for(|| {
+            dispatcher
+                .pending
+                .lock()
+                .unwrap()
+                .contains_key("submit-poller")
+        })
+        .await;
+        tokio::time::sleep(reconnect_buffer * 2).await;
+        assert!(
+            !dispatch_task.is_finished(),
+            "the live submit poll must count as client presence"
+        );
+
+        submit_poll.abort();
+        assert!(submit_poll.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            tokio::time::timeout(reconnect_buffer * 4, dispatch_task)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ActionError::ClientGone)
+        ));
+        assert_eq!(dispatcher.admission.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn normal_poll_reconnect_inside_buffer_prevents_abandonment() {
+        let reconnect_buffer = Duration::from_millis(80);
+        let bits = Arc::new(test_bits(reconnect_buffer));
+        let job = Arc::new(user_job("reconnected"));
+        bits.submit_context.jobs.insert(job.id.clone(), job.clone());
+
+        let submit_bits = bits.clone();
+        let submit_poll = tokio::spawn(async move {
+            submit_bits
+                .poll_submit("reconnected", Duration::from_secs(1))
+                .await
+        });
+        wait_for(|| job.active_pollers.load(Ordering::Acquire) == 1).await;
+
+        let queue: Arc<dyn Queue> = Arc::new(FifoQueue::new());
+        let dispatcher = limited_dispatcher(queue, None);
+        let dispatch_task = tokio::spawn(dispatcher.dispatch(
+            &job,
+            DispatchGuard::CancelledOrClientGone,
+            Box::pin(async { Ok(()) }),
+        ));
+
+        submit_poll.abort();
+        assert!(submit_poll.await.unwrap_err().is_cancelled());
+        wait_for(|| job.active_pollers.load(Ordering::Acquire) == 0).await;
+        tokio::time::sleep(reconnect_buffer / 4).await;
+
+        let get_bits = bits.clone();
+        let get_poll = tokio::spawn(async move {
+            get_bits
+                .poll("reconnected", Some(Duration::from_secs(1)))
+                .await
+        });
+        wait_for(|| job.active_pollers.load(Ordering::Acquire) == 1).await;
+        tokio::time::sleep(reconnect_buffer).await;
+        assert!(
+            !dispatch_task.is_finished(),
+            "a normal poll reconnect must supersede the previous deadline"
+        );
+
+        job.request_cancel();
+        assert!(matches!(
+            dispatch_task.await.unwrap(),
+            Err(ActionError::Cancelled)
+        ));
+        get_poll.abort();
+        assert!(get_poll.await.unwrap_err().is_cancelled());
     }
 }

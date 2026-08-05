@@ -92,7 +92,7 @@ pub struct Job {
     /// Set by `Bits::cancel()`. Checked in the pipeline before each action.
     #[serde(skip, default = "default_cancelled")]
     pub(crate) cancelled: Arc<AtomicBool>,
-    /// Number of active `Bits::poll()` calls for this job (refcount, not boolean).
+    /// Number of active submit or normal polls for this job (refcount, not boolean).
     #[serde(skip, default = "default_active_pollers")]
     pub(crate) active_pollers: Arc<AtomicUsize>,
     /// Deadline by which the client must reconnect after a poll completes.
@@ -112,6 +112,9 @@ pub struct Job {
     /// Wakes waiting pollers when either status advances or the result is ready.
     #[serde(skip)]
     pub(crate) notify: Arc<Notify>,
+    /// Wakes queued dispatchers when cancellation or client presence changes.
+    #[serde(skip)]
+    pub(crate) dispatch_notify: Arc<Notify>,
 }
 
 impl Job {
@@ -136,6 +139,7 @@ impl Job {
             persisted: AtomicBool::new(false),
             result: Mutex::new(None),
             notify: Arc::new(Notify::new()),
+            dispatch_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -155,12 +159,19 @@ impl Job {
             persisted: AtomicBool::new(false),
             result: Mutex::new(None),
             notify: Arc::new(Notify::new()),
+            dispatch_notify: Arc::new(Notify::new()),
         }
     }
 
     /// Returns whether cancellation has been requested for this job.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Request cancellation and wake dispatchers waiting while this job is queued.
+    pub(crate) fn request_cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.dispatch_notify.notify_waiters();
     }
 
     pub fn client_present(&self) -> bool {
@@ -218,6 +229,7 @@ impl Clone for Job {
             result: Mutex::new(None),
             // Status and result changes wake the same submitted-job pollers.
             notify: self.notify.clone(),
+            dispatch_notify: self.dispatch_notify.clone(),
         }
     }
 }

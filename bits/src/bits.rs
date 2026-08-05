@@ -379,7 +379,7 @@ impl Bits {
     /// Cancellation is best-effort and is observed at action boundaries.
     pub fn cancel(&self, id: &str) -> bool {
         if let Some(job) = self.submit_context.jobs.get(id) {
-            job.cancelled.store(true, Ordering::Release);
+            job.request_cancel();
             true
         } else {
             false
@@ -586,6 +586,7 @@ impl Bits {
     /// Unlike [`Bits::poll`], this is a purely local operation — the job was
     /// just accepted by this broker, so no proxy or durable-recovery path is
     /// needed.
+    /// It counts as client presence for the full lifetime of this future.
     ///
     /// - A **failure** result (produced during admission, before the job
     ///   reached a worker) is taken and returned as [`PollOutcome::Ready`] so
@@ -603,6 +604,12 @@ impl Bits {
         let Some(job) = self.submit_context.jobs.get(id).map(|r| r.clone()) else {
             return PollOutcome::NotFound;
         };
+        let _guard = ConnectedGuard::new(
+            job.active_pollers.clone(),
+            job.reconnect_deadline_nanos.clone(),
+            job.dispatch_notify.clone(),
+            self.submit_context.reconnect_buffer,
+        );
         let deadline = tokio::time::Instant::now() + timeout;
 
         loop {
@@ -647,6 +654,7 @@ impl Bits {
         let _guard = ConnectedGuard::new(
             job.active_pollers.clone(),
             job.reconnect_deadline_nanos.clone(),
+            job.dispatch_notify.clone(),
             self.submit_context.reconnect_buffer,
         );
 

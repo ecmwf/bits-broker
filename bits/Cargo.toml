@@ -52,6 +52,10 @@ rand = "0.8"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+# test-util enables tokio::time::pause/advance and #[tokio::test(start_paused
+# = true)], used to deterministically test timeout behaviour (e.g.
+# reclaim_within in runtime/maintenance.rs) without real wall-clock sleeps.
+tokio = { version = "1.46.1", features = ["test-util"] }
 
 [[bench]]
 name = "pipelines"

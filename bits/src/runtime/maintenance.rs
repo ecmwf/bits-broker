@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::db::PersistenceStore;
+use crate::db::{DbError, PersistenceStore};
 use crate::job::{self, Job};
 
 /// Shared shutdown signal that can wake blocked threads immediately.
@@ -150,17 +150,93 @@ pub(crate) fn start_sweeper(
             // Reclaim per-user admission slots left behind by dead brokers (a
             // broker that crashed without releasing its guard). Owner liveness
             // is derived from broker leases inside the store.
+            //
+            // Bounded: under extreme leaked-entry bloat a full-bucket scan
+            // can degrade by orders of magnitude (a NATS-backed store's
+            // `keys()`-style scan slows sharply once the bucket far exceeds
+            // the client's subscription buffer). A single slow cycle must not
+            // block this sweeper thread (and the durable job cleanup above,
+            // which shares this loop): give up and retry on the next sweep.
             if let (Some(store), Some(rt)) = (&job_store, &runtime) {
-                match rt.block_on(store.reclaim_user_slots()) {
-                    Ok(n) if n > 0 => {
+                match rt.block_on(reclaim_within(store.reclaim_user_slots(), RECLAIM_TIMEOUT)) {
+                    ReclaimOutcome::Reclaimed(n) if n > 0 => {
                         tracing::debug!(reclaimed = n, "sweeper reclaimed user-limit slots")
                     }
-                    Ok(_) => {}
-                    Err(err) => {
+                    ReclaimOutcome::Reclaimed(_) => {}
+                    ReclaimOutcome::Failed(err) => {
                         tracing::debug!(error = %err, "sweeper user-limit reclaim failed")
+                    }
+                    ReclaimOutcome::TimedOut => {
+                        tracing::warn!(
+                            timeout = ?RECLAIM_TIMEOUT,
+                            "sweeper user-limit reclaim timed out; will retry next sweep"
+                        )
                     }
                 }
             }
         }
     })
+}
+
+/// Bound on a single `reclaim_user_slots` sweep cycle (see the call site in
+/// [`start_sweeper`] for why this exists). Comfortably below the minimum
+/// realistic `sweep_interval` so a timed-out cycle never overlaps the next
+/// one.
+const RECLAIM_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Outcome of a single bounded reclaim attempt.
+#[derive(Debug)]
+pub(crate) enum ReclaimOutcome {
+    Reclaimed(u64),
+    Failed(DbError),
+    TimedOut,
+}
+
+/// Runs `fut` (a `reclaim_user_slots` call) but gives up after `timeout`
+/// rather than blocking indefinitely. Generic over the future (rather than
+/// taking a `&dyn PersistenceStore` directly) so it is independently
+/// testable with a synthetic future instead of a real backend.
+pub(crate) async fn reclaim_within<F>(fut: F, timeout: Duration) -> ReclaimOutcome
+where
+    F: std::future::Future<Output = Result<u64, DbError>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(n)) => ReclaimOutcome::Reclaimed(n),
+        Ok(Err(e)) => ReclaimOutcome::Failed(e),
+        Err(_) => ReclaimOutcome::TimedOut,
+    }
+}
+
+#[cfg(test)]
+mod reclaim_within_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn returns_reclaimed_count_on_success() {
+        let outcome = reclaim_within(async { Ok(3) }, Duration::from_secs(1)).await;
+        assert!(matches!(outcome, ReclaimOutcome::Reclaimed(3)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn propagates_backend_errors() {
+        let outcome = reclaim_within(
+            async { Err(DbError::Backend("boom".to_string())) },
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(outcome, ReclaimOutcome::Failed(DbError::Backend(msg)) if msg == "boom"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn times_out_instead_of_blocking_forever_on_a_stuck_scan() {
+        let start = tokio::time::Instant::now();
+        // Stands in for a NATS scan pathologically slowed by bucket bloat:
+        // a future that never resolves on its own.
+        let never = std::future::pending::<Result<u64, DbError>>();
+        let outcome = reclaim_within(never, Duration::from_secs(1)).await;
+        assert!(matches!(outcome, ReclaimOutcome::TimedOut));
+        // Virtual time (paused runtime): must return at ~the timeout, not
+        // hang indefinitely.
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
 }

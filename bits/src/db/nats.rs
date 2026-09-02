@@ -253,56 +253,82 @@ impl NatsStore {
         Ok(())
     }
 
-    pub(crate) async fn list_user_slots_nats(
-        &self,
-        scope: &str,
-        user: &str,
-    ) -> Result<Vec<UserLimitEntry>, DbError> {
+    /// Fetch the *current* set of entries matching `key_pattern` (a KV key
+    /// pattern, e.g. `ul.<scope>.<user>.>` or `>` for the whole bucket) in a
+    /// single server-side-filtered streaming call.
+    ///
+    /// Replaces the previous `store.keys()` + one `store.entry()` round trip
+    /// per key used by both `list_user_slots_nats` and
+    /// `reclaim_user_slots_nats`, which had two compounding problems:
+    ///
+    /// 1. `store.keys()` has no server-side prefix filter — it subscribes to
+    ///    the *entire* bucket and relies on client-side filtering, so a scan
+    ///    for one user's ~1-3 slots was O(total bucket size).
+    /// 2. Draining that stream one key at a time with a synchronous `entry()`
+    ///    RPC between items is slow enough relative to how fast JetStream
+    ///    pushes a `LastPerSubject` replay that the client's `Ordered`
+    ///    consumer repeatedly detects a sequence gap (buffer overflow) and
+    ///    resubscribes — a self-healing but pathologically slow retry storm
+    ///    that flooded logs with `Event::SlowConsumer`.
+    ///
+    /// A single `watch_with_history` call filtered server-side to
+    /// `key_pattern`, carrying full entry values, fixes both: a per-user
+    /// pattern only ever returns that user's own entries regardless of bucket
+    /// size, and even the whole-bucket pattern is one streaming RPC instead
+    /// of N+1 synchronous ones.
+    async fn scan_current_entries(
+        store: &kv::Store,
+        key_pattern: &str,
+    ) -> Result<Vec<kv::Entry>, DbError> {
         use futures::StreamExt;
-        let store = self.user_limits().await?;
-        let prefix = Self::user_slot_prefix(scope, user);
-        let mut keys = store
-            .keys()
+        let mut watch = store
+            .watch_with_history(key_pattern)
             .await
-            .map_err(|e| DbError::Backend(format!("list user slots: {e}")))?;
+            .map_err(|e| DbError::Backend(format!("watch {key_pattern}: {e}")))?;
         let mut out = Vec::new();
-        while let Some(k) = keys.next().await {
-            let k = k.map_err(|e| DbError::Backend(format!("user slot key: {e}")))?;
-            if !k.starts_with(&prefix) {
-                continue;
-            }
-            if let Some(e) = store
-                .entry(&k)
-                .await
-                .map_err(|e| DbError::Backend(format!("get user slot entry: {e}")))?
-                && e.operation == kv::Operation::Put
-            {
-                let mut ent: UserLimitEntry = Self::deserialize(&e.value)?;
-                ent.seq = e.revision; // store-monotonic creation order
-                out.push(ent);
+        // `watch_with_history` is a live tail; stop once the initial
+        // historical replay catches up to "now". The crate sets
+        // `seen_current` at that point (and keeps it set), so the first entry
+        // with `seen_current == true` is the end of the snapshot.
+        while let Some(entry) = watch.next().await {
+            let entry = entry.map_err(|e| DbError::Backend(format!("watch entry: {e}")))?;
+            let done = entry.seen_current;
+            out.push(entry);
+            if done {
+                break;
             }
         }
         Ok(out)
     }
 
+    pub(crate) async fn list_user_slots_nats(
+        &self,
+        scope: &str,
+        user: &str,
+    ) -> Result<Vec<UserLimitEntry>, DbError> {
+        let store = self.user_limits().await?;
+        let prefix = Self::user_slot_prefix(scope, user);
+        let entries = Self::scan_current_entries(store, &format!("{prefix}>")).await?;
+        let mut out = Vec::new();
+        for e in entries {
+            if e.operation != kv::Operation::Put {
+                continue;
+            }
+            let mut ent: UserLimitEntry = Self::deserialize(&e.value)?;
+            ent.seq = e.revision; // store-monotonic creation order
+            out.push(ent);
+        }
+        Ok(out)
+    }
+
     pub(crate) async fn reclaim_user_slots_nats(&self) -> Result<u64, DbError> {
-        use futures::StreamExt;
+        const ALL_KEYS: &str = ">";
         let now = Utc::now();
         // Live owners = brokers with an unexpired lease.
         let leases = self.leases().await?;
         let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut lkeys = leases
-            .keys()
-            .await
-            .map_err(|e| DbError::Backend(format!("list leases: {e}")))?;
-        while let Some(k) = lkeys.next().await {
-            let k = k.map_err(|e| DbError::Backend(format!("lease key: {e}")))?;
-            if let Some(e) = leases
-                .entry(&k)
-                .await
-                .map_err(|e| DbError::Backend(format!("get lease entry: {e}")))?
-                && e.operation == kv::Operation::Put
-            {
+        for e in Self::scan_current_entries(leases, ALL_KEYS).await? {
+            if e.operation == kv::Operation::Put {
                 let rec: BrokerLeaseRecord = Self::deserialize(&e.value)?;
                 if rec.lease_until > now {
                     live.insert(rec.broker_id);
@@ -312,21 +338,12 @@ impl NatsStore {
 
         let ul = self.user_limits().await?;
         let mut removed = 0u64;
-        let mut ukeys = ul
-            .keys()
-            .await
-            .map_err(|e| DbError::Backend(format!("list user slots for reclaim: {e}")))?;
-        while let Some(k) = ukeys.next().await {
-            let k = k.map_err(|e| DbError::Backend(format!("user slot key: {e}")))?;
+        for e in Self::scan_current_entries(ul, ALL_KEYS).await? {
+            let k = &e.key;
             if !k.starts_with("ul.") {
                 continue;
             }
-            if let Some(e) = ul
-                .entry(&k)
-                .await
-                .map_err(|e| DbError::Backend(format!("get user slot entry: {e}")))?
-                && e.operation == kv::Operation::Put
-            {
+            if e.operation == kv::Operation::Put {
                 let ent: UserLimitEntry = Self::deserialize(&e.value)?;
                 if !live.contains(&ent.owner_broker_id) {
                     ul.purge(&k)

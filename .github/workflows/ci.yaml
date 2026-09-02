@@ -46,8 +46,56 @@ jobs:
           unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
           cargo test --workspace --exclude bits-py -- --test-threads=1
 
-      - name: Compile-check nats-gated tests
+      - name: Cache nats-server binary
+        id: nats-server-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/nats-server-bin
+          key: nats-server-v2.11.4-linux-amd64
+
+      - name: Install nats-server
+        # Real JetStream server for `nats`-gated tests (e.g.
+        # user_limit_nats.rs, user_limit_leak_nats.rs, recovery_nats.rs) —
+        # see ensure_nats_server() in tests/common/recovery.rs, which spawns
+        # this binary per test process via BITS_NATS_BIN.
+        run: |
+          mkdir -p /tmp/nats-server-bin
+          if [ ! -x /tmp/nats-server-bin/nats-server ]; then
+            curl -fsSL https://github.com/nats-io/nats-server/releases/download/v2.11.4/nats-server-v2.11.4-linux-amd64.tar.gz \
+              | tar -xz -C /tmp
+            cp /tmp/nats-server-v2.11.4-linux-amd64/nats-server /tmp/nats-server-bin/nats-server
+          fi
+          sudo cp /tmp/nats-server-bin/nats-server /usr/local/bin/nats-server
+          sudo chmod +x /usr/local/bin/nats-server
+          nats-server -v
+
+      - name: Start a shared nats-server on :4222
+        # Most `nats`-gated test files self-spawn a private nats-server via
+        # ensure_nats_server() (tests/common/recovery.rs), but a couple of
+        # older ones (broker_slot_nats.rs, user_limit_nats.rs) default to a
+        # fixed nats://127.0.0.1:4222 instead. Provide that here rather than
+        # rewriting them.
+        run: |
+          nats-server -js -p 4222 -sd "$(mktemp -d)" > /tmp/nats-server-4222.log 2>&1 &
+          for _ in $(seq 1 50); do
+            nc -z 127.0.0.1 4222 && exit 0
+            sleep 0.1
+          done
+          echo "nats-server on :4222 did not come up" >&2
+          cat /tmp/nats-server-4222.log >&2
+          exit 1
+
+      - name: Run nats-gated tests
         # The `nats` feature is off by default, so `nats`-gated test files
-        # (e.g. user_limit_nats.rs) are normally excluded from the build and
-        # would not catch API changes. This compiles them without a server.
-        run: cargo test -p bits --features nats --no-run
+        # are normally excluded from the default `cargo test --workspace`
+        # run above and would not catch API changes or behavioural
+        # regressions. Run them here against a real JetStream server (each
+        # test binary spawns/reuses its own instance via ensure_nats_server(),
+        # or falls back to the shared one on :4222 started above) instead of
+        # only compile-checking them, so regressions like the one in
+        # bits/tests/user_limit_leak_nats.rs are actually caught.
+        env:
+          NO_PROXY: "127.0.0.1,localhost"
+        run: |
+          unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
+          cargo test -p bits --features nats -- --test-threads=1

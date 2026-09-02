@@ -23,6 +23,12 @@ pub struct NatsStore {
     lease_ttl: Duration,
     num_replicas: usize,
     connect_timeout: Duration,
+    /// Override for the client's per-subscription mpsc buffer (`async-nats`
+    /// default 65,536 messages). `None` keeps the crate default. Test-only
+    /// knob for reproducing slow-consumer behaviour at small scale; the
+    /// production scan path (see `list_user_slots_nats`) no longer depends on
+    /// it for correctness.
+    subscription_capacity: Option<usize>,
     stores: OnceCell<(kv::Store, kv::Store, kv::Store)>,
 }
 
@@ -44,8 +50,17 @@ impl NatsStore {
             lease_ttl,
             num_replicas,
             connect_timeout,
+            subscription_capacity: None,
             stores: OnceCell::new(),
         }
+    }
+
+    /// Override the client's per-subscription buffer size. Test-only;
+    /// production should leave this at the crate default (or raise it, never
+    /// lower it).
+    pub fn with_subscription_capacity(mut self, capacity: usize) -> Self {
+        self.subscription_capacity = Some(capacity);
+        self
     }
 
     async fn stores(&self) -> Result<&(kv::Store, kv::Store, kv::Store), DbError> {
@@ -53,9 +68,17 @@ impl NatsStore {
         self.stores
             .get_or_try_init(|| async {
                 tokio::time::timeout(timeout, async {
-                    let client = async_nats::connect(&self.url)
-                        .await
-                        .map_err(|e| DbError::Backend(format!("NATS connect failed: {e}")))?;
+                    let client = match self.subscription_capacity {
+                        Some(capacity) => {
+                            async_nats::connect_with_options(
+                                &self.url,
+                                async_nats::ConnectOptions::new().subscription_capacity(capacity),
+                            )
+                            .await
+                        }
+                        None => async_nats::connect(&self.url).await,
+                    }
+                    .map_err(|e| DbError::Backend(format!("NATS connect failed: {e}")))?;
                     let js = jetstream::new(client);
 
                     let jobs = Self::get_or_create_bucket(

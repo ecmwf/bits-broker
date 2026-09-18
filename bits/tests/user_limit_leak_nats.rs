@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bits::db::PersistenceStore;
+use bits::db::UserLimitStore;
 use bits::db::nats::NatsStore;
 use common::recovery::ensure_nats_server;
 
@@ -263,4 +264,93 @@ async fn reclaim_on_a_genuinely_empty_bucket_returns_fast_and_zero() {
         removed, 0,
         "nothing to reclaim in a freshly created, empty bucket"
     );
+}
+
+/// Regression test for the `bits-leases-userlimits` bucket-bloat root cause
+/// itself (not the scan-storm symptom above): `release_user_slot_nats`'s
+/// `purge()` call left a permanent tombstone message in the underlying
+/// JetStream stream, because the bucket had no `max_age`/TTL — unlike the
+/// sibling `bits-leases` bucket, which does. Every correctly-completed job
+/// left one message behind forever; growth was proportional to total
+/// historical throughput, not to any leak or error rate. Confirmed directly
+/// against lumi-prod's real bucket: 278 of 292 current stream messages were
+/// already-deleted `KV-Operation: PURGE` tombstones from successful
+/// releases, not stuck live entries.
+///
+/// Fixed via per-message TTL (`purge_with_ttl`, `kv::Config.limit_markers`)
+/// so a tombstone self-expires instead of living forever — verified here
+/// against the *raw* stream message count (`debug_user_limits_stream_message_count`),
+/// which is the only way to observe a tombstone's continued physical
+/// presence; the KV-level API (`list_user_slots`) correctly reports a
+/// released slot as gone either way and can't tell the two cases apart.
+#[tokio::test]
+async fn released_slot_tombstone_self_expires_instead_of_accumulating_forever() {
+    let url = ensure_nats_server();
+    let unique = uuid::Uuid::new_v4();
+    let store = NatsStore::new(
+        url,
+        format!("leak-jobs-{unique}"),
+        format!("leak-leases-{unique}"),
+        Duration::from_secs(30),
+        1,
+        Duration::from_secs(10),
+    )
+    .with_user_limit_tombstone_ttl(Duration::from_secs(1));
+
+    UserLimitStore::reserve_user_slot(&store, SCOPE, "erin", "job-erin-1", "broker-a")
+        .await
+        .expect("reserve erin's slot");
+    assert_eq!(
+        store
+            .debug_user_limits_stream_message_count()
+            .await
+            .unwrap(),
+        1,
+        "one live reservation message expected before release"
+    );
+
+    UserLimitStore::release_user_slot(&store, SCOPE, "erin", "job-erin-1")
+        .await
+        .expect("release erin's slot");
+
+    // Immediately after release: the KV layer correctly reports it gone...
+    assert!(
+        store
+            .list_user_slots(SCOPE, "erin")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // ...but the purge tombstone itself is still a real, physical message in
+    // the stream at this point (this is the crux of the bug: without a TTL,
+    // it would stay this way forever).
+    assert_eq!(
+        store
+            .debug_user_limits_stream_message_count()
+            .await
+            .unwrap(),
+        1,
+        "the purge tombstone must still physically exist immediately after release"
+    );
+
+    // Wait past the (test-shortened) tombstone TTL and confirm NATS actually
+    // reclaims the message physically, not just logically.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let count = store
+            .debug_user_limits_stream_message_count()
+            .await
+            .unwrap();
+        if count == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "tombstone was not physically reclaimed within {:?} of its 1s TTL expiring \
+             (still {count} raw stream message(s)) — this is exactly the \
+             bits-leases-userlimits bucket-bloat root cause",
+            deadline.elapsed()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

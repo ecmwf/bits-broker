@@ -43,7 +43,7 @@ tower-service = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tikv-client = { version = "0.3", optional = true }
-async-nats = { version = "0.38", optional = true }
+async-nats = { version = "0.50", optional = true }
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", optional = true }
 opentelemetry-prometheus = { version = "0.32", optional = true }

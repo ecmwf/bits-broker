@@ -194,3 +194,73 @@ async fn reclaim_is_correct_despite_bucket_noise() {
         "carol's dead-broker entry should have been reclaimed, found {remaining:?}"
     );
 }
+
+/// Regression test for `nats-io/nats.rs#1376` ("KV::watch_with_history stop
+/// if store is empty"): upstream deliberately changed `watch_with_history`
+/// so it no longer terminates on its own when a pattern matches zero current
+/// keys — it just keeps waiting, forever, for a future write that may never
+/// come. That's the documented, correct behaviour for an open-ended watch,
+/// but `scan_current_entries` (backing both `list_user_slots_nats` and
+/// `reclaim_user_slots_nats`) used to depend on the *old*, since-reverted
+/// behaviour to know when a scan was done. Confirmed directly against a real
+/// `async-nats 0.50.0` client (vs. the pinned 0.38.0): with the old
+/// implementation this hangs indefinitely instead of returning empty.
+///
+/// Note these two tests do *not* fail against the pinned 0.38.0 even with
+/// the fix reverted — 0.38.0 still has the old (pre-#1376-fix) short-circuit
+/// baked in, so it happens to return fast today regardless. They exist to
+/// pin the desired behaviour explicitly and catch a *future* dependency bump
+/// silently reintroducing the hang, rather than as a red-then-green
+/// regression test against the currently pinned version.
+///
+/// `list_user_slots` for a user with zero entries must return fast and
+/// empty regardless of how much unrelated noise exists elsewhere in the
+/// bucket (mirroring the strict-mode admission path, which can legitimately
+/// query a user who has never reserved a slot).
+#[tokio::test]
+async fn list_user_slots_for_a_user_with_no_entries_returns_fast_and_empty() {
+    let store = small_capacity_store();
+
+    seed_unrelated_noise(&store, NOISE_ENTRIES, "noise-broker").await;
+
+    // "dave" never reserved anything: this pattern matches zero current keys.
+    let bound = Duration::from_secs(10);
+    let result = tokio::time::timeout(bound, store.list_user_slots(SCOPE, "dave")).await;
+    let entries = match result {
+        Ok(res) => res.expect("list_user_slots must not error"),
+        Err(_) => panic!(
+            "list_user_slots(dave) did not complete within {bound:?} — a pattern \
+             matching zero current keys must not hang (nats-io/nats.rs#1376)"
+        ),
+    };
+
+    assert!(
+        entries.is_empty(),
+        "dave has no reservations, expected no entries, found {entries:?}"
+    );
+}
+
+/// Companion test for the whole-bucket reclaim sweep against a genuinely
+/// empty bucket — exactly the state `bits-leases-userlimits` is in right
+/// after a manual purge in production. The reclaim pattern (`ul.>`) matches
+/// zero current keys here, the same shape of query that hung indefinitely
+/// against a client without the zero-match probe fix.
+#[tokio::test]
+async fn reclaim_on_a_genuinely_empty_bucket_returns_fast_and_zero() {
+    let store = small_capacity_store();
+
+    let bound = Duration::from_secs(10);
+    let result = tokio::time::timeout(bound, store.reclaim_user_slots()).await;
+    let removed = match result {
+        Ok(res) => res.expect("reclaim_user_slots must not error"),
+        Err(_) => panic!(
+            "reclaim_user_slots did not complete within {bound:?} on an empty bucket — \
+             a pattern matching zero current keys must not hang (nats-io/nats.rs#1376)"
+        ),
+    };
+
+    assert_eq!(
+        removed, 0,
+        "nothing to reclaim in a freshly created, empty bucket"
+    );
+}

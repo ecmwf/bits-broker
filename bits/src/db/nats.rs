@@ -276,11 +276,41 @@ impl NatsStore {
     /// pattern only ever returns that user's own entries regardless of bucket
     /// size, and even the whole-bucket pattern is one streaming RPC instead
     /// of N+1 synchronous ones.
+    ///
+    /// Before doing that, a cheap subject-filtered `STREAM.INFO` probe checks
+    /// whether `key_pattern` currently matches *anything at all*. This is
+    /// deliberately not left to `watch_with_history` itself: that call only
+    /// reliably signals "caught up" (`seen_current`) once at least one
+    /// message is actually delivered, and relies on the client's `Watch`
+    /// stream short-circuiting immediately when the underlying consumer's
+    /// `num_pending` is already zero at creation time. That short-circuit is
+    /// an internal implementation detail, not a documented contract — and it
+    /// is not stable across client versions: confirmed empirically that a
+    /// newer `async-nats` release (0.50.0, vs. the pinned 0.38.0) dropped it,
+    /// so `watch_with_history` on a pattern matching zero current keys hangs
+    /// forever (idle heartbeats are exchanged internally but nothing is ever
+    /// surfaced to the stream). A zero-match pattern is not a rare case here:
+    /// the whole-bucket reclaim sweep (`ul.>`) hits it any time the bucket is
+    /// genuinely empty, e.g. right after a manual purge. The probe makes
+    /// correctness independent of that internal client behaviour rather than
+    /// relying on it, at the cost of one extra cheap RPC when there is at
+    /// least one match (the common case).
     async fn scan_current_entries(
         store: &kv::Store,
         key_pattern: &str,
     ) -> Result<Vec<kv::Entry>, DbError> {
         use futures::StreamExt;
+
+        let full_subject = format!("{}{key_pattern}", store.prefix);
+        let mut probe = store
+            .stream
+            .info_with_subjects(&full_subject)
+            .await
+            .map_err(|e| DbError::Backend(format!("info {key_pattern}: {e}")))?;
+        if probe.next().await.is_none() {
+            return Ok(Vec::new());
+        }
+
         let mut watch = store
             .watch_with_history(key_pattern)
             .await
@@ -289,7 +319,9 @@ impl NatsStore {
         // `watch_with_history` is a live tail; stop once the initial
         // historical replay catches up to "now". The crate sets
         // `seen_current` at that point (and keeps it set), so the first entry
-        // with `seen_current == true` is the end of the snapshot.
+        // with `seen_current == true` is the end of the snapshot. The probe
+        // above already guarantees at least one entry exists, so this loop is
+        // no longer relied upon to terminate on an empty match.
         while let Some(entry) = watch.next().await {
             let entry = entry.map_err(|e| DbError::Backend(format!("watch entry: {e}")))?;
             let done = entry.seen_current;

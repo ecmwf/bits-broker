@@ -295,7 +295,8 @@ async fn released_slot_tombstone_self_expires_instead_of_accumulating_forever() 
         1,
         Duration::from_secs(10),
     )
-    .with_user_limit_tombstone_ttl(Duration::from_secs(1));
+    .with_user_limit_tombstone_ttl(Duration::from_secs(1))
+    .with_user_limit_delete_marker_ttl(Duration::from_secs(1));
 
     UserLimitStore::reserve_user_slot(&store, SCOPE, "erin", "job-erin-1", "broker-a")
         .await
@@ -333,8 +334,10 @@ async fn released_slot_tombstone_self_expires_instead_of_accumulating_forever() 
         "the purge tombstone must still physically exist immediately after release"
     );
 
-    // Wait past the (test-shortened) tombstone TTL and confirm NATS actually
-    // reclaims the message physically, not just logically.
+    // Wait past the (test-shortened) tombstone TTL, and past the
+    // (test-shortened) delete-marker TTL left behind once the tombstone
+    // itself expires, and confirm NATS actually reclaims the message
+    // physically in the end, not just logically.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let count = store

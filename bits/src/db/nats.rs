@@ -31,6 +31,21 @@ use crate::db::{
 /// visible for a little while after the fact.
 const USER_LIMIT_TOMBSTONE_TTL: Duration = Duration::from_secs(600);
 
+/// How long a *delete marker* is kept once a per-message-TTL'd entry (i.e. a
+/// [`USER_LIMIT_TOMBSTONE_TTL`]-bounded purge tombstone) actually expires.
+///
+/// This is a distinct, secondary knob from `USER_LIMIT_TOMBSTONE_TTL`: it
+/// does nothing on its own (confirmed empirically -- a plain `purge()` with
+/// this alone enabled never expires) and only governs what NATS leaves
+/// behind *after* a TTL'd message expires, purely so a watcher/mirror can
+/// tell "this key expired" apart from "this key never existed". Nothing in
+/// `bits` currently relies on that distinction, so its value only affects
+/// how much longer a trace of a released slot lingers after the tombstone
+/// itself is gone -- defaulted to the same duration as the tombstone TTL for
+/// simplicity, independently overridable if that combined worst-case
+/// lifetime (currently ~2x this value) ever needs tuning separately.
+const USER_LIMIT_DELETE_MARKER_TTL: Duration = Duration::from_secs(600);
+
 pub struct NatsStore {
     url: String,
     jobs_bucket: String,
@@ -49,6 +64,8 @@ pub struct NatsStore {
     /// Test-only knob so tests can observe real tombstone expiry without
     /// waiting the production duration.
     user_limit_tombstone_ttl: Option<Duration>,
+    /// Override for [`USER_LIMIT_DELETE_MARKER_TTL`]. `None` keeps the default.
+    user_limit_delete_marker_ttl: Option<Duration>,
     stores: OnceCell<(kv::Store, kv::Store, kv::Store)>,
 }
 
@@ -72,6 +89,7 @@ impl NatsStore {
             connect_timeout,
             subscription_capacity: None,
             user_limit_tombstone_ttl: None,
+            user_limit_delete_marker_ttl: None,
             stores: OnceCell::new(),
         }
     }
@@ -95,6 +113,19 @@ impl NatsStore {
     fn user_limit_tombstone_ttl(&self) -> Duration {
         self.user_limit_tombstone_ttl
             .unwrap_or(USER_LIMIT_TOMBSTONE_TTL)
+    }
+
+    /// Override how long a delete marker lingers after a TTL'd entry expires
+    /// (see [`USER_LIMIT_DELETE_MARKER_TTL`]). Test-only; production should
+    /// leave this at the default.
+    pub fn with_user_limit_delete_marker_ttl(mut self, ttl: Duration) -> Self {
+        self.user_limit_delete_marker_ttl = Some(ttl);
+        self
+    }
+
+    fn user_limit_delete_marker_ttl(&self) -> Duration {
+        self.user_limit_delete_marker_ttl
+            .unwrap_or(USER_LIMIT_DELETE_MARKER_TTL)
     }
 
     /// Test-only: the *raw* JetStream message count backing the user-limits
@@ -164,16 +195,15 @@ impl NatsStore {
                     // survives broker restarts); reclaimed via broker leases.
                     //
                     // `limit_markers` enables per-message TTL on this bucket's
-                    // underlying stream (`allow_msg_ttl`), which
-                    // `release_user_slot_nats`/`reclaim_user_slots_nats` use
-                    // via `purge_with_ttl` so a completed job's purge
-                    // tombstone self-expires instead of accumulating forever
-                    // (see USER_LIMIT_TOMBSTONE_TTL doc comment). Its value
-                    // here bounds how long a *delete marker* left behind by a
-                    // TTL expiry itself lingers, purely for downstream
-                    // watcher observability — unrelated to admission
-                    // correctness, since it only ever applies after a slot
-                    // has already been released.
+                    // underlying stream (`allow_msg_ttl`) -- a hard
+                    // prerequisite for `purge_with_ttl` in
+                    // `release_user_slot_nats`/`reclaim_user_slots_nats` to
+                    // have any effect at all (confirmed empirically: without
+                    // it, `purge_with_ttl` fails since the stream doesn't
+                    // accept the TTL header). Its value here
+                    // (USER_LIMIT_DELETE_MARKER_TTL) is a distinct,
+                    // secondary knob from the tombstone TTL itself -- see its
+                    // doc comment.
                     let user_limits = Self::get_or_create_bucket(
                         &js,
                         kv::Config {
@@ -181,7 +211,7 @@ impl NatsStore {
                             history: 1,
                             num_replicas: self.num_replicas,
                             storage: async_nats::jetstream::stream::StorageType::Memory,
-                            limit_markers: Some(self.user_limit_tombstone_ttl()),
+                            limit_markers: Some(self.user_limit_delete_marker_ttl()),
                             ..Default::default()
                         },
                     )

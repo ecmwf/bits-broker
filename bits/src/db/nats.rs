@@ -15,6 +15,22 @@ use crate::db::{
     UserLimitEntry,
 };
 
+/// How long a `bits-leases-userlimits` purge tombstone is kept before NATS
+/// physically expires it (via per-message TTL, `purge_with_ttl`).
+///
+/// This only ever applies to a slot that has *already been released* --
+/// `reserve_user_slot_nats`'s `create()` call for the live entry carries no
+/// TTL, so an in-flight job's admission slot is never at risk of expiring
+/// early regardless of how long the job runs. Without this, every completed
+/// job leaves a permanent message in the stream (JetStream's KV `purge`
+/// leaves a tombstone behind; the stream's default `max_age` is unlimited),
+/// which is what caused the `bits-leases-userlimits` bucket-bloat incident
+/// (2026-08-21): growth proportional to total historical throughput, not to
+/// any leak or error rate. Chosen short relative to any realistic sweep
+/// interval / human-debugging window, long enough that a tombstone is still
+/// visible for a little while after the fact.
+const USER_LIMIT_TOMBSTONE_TTL: Duration = Duration::from_secs(600);
+
 pub struct NatsStore {
     url: String,
     jobs_bucket: String,
@@ -29,6 +45,10 @@ pub struct NatsStore {
     /// production scan path (see `list_user_slots_nats`) no longer depends on
     /// it for correctness.
     subscription_capacity: Option<usize>,
+    /// Override for [`USER_LIMIT_TOMBSTONE_TTL`]. `None` keeps the default.
+    /// Test-only knob so tests can observe real tombstone expiry without
+    /// waiting the production duration.
+    user_limit_tombstone_ttl: Option<Duration>,
     stores: OnceCell<(kv::Store, kv::Store, kv::Store)>,
 }
 
@@ -51,6 +71,7 @@ impl NatsStore {
             num_replicas,
             connect_timeout,
             subscription_capacity: None,
+            user_limit_tombstone_ttl: None,
             stores: OnceCell::new(),
         }
     }
@@ -61,6 +82,38 @@ impl NatsStore {
     pub fn with_subscription_capacity(mut self, capacity: usize) -> Self {
         self.subscription_capacity = Some(capacity);
         self
+    }
+
+    /// Override how long a released user-limit slot's purge tombstone is
+    /// kept before it self-expires (see [`USER_LIMIT_TOMBSTONE_TTL`]).
+    /// Test-only; production should leave this at the default.
+    pub fn with_user_limit_tombstone_ttl(mut self, ttl: Duration) -> Self {
+        self.user_limit_tombstone_ttl = Some(ttl);
+        self
+    }
+
+    fn user_limit_tombstone_ttl(&self) -> Duration {
+        self.user_limit_tombstone_ttl
+            .unwrap_or(USER_LIMIT_TOMBSTONE_TTL)
+    }
+
+    /// Test-only: the *raw* JetStream message count backing the user-limits
+    /// bucket's stream, bypassing the KV abstraction's "live value"
+    /// filtering (i.e. this includes not-yet-expired purge tombstones). The
+    /// higher-level KV API (`list_user_slots`, `nats kv info`, ...) can only
+    /// ever see whether a key is currently live or deleted -- it has no way
+    /// to observe whether a *deleted* key's tombstone still physically
+    /// occupies space in the stream, which is exactly what
+    /// `USER_LIMIT_TOMBSTONE_TTL` / `purge_with_ttl` need to be verified
+    /// against.
+    pub async fn debug_user_limits_stream_message_count(&self) -> Result<u64, DbError> {
+        let store = self.user_limits().await?;
+        let info = store
+            .stream
+            .info_with_subjects(format!("{}>", store.prefix))
+            .await
+            .map_err(|e| DbError::Backend(format!("stream info: {e}")))?;
+        Ok(info.info.state.messages)
     }
 
     async fn stores(&self) -> Result<&(kv::Store, kv::Store, kv::Store), DbError> {
@@ -109,6 +162,18 @@ impl NatsStore {
 
                     // Per-user admission entries. Memory storage (server-side,
                     // survives broker restarts); reclaimed via broker leases.
+                    //
+                    // `limit_markers` enables per-message TTL on this bucket's
+                    // underlying stream (`allow_msg_ttl`), which
+                    // `release_user_slot_nats`/`reclaim_user_slots_nats` use
+                    // via `purge_with_ttl` so a completed job's purge
+                    // tombstone self-expires instead of accumulating forever
+                    // (see USER_LIMIT_TOMBSTONE_TTL doc comment). Its value
+                    // here bounds how long a *delete marker* left behind by a
+                    // TTL expiry itself lingers, purely for downstream
+                    // watcher observability — unrelated to admission
+                    // correctness, since it only ever applies after a slot
+                    // has already been released.
                     let user_limits = Self::get_or_create_bucket(
                         &js,
                         kv::Config {
@@ -116,6 +181,7 @@ impl NatsStore {
                             history: 1,
                             num_replicas: self.num_replicas,
                             storage: async_nats::jetstream::stream::StorageType::Memory,
+                            limit_markers: Some(self.user_limit_tombstone_ttl()),
                             ..Default::default()
                         },
                     )
@@ -247,7 +313,10 @@ impl NatsStore {
     ) -> Result<(), DbError> {
         let store = self.user_limits().await?;
         store
-            .purge(&Self::user_slot_key(scope, user, job_id))
+            .purge_with_ttl(
+                &Self::user_slot_key(scope, user, job_id),
+                self.user_limit_tombstone_ttl(),
+            )
             .await
             .map_err(|e| DbError::Backend(format!("purge user slot: {e}")))?;
         Ok(())
@@ -378,7 +447,7 @@ impl NatsStore {
             if e.operation == kv::Operation::Put {
                 let ent: UserLimitEntry = Self::deserialize(&e.value)?;
                 if !live.contains(&ent.owner_broker_id) {
-                    ul.purge(&k)
+                    ul.purge_with_ttl(&k, self.user_limit_tombstone_ttl())
                         .await
                         .map_err(|e| DbError::Backend(format!("purge reclaimed slot: {e}")))?;
                     removed += 1;

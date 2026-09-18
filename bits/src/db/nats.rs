@@ -137,6 +137,61 @@ impl NatsStore {
     /// occupies space in the stream, which is exactly what
     /// `USER_LIMIT_TOMBSTONE_TTL` / `purge_with_ttl` need to be verified
     /// against.
+    /// Test-only: create the user-limits bucket using the *pre-TTL-fix*
+    /// shape (no `limit_markers`, i.e. `allow_msg_ttl` left off), to simulate
+    /// a bucket that already existed on a cluster before this fix shipped.
+    /// Must be called before any other method that touches `self` -- it
+    /// establishes its own connection and must win the race to create the
+    /// bucket first, so that this store's own (fixed) `stores()` call later
+    /// hits the create-already-exists branch and exercises
+    /// `get_or_create_bucket`'s reconciliation-via-update fallback, which is
+    /// exactly what a real upgrade needs to do (confirmed necessary against
+    /// a real pre-existing bucket on lumi-test, 2026-09-18: without it,
+    /// `purge_with_ttl` fails outright with "per-message TTL is disabled").
+    pub async fn debug_precreate_legacy_user_limits_bucket(&self) -> Result<(), DbError> {
+        self.debug_precreate_user_limits_bucket_with_storage(
+            async_nats::jetstream::stream::StorageType::Memory,
+        )
+        .await
+    }
+
+    /// Test-only: like [`Self::debug_precreate_legacy_user_limits_bucket`],
+    /// but deliberately using **File** storage -- a config `get_or_create_bucket`
+    /// cannot reconcile via `update_key_value` (NATS rejects storage-type
+    /// changes on an existing stream: "stream configuration update can not
+    /// change storage type", confirmed empirically). This simulates the
+    /// worst case where reconciliation itself fails (e.g. a config drift, or
+    /// any other reason `update_key_value` might not succeed), falling
+    /// through to a plain `get_key_value` that returns the stale,
+    /// TTL-disabled config -- exercising `purge_user_slot`'s fallback path
+    /// rather than the reconciliation path.
+    pub async fn debug_precreate_incompatible_user_limits_bucket(&self) -> Result<(), DbError> {
+        self.debug_precreate_user_limits_bucket_with_storage(
+            async_nats::jetstream::stream::StorageType::File,
+        )
+        .await
+    }
+
+    async fn debug_precreate_user_limits_bucket_with_storage(
+        &self,
+        storage: async_nats::jetstream::stream::StorageType,
+    ) -> Result<(), DbError> {
+        let client = async_nats::connect(&self.url)
+            .await
+            .map_err(|e| DbError::Backend(format!("NATS connect failed: {e}")))?;
+        let js = jetstream::new(client);
+        js.create_key_value(kv::Config {
+            bucket: self.user_limits_bucket.clone(),
+            history: 1,
+            num_replicas: self.num_replicas,
+            storage,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| DbError::Backend(format!("legacy user-limits bucket: {e}")))?;
+        Ok(())
+    }
+
     pub async fn debug_user_limits_stream_message_count(&self) -> Result<u64, DbError> {
         let store = self.user_limits().await?;
         let info = store
@@ -241,21 +296,83 @@ impl NatsStore {
         config: kv::Config,
     ) -> Result<kv::Store, String> {
         let bucket_name = config.bucket.clone();
-        match js.create_key_value(config).await {
+        match js.create_key_value(config.clone()).await {
             Ok(store) => Ok(store),
             Err(create_err) => {
+                // The bucket already exists (the common case after the first
+                // deploy). Reconcile its underlying stream config to match
+                // `config` via `update_key_value` -- this is required, not
+                // just best-effort: `create_key_value` only ever applies a
+                // config on first creation, so a bucket created before a
+                // config change (e.g. enabling `limit_markers`/`allow_msg_ttl`)
+                // would otherwise silently keep running with its stale
+                // config forever, causing `purge_with_ttl` to fail outright
+                // with "per-message TTL is disabled" (confirmed against a
+                // real pre-existing bucket on lumi-test, 2026-09-18).
+                // `update_stream` reconciles in place, no data loss.
                 tracing::debug!(
                     bucket = %bucket_name,
                     error = %create_err,
-                    "bucket create failed, attempting get"
+                    "bucket create failed, attempting update"
                 );
-                js.get_key_value(&bucket_name).await.map_err(|e| {
-                    format!(
-                        "bucket '{bucket_name}': create failed ({create_err}), get also failed: {e}"
-                    )
-                })
+                match js.update_key_value(config).await {
+                    Ok(store) => Ok(store),
+                    Err(update_err) => {
+                        tracing::warn!(
+                            bucket = %bucket_name,
+                            error = %update_err,
+                            "bucket update also failed, falling back to get (config may be stale)"
+                        );
+                        js.get_key_value(&bucket_name).await.map_err(|e| {
+                            format!(
+                                "bucket '{bucket_name}': create failed ({create_err}), update failed ({update_err}), get also failed: {e}"
+                            )
+                        })
+                    }
+                }
             }
         }
+    }
+
+    /// Purge a user-limit slot's key, preferring a self-expiring tombstone
+    /// (`purge_with_ttl`) but falling back to a plain, permanent `purge` if
+    /// that fails for *any* reason.
+    ///
+    /// This fallback is required for safe rollout, not just belt-and-braces:
+    /// on a bucket that predates this fix, `purge_with_ttl` fails outright
+    /// ("per-message TTL is disabled", NATS error code 10166) until the
+    /// underlying NATS server process is restarted -- `get_or_create_bucket`
+    /// reconciling the stream's config via `update_key_value` takes effect
+    /// in the stream's stored metadata immediately, but does not retroactively
+    /// arm that server process's own TTL-expiry tracking for the stream
+    /// (confirmed empirically against a real nats-server: the config read
+    /// back after the update correctly shows `allow_message_ttl: true`, yet
+    /// a subsequent `purge_with_ttl`'d message never expires until the
+    /// server process itself restarts, 2026-09-18). Without this fallback, a
+    /// slot that fails to release this way would stay live (still counted
+    /// against the user's cap) until the reclaim sweeper's dead-broker
+    /// cleanup happens to run -- and that path calls this same purge, so it
+    /// would fail for the identical reason, leaving the slot stuck
+    /// indefinitely (i.e. until an operator restarts NATS). That would make
+    /// this fix *more* disruptive during rollout than the bucket-bloat bug
+    /// it's meant to fix. With the fallback, a deploy onto a pre-existing
+    /// bucket is fully safe immediately: releases keep working exactly as
+    /// before (permanent tombstone) until NATS is restarted, at which point
+    /// TTL self-expiry starts working with no further app-side action.
+    async fn purge_user_slot(store: &kv::Store, key: &str, ttl: Duration) -> Result<(), DbError> {
+        if let Err(ttl_err) = store.purge_with_ttl(key, ttl).await {
+            tracing::warn!(
+                key = %key,
+                error = %ttl_err,
+                "purge_with_ttl failed, falling back to a plain purge (tombstone will not \
+                 self-expire until the NATS server is restarted)"
+            );
+            store
+                .purge(key)
+                .await
+                .map_err(|e| DbError::Backend(format!("purge user slot (fallback): {e}")))?;
+        }
+        Ok(())
     }
 
     async fn jobs(&self) -> Result<&kv::Store, DbError> {
@@ -342,14 +459,12 @@ impl NatsStore {
         job_id: &str,
     ) -> Result<(), DbError> {
         let store = self.user_limits().await?;
-        store
-            .purge_with_ttl(
-                &Self::user_slot_key(scope, user, job_id),
-                self.user_limit_tombstone_ttl(),
-            )
-            .await
-            .map_err(|e| DbError::Backend(format!("purge user slot: {e}")))?;
-        Ok(())
+        Self::purge_user_slot(
+            store,
+            &Self::user_slot_key(scope, user, job_id),
+            self.user_limit_tombstone_ttl(),
+        )
+        .await
     }
 
     /// Fetch the *current* set of entries matching `key_pattern` (a KV key
@@ -477,9 +592,7 @@ impl NatsStore {
             if e.operation == kv::Operation::Put {
                 let ent: UserLimitEntry = Self::deserialize(&e.value)?;
                 if !live.contains(&ent.owner_broker_id) {
-                    ul.purge_with_ttl(&k, self.user_limit_tombstone_ttl())
-                        .await
-                        .map_err(|e| DbError::Backend(format!("purge reclaimed slot: {e}")))?;
+                    Self::purge_user_slot(ul, &k, self.user_limit_tombstone_ttl()).await?;
                     removed += 1;
                 }
             }

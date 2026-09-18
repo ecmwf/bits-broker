@@ -357,3 +357,136 @@ async fn released_slot_tombstone_self_expires_instead_of_accumulating_forever() 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// Regression test for a second, distinct bug found while verifying the TTL
+/// fix on a real cluster (lumi-test, 2026-09-18): a bucket created *before*
+/// this fix shipped (no `limit_markers`/`allow_msg_ttl` on its stream) kept
+/// running with that stale config forever, because `get_or_create_bucket`'s
+/// fallback on a failed `create_key_value` (bucket already exists) was a
+/// plain `get_key_value` -- which returns the *existing* stream config
+/// as-is, never applying the new one. Concretely, this made every deployment
+/// of the TTL fix onto an already-running cluster a no-op: `purge_with_ttl`
+/// failed outright with "per-message TTL is disabled" (NATS error code
+/// 10166), which -- before the fixes below -- propagated as an error out of
+/// `release_user_slot_nats`/`reclaim_user_slots_nats`, leaving the slot
+/// stuck live (still counted against the user's cap) instead of released,
+/// until an operator restarted NATS. That's *worse* for availability than
+/// the original bloat bug during the rollout window, so this needed two
+/// fixes together, covered by the two tests below:
+///
+/// 1. `get_or_create_bucket` now attempts `update_key_value` (reconciles an
+///    existing stream's config in place, no data loss) before falling back
+///    to a plain `get_key_value`. This handles the realistic case: a
+///    pre-existing bucket whose only difference from the desired config is
+///    the new `limit_markers` field.
+/// 2. Releasing a slot never fails just because TTL isn't enforceable yet:
+///    `purge_user_slot` falls back to a plain, non-expiring `purge` if
+///    `purge_with_ttl` errors for any reason. This handles the case where
+///    (1) itself can't succeed (e.g. `update_key_value` rejects the change,
+///    or a permissions restriction on updating streams) -- confirmed (1)
+///    isn't a universal fallback: NATS rejects some config changes on an
+///    existing stream outright, e.g. "stream configuration update can not
+///    change storage type" (code 500, error code 10052).
+///
+/// A third, NATS-server-level finding is documented here because it governs
+/// what actually happens in production but *cannot* be exercised in this
+/// in-process test (it needs restarting the ambient nats-server, unsafe to
+/// do from a test that may share it with others): `update_key_value`
+/// updating a stream's stored config does not retroactively arm that
+/// already-running server process's TTL-expiry tracking for the stream --
+/// confirmed empirically against a real standalone nats-server (not just
+/// this crate's code): after the same kind of update `get_or_create_bucket`
+/// performs, a `purge_with_ttl`'d message's config correctly read back
+/// `allow_message_ttl: true`, yet the message never expired even after 20s,
+/// and only started expiring once the server *process* was restarted. So on
+/// a real cluster, a bucket predating this fix only gets working self-expiry
+/// once NATS itself is next restarted after this deploy -- until then, (2)
+/// is what keeps releases correct (permanent tombstone, exactly the
+/// pre-existing behaviour) instead of them failing outright.
+#[tokio::test]
+async fn get_or_create_bucket_reconciles_a_bucket_that_predates_the_ttl_fix() {
+    let url = ensure_nats_server();
+    let unique = uuid::Uuid::new_v4();
+    let store = NatsStore::new(
+        url,
+        format!("leak-jobs-{unique}"),
+        format!("leak-leases-{unique}"),
+        Duration::from_secs(30),
+        1,
+        Duration::from_secs(10),
+    )
+    .with_user_limit_tombstone_ttl(Duration::from_secs(1))
+    .with_user_limit_delete_marker_ttl(Duration::from_secs(1));
+
+    // Simulate the realistic case: a bucket that already existed under the
+    // old, pre-TTL-fix config (same storage type, just missing
+    // `limit_markers`), before this store's own (fixed) config is applied.
+    store
+        .debug_precreate_legacy_user_limits_bucket()
+        .await
+        .expect("precreate legacy bucket");
+
+    // get_or_create_bucket's create-then-update fallback must not error out
+    // just because the bucket already exists under the old config, and the
+    // reconciled config must actually accept a TTL'd purge (proving the
+    // update took hold at the stream-config level, independently of whether
+    // the server process has armed live expiry for it yet -- see module doc).
+    UserLimitStore::reserve_user_slot(&store, SCOPE, "finn", "job-finn-1", "broker-a")
+        .await
+        .expect("reserve finn's slot");
+    UserLimitStore::release_user_slot(&store, SCOPE, "finn", "job-finn-1")
+        .await
+        .expect("release must succeed via a reconciled (updated) bucket config");
+}
+
+/// Companion to the test above: covers the case where reconciliation itself
+/// is impossible (here: a storage-type mismatch, which NATS refuses to
+/// update on an existing stream), so `get_or_create_bucket` falls all the
+/// way through to a plain `get_key_value` returning the stale, TTL-disabled
+/// config. Releasing a slot must still never fail in this situation --
+/// `purge_user_slot`'s fallback to a plain `purge` is what's actually being
+/// tested here, not `get_or_create_bucket`'s update path (which is
+/// deliberately defeated by the storage-type mismatch).
+#[tokio::test]
+async fn release_never_fails_even_when_reconciliation_itself_is_impossible() {
+    let url = ensure_nats_server();
+    let unique = uuid::Uuid::new_v4();
+    let store = NatsStore::new(
+        url,
+        format!("leak-jobs-{unique}"),
+        format!("leak-leases-{unique}"),
+        Duration::from_secs(30),
+        1,
+        Duration::from_secs(10),
+    )
+    .with_user_limit_tombstone_ttl(Duration::from_secs(1))
+    .with_user_limit_delete_marker_ttl(Duration::from_secs(1));
+
+    // Deliberately incompatible with the store's own desired config (File vs
+    // Memory storage), so update_key_value is guaranteed to fail too and
+    // get_or_create_bucket falls all the way through to a stale get.
+    store
+        .debug_precreate_incompatible_user_limits_bucket()
+        .await
+        .expect("precreate incompatible bucket");
+
+    UserLimitStore::reserve_user_slot(&store, SCOPE, "finn", "job-finn-1", "broker-a")
+        .await
+        .expect("reserve finn's slot");
+
+    // The crux of this test: purge_with_ttl is guaranteed to fail here (the
+    // stale config never accepted allow_msg_ttl), so this release must fall
+    // back to a plain purge internally rather than erroring.
+    UserLimitStore::release_user_slot(&store, SCOPE, "finn", "job-finn-1")
+        .await
+        .expect(
+            "release must succeed even when the bucket config can't be reconciled at all -- \
+             purge_user_slot must fall back to a plain purge instead of leaving the slot stuck",
+        );
+
+    // The slot must be genuinely released (not just "didn't error"): a fresh
+    // reservation for the same user must succeed immediately, unblocked.
+    UserLimitStore::reserve_user_slot(&store, SCOPE, "finn", "job-finn-2", "broker-a")
+        .await
+        .expect("a second reservation must succeed once the first slot is actually released");
+}

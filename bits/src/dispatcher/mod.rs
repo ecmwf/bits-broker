@@ -132,6 +132,11 @@ pub struct RealmLimit {
 const LAZY_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 /// Limits at or below this use strict cross-broker enforcement; above it, lazy.
 const STRICT_MAX_THRESHOLD: usize = 3;
+/// Upper bound on a single `list_user_slots` call in the admission path.
+/// Prevents a slow or stuck backend from wedging the dispatcher queue
+/// indefinitely — on timeout the admission decision fails open (admits
+/// the job) rather than blocking other users.
+const LIST_SLOTS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Tracks per-user queued-or-in-flight counts for a single dispatcher.
 ///
@@ -289,10 +294,23 @@ impl UserLimiter {
             let Some(seq) = reserved else {
                 return Some(guard); // fail open: reserve failed
             };
-            let entries = match store.list_user_slots(&self.scope, user_key).await {
-                Ok(entries) => entries,
-                Err(err) => {
+            let entries = match tokio::time::timeout(
+                LIST_SLOTS_TIMEOUT,
+                store.list_user_slots(&self.scope, user_key),
+            )
+            .await
+            {
+                Ok(Ok(entries)) => entries,
+                Ok(Err(err)) => {
                     tracing::warn!(error = %err, scope = %self.scope, "user-limit list failed; failing open");
+                    return Some(guard);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        scope = %self.scope,
+                        timeout = ?LIST_SLOTS_TIMEOUT,
+                        "user-limit list timed out; failing open",
+                    );
                     return Some(guard);
                 }
             };
@@ -336,14 +354,27 @@ impl UserLimiter {
             let synced = if fresh == Some(true) {
                 self.cached_count.get(user_key).map(|v| v.0).unwrap_or(0)
             } else {
-                match store.list_user_slots(&self.scope, user_key).await {
-                    Ok(entries) => {
+                match tokio::time::timeout(
+                    LIST_SLOTS_TIMEOUT,
+                    store.list_user_slots(&self.scope, user_key),
+                )
+                .await
+                {
+                    Ok(Ok(entries)) => {
                         self.cached_count
                             .insert(user_key.to_string(), (entries.len(), Instant::now()));
                         entries.len()
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         tracing::warn!(error = %err, scope = %self.scope, "user-limit list failed; failing open");
+                        return Some(guard);
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            scope = %self.scope,
+                            timeout = ?LIST_SLOTS_TIMEOUT,
+                            "user-limit list timed out; failing open",
+                        );
                         return Some(guard);
                     }
                 }

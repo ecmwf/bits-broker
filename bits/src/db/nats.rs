@@ -101,6 +101,7 @@ impl NatsStore {
     /// Override how long a released user-limit slot's purge tombstone is
     /// kept before it self-expires (see [`USER_LIMIT_TOMBSTONE_TTL`]).
     /// Test-only; production should leave this at the default.
+    #[cfg(feature = "test-util")]
     pub fn with_user_limit_tombstone_ttl(mut self, ttl: Duration) -> Self {
         self.user_limit_tombstone_ttl = Some(ttl);
         self
@@ -114,6 +115,7 @@ impl NatsStore {
     /// Override how long a delete marker lingers after a TTL'd entry expires
     /// (see [`USER_LIMIT_DELETE_MARKER_TTL`]). Test-only; production should
     /// leave this at the default.
+    #[cfg(feature = "test-util")]
     pub fn with_user_limit_delete_marker_ttl(mut self, ttl: Duration) -> Self {
         self.user_limit_delete_marker_ttl = Some(ttl);
         self
@@ -130,6 +132,7 @@ impl NatsStore {
     /// before any other method that touches `self`, so this store's own
     /// (fixed) `stores()` call hits the create-already-exists branch and
     /// exercises `get_or_create_bucket`'s update-based reconciliation.
+    #[cfg(feature = "test-util")]
     pub async fn debug_precreate_legacy_user_limits_bucket(&self) -> Result<(), DbError> {
         self.debug_precreate_user_limits_bucket_with_storage(
             async_nats::jetstream::stream::StorageType::Memory,
@@ -142,6 +145,7 @@ impl NatsStore {
     /// via `update_key_value` (NATS rejects storage-type changes on an
     /// existing stream). Simulates reconciliation itself failing, exercising
     /// `purge_user_slot`'s fallback path instead of the update path.
+    #[cfg(feature = "test-util")]
     pub async fn debug_precreate_incompatible_user_limits_bucket(&self) -> Result<(), DbError> {
         self.debug_precreate_user_limits_bucket_with_storage(
             async_nats::jetstream::stream::StorageType::File,
@@ -149,6 +153,7 @@ impl NatsStore {
         .await
     }
 
+    #[cfg(feature = "test-util")]
     async fn debug_precreate_user_limits_bucket_with_storage(
         &self,
         storage: async_nats::jetstream::stream::StorageType,
@@ -174,6 +179,7 @@ impl NatsStore {
     /// the KV API (`list_user_slots`), which only reports live vs. deleted,
     /// not whether a deleted key's tombstone still physically occupies
     /// space in the stream.
+    #[cfg(feature = "test-util")]
     pub async fn debug_user_limits_stream_message_count(&self) -> Result<u64, DbError> {
         let store = self.user_limits().await?;
         let info = store
@@ -468,8 +474,7 @@ impl NatsStore {
     /// stream short-circuiting immediately when the underlying consumer's
     /// `num_pending` is already zero at creation time. That short-circuit is
     /// an internal implementation detail, not a documented contract — and it
-    /// is not stable across client versions: confirmed empirically that a
-    /// newer `async-nats` release (0.50.0, vs. the pinned 0.38.0) dropped it,
+    /// is not stable across client versions: `async-nats` 0.50.0 dropped it,
     /// so `watch_with_history` on a pattern matching zero current keys hangs
     /// forever (idle heartbeats are exchanged internally but nothing is ever
     /// surfaced to the stream). A zero-match pattern is not a rare case here:
@@ -554,14 +559,13 @@ impl NatsStore {
         let ul = self.user_limits().await?;
         let mut removed = 0u64;
         for e in Self::scan_current_entries(ul, ALL_KEYS).await? {
-            let k = &e.key;
-            if !k.starts_with("ul.") {
+            if !e.key.starts_with("ul.") {
                 continue;
             }
             if e.operation == kv::Operation::Put {
                 let ent: UserLimitEntry = Self::deserialize(&e.value)?;
                 if !live.contains(&ent.owner_broker_id) {
-                    Self::purge_user_slot(ul, &k, self.user_limit_tombstone_ttl()).await?;
+                    Self::purge_user_slot(ul, &e.key, self.user_limit_tombstone_ttl()).await?;
                     removed += 1;
                 }
             }

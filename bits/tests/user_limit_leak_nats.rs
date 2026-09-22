@@ -1,4 +1,4 @@
-#![cfg(feature = "nats")]
+#![cfg(all(feature = "nats", feature = "test-util"))]
 // SPDX-FileCopyrightText: 2026 European Centre for Medium-Range Weather Forecasts (ECMWF)
 //
 // SPDX-License-Identifier: Apache-2.0

@@ -16,6 +16,9 @@ default = []
 tikv = ["dep:tikv-client"]
 nats = ["dep:async-nats"]
 metrics-prometheus = ["dep:opentelemetry_sdk", "dep:opentelemetry-prometheus", "dep:prometheus"]
+## Expose test-only helpers (debug bucket pre-creation, TTL overrides, raw
+## stream-message counts). Not for production use.
+test-util = []
 
 [[example]]
 name = "hello_bits"

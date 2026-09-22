@@ -117,7 +117,7 @@ async fn list_user_slots_is_fast_despite_bucket_noise() {
 
     // Comfortably above the fixed implementation's measured ~2-3ms and
     // comfortably below the unfixed implementation's measured ~20-25s at
-    // this (entries, capacity) configuration — see the module doc comment.
+    // this (entries, capacity) configuration — see [`NOISE_ENTRIES`].
     let bound = Duration::from_secs(10);
     let result = tokio::time::timeout(bound, store.list_user_slots(SCOPE, "alice")).await;
     let entries = match result {
@@ -407,7 +407,7 @@ async fn get_or_create_bucket_reconciles_a_bucket_that_predates_the_ttl_fix() {
     // just because the bucket already exists under the old config, and the
     // reconciled config must actually accept a TTL'd purge (proving the
     // update took hold at the stream-config level, independently of whether
-    // the server process has armed live expiry for it yet -- see module doc).
+    // the server process has armed live expiry for it yet).
     UserLimitStore::reserve_user_slot(&store, SCOPE, "finn", "job-finn-1", "broker-a")
         .await
         .expect("reserve finn's slot");

@@ -405,11 +405,20 @@ impl Drop for UserLimitGuard {
     fn drop(&mut self) {
         self.limiter.release_local(&self.key);
         if let Some(store) = &self.limiter.store {
+            let Ok(handle) = tokio::runtime::Handle::try_current() else {
+                tracing::warn!(
+                    scope = %self.limiter.scope,
+                    key = %self.key,
+                    "UserLimitGuard dropped outside a tokio runtime; \
+                     skipping store release (reclaim sweeper is the backstop)",
+                );
+                return;
+            };
             let store = Arc::clone(store);
             let scope = self.limiter.scope.clone();
             let key = self.key.clone();
             let job_id = self.job_id.clone();
-            tokio::spawn(async move {
+            handle.spawn(async move {
                 if let Err(err) = store.release_user_slot(&scope, &key, &job_id).await {
                     tracing::warn!(error = %err, scope = %scope, "user-limit release failed (reclaim sweeper is the backstop)");
                 }

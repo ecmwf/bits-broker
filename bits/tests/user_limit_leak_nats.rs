@@ -3,29 +3,27 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Regression test for a `bits-leases-userlimits` KV bucket-bloat incident
-//! (2026-08-21).
+//! Regression tests for `bits-leases-userlimits` KV bucket-bloat.
 //!
-//! Root cause: `list_user_slots_nats` and `reclaim_user_slots_nats`
-//! enumerated the **entire** bucket via `store.keys()` plus one extra
-//! `store.entry()` round trip per key, filtering client-side for the target
-//! user's prefix, instead of a single server-side-filtered query.
+//! Root cause of the *scan-storm* symptom: `list_user_slots_nats` and
+//! `reclaim_user_slots_nats` enumerated the entire bucket via
+//! `store.keys()` plus one `store.entry()` round trip per key, filtering
+//! client-side for the target user's prefix, instead of a single
+//! server-side-filtered query.
 //!
 //! At scale (hundreds of thousands of unrelated entries) every strict-mode
 //! admission check — which calls `list_user_slots` on the hot request path —
 //! became pathologically expensive: draining `keys()` one key at a time with
 //! a synchronous RPC in between is slow enough relative to how fast
 //! JetStream pushes a `LastPerSubject` snapshot that the client's `Ordered`
-//! consumer wrapper kept detecting a sequence gap (local buffer overflow)
-//! and resubscribing — a self-healing but extremely slow retry storm that
-//! flooded logs with `slow consumers` and stalled the dispatcher queue.
+//! consumer wrapper kept detecting a sequence gap and resubscribing — a
+//! self-healing but extremely slow retry storm that flooded logs with `slow
+//! consumers` and stalled the dispatcher queue.
 //!
 //! These tests reproduce the mechanism deterministically at small scale by
 //! shrinking the client's per-subscription buffer
 //! (`NatsStore::with_subscription_capacity`) instead of needing hundreds of
-//! thousands of real entries. The (entries, capacity) pair below was picked
-//! empirically for a wide margin: the unfixed scan reliably took ~20-25s,
-//! the fixed subject-filtered version ~2-3ms.
+//! thousands of real entries.
 
 mod common;
 
@@ -203,16 +201,14 @@ async fn reclaim_is_correct_despite_bucket_noise() {
 /// come. That's the documented, correct behaviour for an open-ended watch,
 /// but `scan_current_entries` (backing both `list_user_slots_nats` and
 /// `reclaim_user_slots_nats`) used to depend on the *old*, since-reverted
-/// behaviour to know when a scan was done. Confirmed directly against a real
-/// `async-nats 0.50.0` client (vs. the pinned 0.38.0): with the old
-/// implementation this hangs indefinitely instead of returning empty.
+/// behaviour to know when a scan was done, hanging indefinitely instead of
+/// returning empty.
 ///
-/// Note these two tests do *not* fail against the pinned 0.38.0 even with
-/// the fix reverted — 0.38.0 still has the old (pre-#1376-fix) short-circuit
-/// baked in, so it happens to return fast today regardless. They exist to
-/// pin the desired behaviour explicitly and catch a *future* dependency bump
-/// silently reintroducing the hang, rather than as a red-then-green
-/// regression test against the currently pinned version.
+/// This test does not fail against the currently pinned `async-nats`
+/// version even with the fix reverted, since that version still has the old
+/// short-circuit baked in -- it exists to pin the desired behaviour
+/// explicitly and catch a future dependency bump silently reintroducing the
+/// hang.
 ///
 /// `list_user_slots` for a user with zero entries must return fast and
 /// empty regardless of how much unrelated noise exists elsewhere in the
@@ -272,10 +268,7 @@ async fn reclaim_on_a_genuinely_empty_bucket_returns_fast_and_zero() {
 /// JetStream stream, because the bucket had no `max_age`/TTL — unlike the
 /// sibling `bits-leases` bucket, which does. Every correctly-completed job
 /// left one message behind forever; growth was proportional to total
-/// historical throughput, not to any leak or error rate. Confirmed directly
-/// against lumi-prod's real bucket: 278 of 292 current stream messages were
-/// already-deleted `KV-Operation: PURGE` tombstones from successful
-/// releases, not stuck live entries.
+/// historical throughput, not to any leak or error rate.
 ///
 /// Fixed via per-message TTL (`purge_with_ttl`, `kv::Config.limit_markers`)
 /// so a tombstone self-expires instead of living forever — verified here
@@ -358,51 +351,35 @@ async fn released_slot_tombstone_self_expires_instead_of_accumulating_forever() 
     }
 }
 
-/// Regression test for a second, distinct bug found while verifying the TTL
-/// fix on a real cluster (lumi-test, 2026-09-18): a bucket created *before*
+/// Regression test for a second, distinct bug: a bucket created *before*
 /// this fix shipped (no `limit_markers`/`allow_msg_ttl` on its stream) kept
 /// running with that stale config forever, because `get_or_create_bucket`'s
 /// fallback on a failed `create_key_value` (bucket already exists) was a
-/// plain `get_key_value` -- which returns the *existing* stream config
-/// as-is, never applying the new one. Concretely, this made every deployment
-/// of the TTL fix onto an already-running cluster a no-op: `purge_with_ttl`
-/// failed outright with "per-message TTL is disabled" (NATS error code
-/// 10166), which -- before the fixes below -- propagated as an error out of
+/// plain `get_key_value` -- which returns the existing stream config as-is,
+/// never applying the new one. That made every deployment of the TTL fix
+/// onto an already-running cluster a no-op: `purge_with_ttl` failed outright
+/// with "per-message TTL is disabled", which -- before the fixes below --
+/// propagated as an error out of
 /// `release_user_slot_nats`/`reclaim_user_slots_nats`, leaving the slot
-/// stuck live (still counted against the user's cap) instead of released,
-/// until an operator restarted NATS. That's *worse* for availability than
-/// the original bloat bug during the rollout window, so this needed two
-/// fixes together, covered by the two tests below:
+/// stuck live instead of released until an operator restarted NATS. Worse
+/// for availability than the original bloat bug, so this needed two fixes:
 ///
 /// 1. `get_or_create_bucket` now attempts `update_key_value` (reconciles an
 ///    existing stream's config in place, no data loss) before falling back
-///    to a plain `get_key_value`. This handles the realistic case: a
-///    pre-existing bucket whose only difference from the desired config is
-///    the new `limit_markers` field.
+///    to a plain `get_key_value`. Covered by this test.
 /// 2. Releasing a slot never fails just because TTL isn't enforceable yet:
 ///    `purge_user_slot` falls back to a plain, non-expiring `purge` if
-///    `purge_with_ttl` errors for any reason. This handles the case where
-///    (1) itself can't succeed (e.g. `update_key_value` rejects the change,
-///    or a permissions restriction on updating streams) -- confirmed (1)
-///    isn't a universal fallback: NATS rejects some config changes on an
-///    existing stream outright, e.g. "stream configuration update can not
-///    change storage type" (code 500, error code 10052).
+///    `purge_with_ttl` errors for any reason -- for cases where (1) itself
+///    can't succeed (NATS rejects some stream config changes outright,
+///    e.g. a storage-type change). Covered by the companion test below.
 ///
-/// A third, NATS-server-level finding is documented here because it governs
-/// what actually happens in production but *cannot* be exercised in this
-/// in-process test (it needs restarting the ambient nats-server, unsafe to
-/// do from a test that may share it with others): `update_key_value`
-/// updating a stream's stored config does not retroactively arm that
-/// already-running server process's TTL-expiry tracking for the stream --
-/// confirmed empirically against a real standalone nats-server (not just
-/// this crate's code): after the same kind of update `get_or_create_bucket`
-/// performs, a `purge_with_ttl`'d message's config correctly read back
-/// `allow_message_ttl: true`, yet the message never expired even after 20s,
-/// and only started expiring once the server *process* was restarted. So on
-/// a real cluster, a bucket predating this fix only gets working self-expiry
-/// once NATS itself is next restarted after this deploy -- until then, (2)
-/// is what keeps releases correct (permanent tombstone, exactly the
-/// pre-existing behaviour) instead of them failing outright.
+/// A third finding governs actual production behaviour but can't be
+/// exercised here (it needs restarting the ambient nats-server, unsafe to
+/// share with other tests): reconciling a stream's config via
+/// `update_key_value` does not retroactively arm an already-running NATS
+/// server process's TTL-expiry tracking for that stream. So a bucket
+/// predating this fix only gets working self-expiry once NATS is next
+/// restarted -- fix (2) is what keeps releases correct in the meantime.
 #[tokio::test]
 async fn get_or_create_bucket_reconciles_a_bucket_that_predates_the_ttl_fix() {
     let url = ensure_nats_server();

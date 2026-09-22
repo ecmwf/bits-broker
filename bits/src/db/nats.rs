@@ -18,32 +18,28 @@ use crate::db::{
 /// How long a `bits-leases-userlimits` purge tombstone is kept before NATS
 /// physically expires it (via per-message TTL, `purge_with_ttl`).
 ///
-/// This only ever applies to a slot that has *already been released* --
+/// Only ever applies to a slot that has *already been released* --
 /// `reserve_user_slot_nats`'s `create()` call for the live entry carries no
 /// TTL, so an in-flight job's admission slot is never at risk of expiring
-/// early regardless of how long the job runs. Without this, every completed
-/// job leaves a permanent message in the stream (JetStream's KV `purge`
-/// leaves a tombstone behind; the stream's default `max_age` is unlimited),
-/// which is what caused the `bits-leases-userlimits` bucket-bloat incident
-/// (2026-08-21): growth proportional to total historical throughput, not to
-/// any leak or error rate. Chosen short relative to any realistic sweep
-/// interval / human-debugging window, long enough that a tombstone is still
-/// visible for a little while after the fact.
+/// early regardless of job duration. Without this, every completed job
+/// leaves a permanent message in the stream (JetStream's KV `purge` leaves
+/// a tombstone behind, and the stream's `max_age` is unbounded), so growth
+/// is proportional to total historical throughput rather than any leak or
+/// error rate. Chosen short relative to any realistic sweep interval, long
+/// enough to still be visible for a while afterwards.
 const USER_LIMIT_TOMBSTONE_TTL: Duration = Duration::from_secs(600);
 
 /// How long a *delete marker* is kept once a per-message-TTL'd entry (i.e. a
 /// [`USER_LIMIT_TOMBSTONE_TTL`]-bounded purge tombstone) actually expires.
 ///
-/// This is a distinct, secondary knob from `USER_LIMIT_TOMBSTONE_TTL`: it
-/// does nothing on its own (confirmed empirically -- a plain `purge()` with
-/// this alone enabled never expires) and only governs what NATS leaves
-/// behind *after* a TTL'd message expires, purely so a watcher/mirror can
-/// tell "this key expired" apart from "this key never existed". Nothing in
-/// `bits` currently relies on that distinction, so its value only affects
-/// how much longer a trace of a released slot lingers after the tombstone
-/// itself is gone -- defaulted to the same duration as the tombstone TTL for
-/// simplicity, independently overridable if that combined worst-case
-/// lifetime (currently ~2x this value) ever needs tuning separately.
+/// A distinct, secondary knob from `USER_LIMIT_TOMBSTONE_TTL`: it does
+/// nothing on its own (a plain `purge()` with only this enabled never
+/// expires) and only governs what NATS leaves behind *after* a TTL'd
+/// message expires, so a watcher/mirror can tell "this key expired" apart
+/// from "this key never existed". Nothing in `bits` relies on that
+/// distinction, so this only affects how much longer a trace of a released
+/// slot lingers after the tombstone itself is gone -- defaulted to the same
+/// duration as the tombstone TTL, independently overridable.
 const USER_LIMIT_DELETE_MARKER_TTL: Duration = Duration::from_secs(600);
 
 pub struct NatsStore {
@@ -128,26 +124,12 @@ impl NatsStore {
             .unwrap_or(USER_LIMIT_DELETE_MARKER_TTL)
     }
 
-    /// Test-only: the *raw* JetStream message count backing the user-limits
-    /// bucket's stream, bypassing the KV abstraction's "live value"
-    /// filtering (i.e. this includes not-yet-expired purge tombstones). The
-    /// higher-level KV API (`list_user_slots`, `nats kv info`, ...) can only
-    /// ever see whether a key is currently live or deleted -- it has no way
-    /// to observe whether a *deleted* key's tombstone still physically
-    /// occupies space in the stream, which is exactly what
-    /// `USER_LIMIT_TOMBSTONE_TTL` / `purge_with_ttl` need to be verified
-    /// against.
-    /// Test-only: create the user-limits bucket using the *pre-TTL-fix*
-    /// shape (no `limit_markers`, i.e. `allow_msg_ttl` left off), to simulate
-    /// a bucket that already existed on a cluster before this fix shipped.
-    /// Must be called before any other method that touches `self` -- it
-    /// establishes its own connection and must win the race to create the
-    /// bucket first, so that this store's own (fixed) `stores()` call later
-    /// hits the create-already-exists branch and exercises
-    /// `get_or_create_bucket`'s reconciliation-via-update fallback, which is
-    /// exactly what a real upgrade needs to do (confirmed necessary against
-    /// a real pre-existing bucket on lumi-test, 2026-09-18: without it,
-    /// `purge_with_ttl` fails outright with "per-message TTL is disabled").
+    /// Test-only: create the user-limits bucket using the pre-TTL-fix shape
+    /// (no `limit_markers`, i.e. `allow_msg_ttl` left off), to simulate a
+    /// bucket that already existed before this fix shipped. Must be called
+    /// before any other method that touches `self`, so this store's own
+    /// (fixed) `stores()` call hits the create-already-exists branch and
+    /// exercises `get_or_create_bucket`'s update-based reconciliation.
     pub async fn debug_precreate_legacy_user_limits_bucket(&self) -> Result<(), DbError> {
         self.debug_precreate_user_limits_bucket_with_storage(
             async_nats::jetstream::stream::StorageType::Memory,
@@ -155,16 +137,11 @@ impl NatsStore {
         .await
     }
 
-    /// Test-only: like [`Self::debug_precreate_legacy_user_limits_bucket`],
-    /// but deliberately using **File** storage -- a config `get_or_create_bucket`
-    /// cannot reconcile via `update_key_value` (NATS rejects storage-type
-    /// changes on an existing stream: "stream configuration update can not
-    /// change storage type", confirmed empirically). This simulates the
-    /// worst case where reconciliation itself fails (e.g. a config drift, or
-    /// any other reason `update_key_value` might not succeed), falling
-    /// through to a plain `get_key_value` that returns the stale,
-    /// TTL-disabled config -- exercising `purge_user_slot`'s fallback path
-    /// rather than the reconciliation path.
+    /// Like [`Self::debug_precreate_legacy_user_limits_bucket`], but using
+    /// **File** storage -- a config `get_or_create_bucket` cannot reconcile
+    /// via `update_key_value` (NATS rejects storage-type changes on an
+    /// existing stream). Simulates reconciliation itself failing, exercising
+    /// `purge_user_slot`'s fallback path instead of the update path.
     pub async fn debug_precreate_incompatible_user_limits_bucket(&self) -> Result<(), DbError> {
         self.debug_precreate_user_limits_bucket_with_storage(
             async_nats::jetstream::stream::StorageType::File,
@@ -192,6 +169,11 @@ impl NatsStore {
         Ok(())
     }
 
+    /// Test-only: the *raw* JetStream message count backing the user-limits
+    /// bucket's stream, including not-yet-expired purge tombstones -- unlike
+    /// the KV API (`list_user_slots`), which only reports live vs. deleted,
+    /// not whether a deleted key's tombstone still physically occupies
+    /// space in the stream.
     pub async fn debug_user_limits_stream_message_count(&self) -> Result<u64, DbError> {
         let store = self.user_limits().await?;
         let info = store
@@ -250,15 +232,12 @@ impl NatsStore {
                     // survives broker restarts); reclaimed via broker leases.
                     //
                     // `limit_markers` enables per-message TTL on this bucket's
-                    // underlying stream (`allow_msg_ttl`) -- a hard
-                    // prerequisite for `purge_with_ttl` in
+                    // underlying stream (`allow_msg_ttl`), required for
+                    // `purge_with_ttl` in
                     // `release_user_slot_nats`/`reclaim_user_slots_nats` to
-                    // have any effect at all (confirmed empirically: without
-                    // it, `purge_with_ttl` fails since the stream doesn't
-                    // accept the TTL header). Its value here
-                    // (USER_LIMIT_DELETE_MARKER_TTL) is a distinct,
-                    // secondary knob from the tombstone TTL itself -- see its
-                    // doc comment.
+                    // have any effect. Its value here (USER_LIMIT_DELETE_MARKER_TTL)
+                    // is a distinct, secondary knob from the tombstone TTL
+                    // itself -- see its doc comment.
                     let user_limits = Self::get_or_create_bucket(
                         &js,
                         kv::Config {
@@ -301,15 +280,14 @@ impl NatsStore {
             Err(create_err) => {
                 // The bucket already exists (the common case after the first
                 // deploy). Reconcile its underlying stream config to match
-                // `config` via `update_key_value` -- this is required, not
-                // just best-effort: `create_key_value` only ever applies a
-                // config on first creation, so a bucket created before a
-                // config change (e.g. enabling `limit_markers`/`allow_msg_ttl`)
-                // would otherwise silently keep running with its stale
-                // config forever, causing `purge_with_ttl` to fail outright
-                // with "per-message TTL is disabled" (confirmed against a
-                // real pre-existing bucket on lumi-test, 2026-09-18).
-                // `update_stream` reconciles in place, no data loss.
+                // `config` via `update_key_value` -- required, not just
+                // best-effort: `create_key_value` only ever applies a config
+                // on first creation, so a bucket created before a config
+                // change (e.g. enabling `limit_markers`/`allow_msg_ttl`)
+                // would otherwise keep running with its stale config
+                // forever, causing `purge_with_ttl` to fail outright with
+                // "per-message TTL is disabled". `update_stream` reconciles
+                // in place, no data loss.
                 tracing::debug!(
                     bucket = %bucket_name,
                     error = %create_err,
@@ -338,27 +316,18 @@ impl NatsStore {
     /// (`purge_with_ttl`) but falling back to a plain, permanent `purge` if
     /// that fails for *any* reason.
     ///
-    /// This fallback is required for safe rollout, not just belt-and-braces:
-    /// on a bucket that predates this fix, `purge_with_ttl` fails outright
-    /// ("per-message TTL is disabled", NATS error code 10166) until the
-    /// underlying NATS server process is restarted -- `get_or_create_bucket`
-    /// reconciling the stream's config via `update_key_value` takes effect
-    /// in the stream's stored metadata immediately, but does not retroactively
-    /// arm that server process's own TTL-expiry tracking for the stream
-    /// (confirmed empirically against a real nats-server: the config read
-    /// back after the update correctly shows `allow_message_ttl: true`, yet
-    /// a subsequent `purge_with_ttl`'d message never expires until the
-    /// server process itself restarts, 2026-09-18). Without this fallback, a
-    /// slot that fails to release this way would stay live (still counted
-    /// against the user's cap) until the reclaim sweeper's dead-broker
-    /// cleanup happens to run -- and that path calls this same purge, so it
-    /// would fail for the identical reason, leaving the slot stuck
-    /// indefinitely (i.e. until an operator restarts NATS). That would make
-    /// this fix *more* disruptive during rollout than the bucket-bloat bug
-    /// it's meant to fix. With the fallback, a deploy onto a pre-existing
-    /// bucket is fully safe immediately: releases keep working exactly as
-    /// before (permanent tombstone) until NATS is restarted, at which point
-    /// TTL self-expiry starts working with no further app-side action.
+    /// The fallback matters for safe rollout: on a bucket that predates this
+    /// fix, `purge_with_ttl` fails outright ("per-message TTL is disabled")
+    /// until the NATS server process restarts -- reconciling the stream's
+    /// config via `update_key_value` takes effect in the stream's stored
+    /// metadata immediately, but does not retroactively arm that server
+    /// process's own TTL-expiry tracking. Without this fallback, a slot that
+    /// fails to release this way would stay live indefinitely (reclaim's
+    /// dead-broker cleanup hits the same error), which is worse for
+    /// availability than the bloat this fix addresses. With it, a deploy
+    /// onto a pre-existing bucket is safe immediately: releases keep working
+    /// as before (permanent tombstone) until NATS restarts, at which point
+    /// TTL self-expiry starts working automatically.
     async fn purge_user_slot(store: &kv::Store, key: &str, ttl: Duration) -> Result<(), DbError> {
         if let Err(ttl_err) = store.purge_with_ttl(key, ttl).await {
             tracing::warn!(

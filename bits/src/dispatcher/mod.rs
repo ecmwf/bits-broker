@@ -749,6 +749,16 @@ impl<T: Send + 'static> Dispatcher<T> {
 
                     match removal {
                         Some(Some(item)) => {
+                            // This branch wins the removal race against the executor's own
+                            // dequeue loop: the job was abandoned (client gone / cancelled)
+                            // while still queued, so it is never handed to an executor and
+                            // none of the `record_queue_dequeued` call sites in
+                            // executor/{async_pool,thread_pool,remote_pool}.rs will run for
+                            // it. Account for the dequeue here so `queue_depth` doesn't leak
+                            // by one for every job abandoned before dispatch.
+                            let (.., enqueued_at) = &item;
+                            metrics::record_queue_dequeued(*enqueued_at);
+
                             // Dropping the tombstoned pending item releases both the
                             // queue-capacity permit and the local/store user-limit guard.
                             drop(item);

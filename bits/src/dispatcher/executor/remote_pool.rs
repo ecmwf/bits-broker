@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::actions::{ActionError, TargetResult};
 use crate::dispatcher::queue::Queue;
 use crate::dispatcher::{DispatchGuard, Executor, PendingMap};
+use crate::job::Job;
 use crate::metrics;
 use crate::result::JobResult;
 use crate::worker_server::WorkerServer;
@@ -118,6 +119,7 @@ enum WorkerOutcome {
 
 struct InProgressJob {
     result_tx: oneshot::Sender<WorkerOutcome>,
+    job: Job,
     last_heartbeat: Instant,
 }
 
@@ -261,6 +263,7 @@ async fn handle_get_work(
         job.id.clone(),
         InProgressJob {
             result_tx: outcome_tx,
+            job: job.clone(),
             last_heartbeat: Instant::now(),
         },
     );
@@ -424,6 +427,26 @@ async fn handle_complete_data(
     }
 }
 
+/// Publish a provisional redirect while retaining the worker completion slot.
+/// A later error replaces this redirect for any poll that has not consumed it.
+async fn handle_release_redirect(
+    State(state): State<Arc<RemotePoolState>>,
+    Path(job_id): Path<String>,
+    Json(req): Json<RedirectRequest>,
+) -> StatusCode {
+    let Some(entry) = state.in_progress.get(&job_id) else {
+        return StatusCode::NOT_FOUND;
+    };
+    *entry.job.result.lock().unwrap_or_else(|p| p.into_inner()) = Some(JobResult::Redirect {
+        location: req.location,
+        message: req.message,
+        content_type: req.content_type,
+        content_length: req.content_length,
+    });
+    entry.job.notify.notify_waiters();
+    StatusCode::OK
+}
+
 async fn handle_complete_redirect(
     State(state): State<Arc<RemotePoolState>>,
     Path(job_id): Path<String>,
@@ -482,6 +505,10 @@ async fn handle_complete_error(
 ) -> StatusCode {
     match state.in_progress.remove(&job_id) {
         Some((_, entry)) => {
+            *entry.job.result.lock().unwrap_or_else(|p| p.into_inner()) = Some(JobResult::Error {
+                message: req.message.clone(),
+            });
+            entry.job.notify.notify_waiters();
             if entry
                 .result_tx
                 .send(WorkerOutcome::Error {
@@ -506,9 +533,9 @@ async fn handle_complete_error(
 /// - `GET  /work?timeout_ms=N`   — long-poll; directly dequeues from the
 ///   dispatcher queue, drops the local work future, and returns job JSON.
 ///   Returns 204 on timeout.
-/// - `POST /heartbeat/{job_id}`  — worker keepalive; resets the heartbeat timer.
 /// - `POST /complete/data/{job_id}`     — worker streams the successful body.
-/// - `POST /complete/redirect/{job_id}` — worker posts redirect JSON.
+/// - `POST /release/redirect/{job_id}`  — worker provisionally exposes a redirect.
+/// - `POST /complete/redirect/{job_id}` — worker finalizes a redirect.
 /// - `POST /complete/reject/{job_id}`   — worker posts reject JSON.
 /// - `POST /complete/error/{job_id}`    — worker posts error JSON.
 ///
@@ -562,6 +589,7 @@ impl Executor<TargetResult> for RemotePoolExecutor {
             .route("/work", get(handle_get_work))
             .route("/heartbeat/{job_id}", post(handle_heartbeat))
             .route("/complete/data/{job_id}", post(handle_complete_data))
+            .route("/release/redirect/{job_id}", post(handle_release_redirect))
             .route(
                 "/complete/redirect/{job_id}",
                 post(handle_complete_redirect),

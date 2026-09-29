@@ -467,6 +467,64 @@ async fn worker_requests_redirect() {
     }
 }
 
+/// A provisional redirect remains replaceable until the worker finalizes delivery.
+#[tokio::test]
+async fn early_redirect_is_replaced_by_delivery_error_before_poll() {
+    let port = free_port().await;
+    let bits = make_bits(port, 60.0);
+    wait_for_server(port).await;
+
+    let handle = bits
+        .submit(Job::new(serde_json::json!({"dataset": "era5"})))
+        .expect_accepted("submit should not be rejected");
+    let client = Client::new();
+    let work: serde_json::Value = client
+        .get(format!(
+            "http://127.0.0.1:{port}/test_pool/work?timeout_ms=5000"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let job_id = work["job_id"].as_str().unwrap();
+
+    let released = client
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/release/redirect/{job_id}"
+        ))
+        .json(&serde_json::json!({
+            "location": "https://bobs.example/read/key",
+            "message": "result available for download",
+            "content_type": "application/octet-stream",
+            "content_length": 123
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), 200);
+
+    let failed = client
+        .post(format!(
+            "http://127.0.0.1:{port}/test_pool/complete/error/{job_id}"
+        ))
+        .json(&serde_json::json!({
+            "message": "delivery failed: write failed"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), 200);
+
+    match bits.poll(&handle.id, Some(Duration::from_secs(5))).await {
+        PollOutcome::Ready(JobResult::Error { message }) => {
+            assert!(message.contains("write failed"));
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
 /// Long-polling with no queued work returns 204 No Content within the timeout.
 #[tokio::test]
 async fn long_poll_returns_204_when_no_work() {

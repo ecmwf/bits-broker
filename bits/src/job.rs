@@ -49,6 +49,10 @@ fn default_pending_status() -> Arc<AtomicU8> {
     Arc::new(AtomicU8::new(PendingStatus::Queued as u8))
 }
 
+fn default_result() -> Arc<Mutex<Option<JobResult>>> {
+    Arc::new(Mutex::new(None))
+}
+
 /// Non-terminal lifecycle state for a submitted job.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,8 +111,10 @@ pub struct Job {
     #[serde(skip, default = "default_persisted")]
     pub(crate) persisted: AtomicBool,
     /// Result slot written by the dispatch task and consumed by `Bits::poll()`.
-    #[serde(skip)]
-    pub(crate) result: Mutex<Option<JobResult>>,
+    /// Shared with pipeline clones so a remote worker can publish a provisional
+    /// redirect and replace it with an error if delivery subsequently fails.
+    #[serde(skip, default = "default_result")]
+    pub(crate) result: Arc<Mutex<Option<JobResult>>>,
     /// Wakes waiting pollers when either status advances or the result is ready.
     #[serde(skip)]
     pub(crate) notify: Arc<Notify>,
@@ -137,7 +143,7 @@ impl Job {
             reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
             pending_status: default_pending_status(),
             persisted: AtomicBool::new(false),
-            result: Mutex::new(None),
+            result: default_result(),
             notify: Arc::new(Notify::new()),
             dispatch_notify: Arc::new(Notify::new()),
         }
@@ -157,7 +163,7 @@ impl Job {
             reconnect_deadline_nanos: default_reconnect_deadline_nanos(),
             pending_status: default_pending_status(),
             persisted: AtomicBool::new(false),
-            result: Mutex::new(None),
+            result: default_result(),
             notify: Arc::new(Notify::new()),
             dispatch_notify: Arc::new(Notify::new()),
         }
@@ -224,9 +230,10 @@ impl Clone for Job {
             active_pollers: self.active_pollers.clone(),
             reconnect_deadline_nanos: self.reconnect_deadline_nanos.clone(),
             pending_status: self.pending_status.clone(),
-            // Result slot and persisted flag are owned by the submitted job.
+            // Remote-pool delivery clones publish provisional results into the
+            // submitted job's shared slot.
             persisted: AtomicBool::new(false),
-            result: Mutex::new(None),
+            result: self.result.clone(),
             // Status and result changes wake the same submitted-job pollers.
             notify: self.notify.clone(),
             dispatch_notify: self.dispatch_notify.clone(),

@@ -32,6 +32,7 @@ impl Drop for InFlightGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_job(
     router: Arc<Switch>,
     job: Arc<Job>,

@@ -1134,7 +1134,7 @@ fn parse_user_limit(value: &serde_json::Value) -> Result<UserLimitConfig, BitsEr
             let mut roles = HashMap::new();
             if let Some(roles_value) = realm_obj.get("roles") {
                 let roles_obj = roles_value.as_object().ok_or_else(|| {
-                    ConfigError::validation(&format!("{realm_path}.roles"), "must be an object")
+                    ConfigError::validation(format!("{realm_path}.roles"), "must be an object")
                 })?;
                 for (role, role_value) in roles_obj {
                     let role_path = format!("{realm_path}.roles.{role}");

@@ -59,6 +59,9 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 # = true)], used to deterministically test timeout behaviour (e.g.
 # reclaim_within in runtime/maintenance.rs) without real wall-clock sleeps.
 tokio = { version = "1.46.1", features = ["test-util"] }
+# In-memory metric exporter, used by tests/queue_depth_metric.rs to read the
+# process-global OTel instruments back.
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 
 [[bench]]
 name = "pipelines"

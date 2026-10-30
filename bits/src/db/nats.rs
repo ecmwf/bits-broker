@@ -42,6 +42,20 @@ const USER_LIMIT_TOMBSTONE_TTL: Duration = Duration::from_secs(600);
 /// duration as the tombstone TTL, independently overridable.
 const USER_LIMIT_DELETE_MARKER_TTL: Duration = Duration::from_secs(600);
 
+/// Default for how long a deleted job record's purge tombstone is kept in
+/// the jobs bucket before NATS physically expires it. Overridable via
+/// `bits.persistence.jobs_tombstone_ttl_secs`.
+///
+/// Only the tombstone carries a TTL: live job records and the broker-slot
+/// counter are written without one and never expire. Nothing in `bits`
+/// distinguishes a tombstone from a missing key (both are `NotFound`), so
+/// this only bounds how long a trace of a finished job lingers.
+pub const DEFAULT_JOB_TOMBSTONE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Delete-marker retention for the jobs bucket; see
+/// [`USER_LIMIT_DELETE_MARKER_TTL`] for what this governs.
+const JOB_DELETE_MARKER_TTL: Duration = Duration::from_secs(600);
+
 pub struct NatsStore {
     url: String,
     jobs_bucket: String,
@@ -62,6 +76,9 @@ pub struct NatsStore {
     user_limit_tombstone_ttl: Option<Duration>,
     /// Override for [`USER_LIMIT_DELETE_MARKER_TTL`]. `None` keeps the default.
     user_limit_delete_marker_ttl: Option<Duration>,
+    job_tombstone_ttl: Duration,
+    /// Override for [`JOB_DELETE_MARKER_TTL`]. `None` keeps the default.
+    job_delete_marker_ttl: Option<Duration>,
     stores: OnceCell<(kv::Store, kv::Store, kv::Store)>,
 }
 
@@ -86,8 +103,29 @@ impl NatsStore {
             subscription_capacity: None,
             user_limit_tombstone_ttl: None,
             user_limit_delete_marker_ttl: None,
+            job_tombstone_ttl: DEFAULT_JOB_TOMBSTONE_TTL,
+            job_delete_marker_ttl: None,
             stores: OnceCell::new(),
         }
+    }
+
+    /// Override how long a deleted job record's purge tombstone is kept
+    /// (see [`DEFAULT_JOB_TOMBSTONE_TTL`]).
+    pub fn with_job_tombstone_ttl(mut self, ttl: Duration) -> Self {
+        self.job_tombstone_ttl = ttl;
+        self
+    }
+
+    /// Override how long a delete marker lingers after a job tombstone
+    /// expires (see [`JOB_DELETE_MARKER_TTL`]). Test-only.
+    #[cfg(feature = "test-util")]
+    pub fn with_job_delete_marker_ttl(mut self, ttl: Duration) -> Self {
+        self.job_delete_marker_ttl = Some(ttl);
+        self
+    }
+
+    fn job_delete_marker_ttl(&self) -> Duration {
+        self.job_delete_marker_ttl.unwrap_or(JOB_DELETE_MARKER_TTL)
     }
 
     /// Override the client's per-subscription buffer size. Test-only;
@@ -144,7 +182,7 @@ impl NatsStore {
     /// **File** storage -- a config `get_or_create_bucket` cannot reconcile
     /// via `update_key_value` (NATS rejects storage-type changes on an
     /// existing stream). Simulates reconciliation itself failing, exercising
-    /// `purge_user_slot`'s fallback path instead of the update path.
+    /// `purge_expiring`'s fallback path instead of the update path.
     #[cfg(feature = "test-util")]
     pub async fn debug_precreate_incompatible_user_limits_bucket(&self) -> Result<(), DbError> {
         self.debug_precreate_user_limits_bucket_with_storage(
@@ -158,19 +196,41 @@ impl NatsStore {
         &self,
         storage: async_nats::jetstream::stream::StorageType,
     ) -> Result<(), DbError> {
+        self.debug_precreate_bucket(&self.user_limits_bucket, storage)
+            .await
+    }
+
+    /// Test-only: create the jobs bucket using its pre-TTL-fix shape (file
+    /// storage, no `limit_markers`). Same purpose as
+    /// [`Self::debug_precreate_legacy_user_limits_bucket`].
+    #[cfg(feature = "test-util")]
+    pub async fn debug_precreate_legacy_jobs_bucket(&self) -> Result<(), DbError> {
+        self.debug_precreate_bucket(
+            &self.jobs_bucket,
+            async_nats::jetstream::stream::StorageType::File,
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-util")]
+    async fn debug_precreate_bucket(
+        &self,
+        bucket: &str,
+        storage: async_nats::jetstream::stream::StorageType,
+    ) -> Result<(), DbError> {
         let client = async_nats::connect(&self.url)
             .await
             .map_err(|e| DbError::Backend(format!("NATS connect failed: {e}")))?;
         let js = jetstream::new(client);
         js.create_key_value(kv::Config {
-            bucket: self.user_limits_bucket.clone(),
+            bucket: bucket.to_string(),
             history: 1,
             num_replicas: self.num_replicas,
             storage,
             ..Default::default()
         })
         .await
-        .map_err(|e| DbError::Backend(format!("legacy user-limits bucket: {e}")))?;
+        .map_err(|e| DbError::Backend(format!("legacy bucket {bucket}: {e}")))?;
         Ok(())
     }
 
@@ -181,7 +241,18 @@ impl NatsStore {
     /// space in the stream.
     #[cfg(feature = "test-util")]
     pub async fn debug_user_limits_stream_message_count(&self) -> Result<u64, DbError> {
-        let store = self.user_limits().await?;
+        Self::debug_stream_message_count(self.user_limits().await?).await
+    }
+
+    /// Test-only: raw JetStream message count backing the jobs bucket,
+    /// including not-yet-expired purge tombstones.
+    #[cfg(feature = "test-util")]
+    pub async fn debug_jobs_stream_message_count(&self) -> Result<u64, DbError> {
+        Self::debug_stream_message_count(self.jobs().await?).await
+    }
+
+    #[cfg(feature = "test-util")]
+    async fn debug_stream_message_count(store: &kv::Store) -> Result<u64, DbError> {
         let info = store
             .stream
             .info_with_subjects(format!("{}>", store.prefix))
@@ -318,7 +389,7 @@ impl NatsStore {
         }
     }
 
-    /// Purge a user-limit slot's key, preferring a self-expiring tombstone
+    /// Purge `key`, preferring a self-expiring tombstone
     /// (`purge_with_ttl`) but falling back to a plain, permanent `purge` if
     /// that fails for *any* reason.
     ///
@@ -334,7 +405,7 @@ impl NatsStore {
     /// onto a pre-existing bucket is safe immediately: releases keep working
     /// as before (permanent tombstone) until NATS restarts, at which point
     /// TTL self-expiry starts working automatically.
-    async fn purge_user_slot(store: &kv::Store, key: &str, ttl: Duration) -> Result<(), DbError> {
+    async fn purge_expiring(store: &kv::Store, key: &str, ttl: Duration) -> Result<(), DbError> {
         if let Err(ttl_err) = store.purge_with_ttl(key, ttl).await {
             tracing::warn!(
                 key = %key,
@@ -345,7 +416,7 @@ impl NatsStore {
             store
                 .purge(key)
                 .await
-                .map_err(|e| DbError::Backend(format!("purge user slot (fallback): {e}")))?;
+                .map_err(|e| DbError::Backend(format!("purge {key} (fallback): {e}")))?;
         }
         Ok(())
     }
@@ -434,7 +505,7 @@ impl NatsStore {
         job_id: &str,
     ) -> Result<(), DbError> {
         let store = self.user_limits().await?;
-        Self::purge_user_slot(
+        Self::purge_expiring(
             store,
             &Self::user_slot_key(scope, user, job_id),
             self.user_limit_tombstone_ttl(),
@@ -565,7 +636,7 @@ impl NatsStore {
             if e.operation == kv::Operation::Put {
                 let ent: UserLimitEntry = Self::deserialize(&e.value)?;
                 if !live.contains(&ent.owner_broker_id) {
-                    Self::purge_user_slot(ul, &e.key, self.user_limit_tombstone_ttl()).await?;
+                    Self::purge_expiring(ul, &e.key, self.user_limit_tombstone_ttl()).await?;
                     removed += 1;
                 }
             }

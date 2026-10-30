@@ -147,6 +147,30 @@ routes:
 }
 
 #[test]
+fn sub_second_jobs_tombstone_ttl_produces_config_validation() {
+    let config = r#"
+bits:
+  site: tst
+  env: dev
+  persistence:
+    type: nats
+    url: nats://127.0.0.1:4222
+    jobs_tombstone_ttl_secs: 0.5
+routes:
+  - default: []
+"#;
+    let err = must_fail(config);
+    assert!(
+        matches!(
+            err,
+            BitsError::Config(ConfigError::Validation { ref path, .. })
+            if path.contains("jobs_tombstone_ttl_secs")
+        ),
+        "expected Config(Validation) for jobs_tombstone_ttl_secs, got {err:?}"
+    );
+}
+
+#[test]
 fn routes_as_map_produces_routing_error() {
     let _ = common::TargetDummyDelay::new(0);
 

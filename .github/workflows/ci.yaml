@@ -98,4 +98,4 @@ jobs:
           NO_PROXY: "127.0.0.1,localhost"
         run: |
           unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
-          cargo test -p bits --features nats -- --test-threads=1
+          cargo test -p bits --features nats,test-util -- --test-threads=1

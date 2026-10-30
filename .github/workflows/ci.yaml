@@ -99,3 +99,43 @@ jobs:
         run: |
           unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
           cargo test -p bits --features nats,test-util -- --test-threads=1
+
+  bits-py:
+    # bits-py is excluded from the workspace test run above: it is a PyO3
+    # extension module, so it has to be built with maturin and exercised
+    # from Python.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build bits-py and run Python tests
+        env:
+          NO_PROXY: "127.0.0.1,localhost"
+        run: |
+          unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install 'maturin>=1.14,<2' 'pytest>=9,<10' 'pytest-asyncio>=1.4,<2'
+          maturin develop -m bits-py/Cargo.toml
+          pytest bits-py/tests -v
+
+      - name: Run Python examples
+        run: |
+          source .venv/bin/activate
+          for example in hello_bits custom_check custom_target custom_transform; do
+            echo "::group::${example}"
+            python "bits-py/examples/${example}.py"
+            echo "::endgroup::"
+          done

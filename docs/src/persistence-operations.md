@@ -32,6 +32,7 @@ All options live under the `bits:` key in your YAML config file.
 | `jobs_bucket` | string | `"bits-jobs"` | *(nats only)* KV bucket name for job records. |
 | `leases_bucket` | string | `"bits-leases"` | *(nats only)* KV bucket name for broker leases. |
 | `num_replicas` | integer | `1` | *(nats only)* JetStream replication factor. Use 3 for production. |
+| `jobs_tombstone_ttl_secs` | float | `86400.0` | *(nats only)* How long a finished job's delete tombstone is kept before NATS expires it. Minimum 1. |
 | `endpoints` | list of strings | *(tikv only, required)* | TiKV PD endpoints, e.g. `["pd:2379"]`. |
 
 ## Request IDs and ownership

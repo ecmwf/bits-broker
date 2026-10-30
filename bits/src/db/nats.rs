@@ -279,12 +279,16 @@ impl NatsStore {
                     .map_err(|e| DbError::Backend(format!("NATS connect failed: {e}")))?;
                     let js = jetstream::new(client);
 
+                    // `limit_markers` enables per-message TTL so `delete_job`'s
+                    // tombstones expire. No `max_age`: live records and the
+                    // broker-slot counter must never expire.
                     let jobs = Self::get_or_create_bucket(
                         &js,
                         kv::Config {
                             bucket: self.jobs_bucket.clone(),
                             history: 1,
                             num_replicas: self.num_replicas,
+                            limit_markers: Some(self.job_delete_marker_ttl()),
                             ..Default::default()
                         },
                     )
@@ -764,12 +768,7 @@ impl JobStore for NatsStore {
 
     async fn delete_job(&self, job_id: &str) -> Result<(), DbError> {
         let key = Self::job_key(job_id)?;
-        self.jobs()
-            .await?
-            .purge(&key)
-            .await
-            .map_err(|e| DbError::Backend(format!("purge job: {e}")))?;
-        Ok(())
+        Self::purge_expiring(self.jobs().await?, &key, self.job_tombstone_ttl).await
     }
 
     async fn claim_if_owner(

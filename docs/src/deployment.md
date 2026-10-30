@@ -127,6 +127,7 @@ bits:
 | `broker_lease_ttl_secs` | Lease TTL in seconds (default: 30) |
 | `connect_timeout_secs` | Timeout per connection attempt in seconds (default: 10) |
 | `init_max_attempts` | Startup retry attempts with exponential backoff (default: 6) |
+| `jobs_tombstone_ttl_secs` | How long a finished job's delete tombstone stays in the jobs bucket before NATS expires it (default: 86400, minimum 1). Requires NATS server 2.11+. |
 
 ### TiKV
 
@@ -624,6 +625,7 @@ bits:
     num_replicas: 3
     connect_timeout_secs: 10     # per-attempt connection timeout (default 10)
     init_max_attempts: 6         # startup retry attempts with backoff (default 6)
+    jobs_tombstone_ttl_secs: 86400  # expiry for finished-job tombstones (default 24h)
 
   # Worker server for remote pools (internal only)
   worker_server:

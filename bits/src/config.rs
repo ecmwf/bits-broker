@@ -230,6 +230,8 @@ enum PersistenceConfig {
         connect_timeout_secs: Option<f64>,
         #[serde(default)]
         init_max_attempts: Option<u32>,
+        #[serde(default)]
+        jobs_tombstone_ttl_secs: Option<f64>,
     },
 }
 
@@ -590,6 +592,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                 num_replicas,
                 connect_timeout_secs,
                 init_max_attempts,
+                jobs_tombstone_ttl_secs,
             }) => {
                 if url.is_empty() {
                     return Err(ConfigError::validation(
@@ -636,6 +639,24 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                     }
                     None => Duration::from_secs(10),
                 };
+                let jobs_tombstone_ttl = match jobs_tombstone_ttl_secs {
+                    Some(secs) => {
+                        let ttl = positive_duration_secs(
+                            "bits.persistence.jobs_tombstone_ttl_secs",
+                            secs,
+                        )?;
+                        // NATS per-message TTLs have one-second granularity.
+                        if ttl < Duration::from_secs(1) {
+                            return Err(ConfigError::validation(
+                                "bits.persistence.jobs_tombstone_ttl_secs",
+                                "must be at least 1 second",
+                            )
+                            .into());
+                        }
+                        Some(ttl)
+                    }
+                    None => None,
+                };
                 let max_attempts = init_max_attempts.unwrap_or(6);
                 if max_attempts < 1 {
                     return Err(ConfigError::validation(
@@ -649,6 +670,7 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                     if let Some(secs) = connect_timeout_secs {
                         positive_duration_secs("bits.persistence.connect_timeout_secs", secs)?;
                     }
+                    let _ = jobs_tombstone_ttl;
                     return Err(ConfigError::FeatureDisabled {
                         path: "bits.persistence.type".into(),
                         feature: "nats".into(),
@@ -665,6 +687,10 @@ pub fn parse_bootstrap(config: &str) -> Result<Bootstrap, BitsError> {
                         num_replicas,
                         connect_timeout,
                     );
+                    let store = match jobs_tombstone_ttl {
+                        Some(ttl) => store.with_job_tombstone_ttl(ttl),
+                        None => store,
+                    };
                     let handle = tokio::runtime::Handle::try_current().map_err(|_| {
                         ConfigError::validation(
                             "bits.persistence.type",

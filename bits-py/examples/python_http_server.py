@@ -25,9 +25,9 @@ bits:
   site: tst
   env: dev
 routes:
-  default:
-    - target::http:
-        url: http://localhost:8081
+  - default:
+      - target::http:
+          url: http://localhost:8081
 """
 
 

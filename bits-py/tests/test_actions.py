@@ -60,8 +60,8 @@ targets:
   t:
     type: {target_type}
 routes:
-  only:
-    - target::t
+  - only:
+      - target::t
 """
 
 
@@ -78,9 +78,9 @@ targets:
   echo:
     type: {target_type}
 routes:
-  only:
-    - check::gate
-    - target::echo
+  - only:
+      - check::gate
+      - target::echo
 """
 
 
@@ -250,10 +250,10 @@ checks:
   gate:
     type: {check_name}
 routes:
-  only:
-    - check::gate
-    - target::http:
-        url: http://localhost:19999
+  - only:
+      - check::gate
+      - target::http:
+          url: http://localhost:19999
 """
         bits = await Bits.from_config(config)
         job_id = await bits.submit({})
@@ -338,9 +338,9 @@ targets:
   cap:
     type: {target_name}
 routes:
-  only:
-    - transform::adder
-    - target::cap
+  - only:
+      - transform::adder
+      - target::cap
 """
         bits = await Bits.from_config(config)
         job_id = await bits.submit({"original": True})
@@ -386,9 +386,9 @@ targets:
   meta_cap:
     type: {target_name}
 routes:
-  only:
-    - transform::tagger
-    - target::meta_cap
+  - only:
+      - transform::tagger
+      - target::meta_cap
 """
         bits = await Bits.from_config(config)
         job_id = await bits.submit({})
@@ -415,10 +415,10 @@ transforms:
   blocker:
     type: {transform_name}
 routes:
-  only:
-    - transform::blocker
-    - target::http:
-        url: http://localhost:19999
+  - only:
+      - transform::blocker
+      - target::http:
+          url: http://localhost:19999
 """
         bits = await Bits.from_config(config)
         job_id = await bits.submit({})
@@ -588,8 +588,8 @@ targets:
     greeting: hi
     count: 3
 routes:
-  only:
-    - target::t
+  - only:
+      - target::t
 """
         bits = await Bits.from_config(config)
         job_id = await bits.submit({})
@@ -636,9 +636,9 @@ targets:
   t:
     type: {target_name}
 routes:
-  only:
-    - check::gate
-    - target::t
+  - only:
+      - check::gate
+      - target::t
 """
         bits = await Bits.from_config(config)
         # Submit with no user → no roles → Reject

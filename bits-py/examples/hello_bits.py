@@ -30,9 +30,9 @@ bits:
   site: tst
   env: dev
 routes:
-  default:
-    - target::echo:
-        label: hello
+  - default:
+      - target::echo:
+          label: hello
 """
 
 
